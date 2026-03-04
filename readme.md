@@ -298,7 +298,13 @@ curl http://localhost:8000/v1/images/edits \
 |  | `filter_tags` | 过滤标签 | 自动过滤 Grok 响应中的特殊标签。 | `["xaiartifact", "xai:tool_usage_card", "grok:render"]` |
 | **proxy** | `base_proxy_url` | 基础代理 URL | 代理请求到 Grok 官网的基础服务地址。 | `""` |
 |  | `asset_proxy_url` | 资源代理 URL | 代理请求到 Grok 官网的静态资源（图片/视频）地址。 | `""` |
-|  | `cf_clearance` | CF Clearance | Cloudflare 验证 Cookie，用于绕过反爬虫验证。 | `""` |
+|  | `cf_cookies` | CF Cookies | FlareSolverr 刷新写入的完整 Cookie 字符串。 | `""` |
+|  | `skip_proxy_ssl_verify` | 跳过代理 SSL 校验 | 代理使用自签名证书时启用（仅放行代理证书，目标站点仍校验）。 | `false` |
+|  | `enabled` | CF 自动刷新 | 是否启用 CF 自动刷新。 | `false` |
+|  | `flaresolverr_url` | FlareSolverr 地址 | FlareSolverr 服务的 HTTP 地址。 | `""` |
+|  | `refresh_interval` | 刷新间隔 | 自动刷新 cf_clearance 间隔（秒）。 | `3600` |
+|  | `timeout` | 挑战超时 | CF 挑战等待超时（秒）。 | `60` |
+|  | `cf_clearance` | CF Clearance | Cloudflare 验证 Cookie。 | `""` |
 |  | `browser` | 浏览器指纹 | curl_cffi 浏览器指纹标识（如 chrome136）。 | `chrome136` |
 |  | `user_agent` | User-Agent | HTTP 请求的 User-Agent 字符串。 | `Mozilla/5.0 (Macintosh; ...)` |
 | **voice** | `timeout` | 请求超时 | Voice 请求超时时间（秒）。 | `120` |
