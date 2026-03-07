@@ -96,11 +96,12 @@ class UpstreamException(AppException):
         message: str,
         details: Any = None,
         status_code: int = 502,
+        code: str = "upstream_error",
     ):
         super().__init__(
             message=message,
             error_type=ErrorType.SERVER.value,
-            code="upstream_error",
+            code=code,
             status_code=status_code,
         )
         self.details = details

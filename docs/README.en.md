@@ -266,6 +266,51 @@ curl http://localhost:8000/v1/images/edits \
 
 <br>
 
+### `POST /v1/videos`
+
+> Video generation endpoint (OpenAI videos.create compatible)
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-imagine-1.0-video",
+    "prompt": "Neon rainy street at night, cinematic slow tracking shot",
+    "size": "1792x1024",
+    "seconds": 18,
+    "quality": "standard"
+  }'
+```
+
+<details>
+<summary>Supported request parameters</summary>
+
+<br>
+
+| Field | Type | Description | Allowed values |
+| :-- | :-- | :-- | :-- |
+| `model` | string | Video model | `grok-imagine-1.0-video` |
+| `prompt` | string | Video prompt | - |
+| `size` | string | Frame size (mapped to aspect_ratio) | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
+| `seconds` | integer | Target duration (seconds) | `6` ~ `30` |
+| `quality` | string | Video quality (mapped to resolution) | `standard`, `high` |
+| `image_reference` | object/string | Reference image (optional) | `{"image_url":"https://..."}` or Data URI |
+| `input_reference` | file | multipart reference image (optional) | `png`, `jpg`, `webp` |
+
+**Notes**:
+
+- Server-side chain extension now supports 6~30 seconds automatically, so **`/v1/video/extend` is not required**.
+- `quality=standard` maps to `480p`; `quality=high` maps to `720p`.
+- For basic-pool requests at `720p`, generation falls back to `480p` first, then upscales according to `video.upscale_timing`.
+- If both `image_reference` and `input_reference` are provided, references are processed in order; the video pipeline uses the first image only.
+
+<br>
+
+</details>
+
+<br>
+
 ## Configuration
 
 Config file: `data/config.toml`
@@ -317,8 +362,28 @@ Config file: `data/config.toml`
 |  | `save_delay_ms` | Save delay | Merge write delay (ms). | `500` |
 |  | `reload_interval_sec` | Reload interval | Multi-worker token reload interval (seconds). | `30` |
 | **cache** | `enable_auto_clean` | Auto clean | Enable cache auto cleanup. | `true` |
-|  | `limit_mb` | Size limit | Cleanup threshold (MB). | `1024` |
-| **asset** | `upload_concurrent` | Upload concurrency | Max upload concurrency (recommended 30). | `30` |
+|  | `limit_mb` | Size limit | Cleanup threshold (MB). | `512` |
+| **chat** | `concurrent` | Concurrency | Reverse chat concurrency limit. | `50` |
+|  | `timeout` | Timeout | Reverse chat timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream timeout | Stream idle timeout (seconds). | `60` |
+| **image** | `timeout` | Timeout | WebSocket timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream timeout | WS stream idle timeout (seconds). | `60` |
+|  | `final_timeout` | Final timeout | Seconds to wait for final image. | `15` |
+|  | `blocked_grace_seconds` | Blocked grace | Grace seconds for suspected moderation. | `10` |
+|  | `nsfw` | NSFW | Enable NSFW. | `true` |
+|  | `medium_min_bytes` | Medium min bytes | Min bytes for medium image. | `30000` |
+|  | `final_min_bytes` | Final min bytes | Min bytes for final image. | `100000` |
+|  | `blocked_parallel_attempts` | Parallel attempts | Parallel retries on suspected block. | `5` |
+|  | `blocked_parallel_enabled` | Parallel enabled | Enable parallel retries. | `true` |
+| **imagine_fast** | `n` | Count | Applies to grok-imagine-1.0-fast only. | `1` |
+|  | `size` | Size | `1280x720` / `720x1280` / `1792x1024` / `1024x1792` / `1024x1024` | `1024x1024` |
+|  | `response_format` | Response format | `url` / `b64_json` / `base64` | `url` |
+| **video** | `concurrent` | Concurrency | Reverse video concurrency limit. | `100` |
+|  | `timeout` | Timeout | Reverse video timeout (seconds). | `60` |
+|  | `stream_timeout` | Stream timeout | Stream idle timeout (seconds). | `60` |
+|  | `upscale_timing` | Upscale timing | Basic-pool 720p upscale mode: `single` (after each extension round) / `complete` (after all rounds). | `complete` |
+| **voice** | `timeout` | Timeout | Voice request timeout (seconds). | `60` |
+| **asset** | `upload_concurrent` | Upload concurrency | Upload concurrency. | `100` |
 |  | `upload_timeout` | Upload timeout | Upload timeout (seconds). | `60` |
 |  | `download_concurrent` | Download concurrency | Max download concurrency (recommended 30). | `30` |
 |  | `download_timeout` | Download timeout | Download timeout (seconds). | `60` |

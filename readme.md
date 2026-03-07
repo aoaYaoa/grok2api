@@ -271,6 +271,51 @@ curl http://localhost:8000/v1/images/edits \
 
 <br>
 
+### `POST /v1/videos`
+
+> 视频生成接口（OpenAI videos.create 兼容）
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -d '{
+    "model": "grok-imagine-1.0-video",
+    "prompt": "霓虹雨夜街头，慢镜头追拍",
+    "size": "1792x1024",
+    "seconds": 18,
+    "quality": "standard"
+  }'
+```
+
+<details>
+<summary>支持的请求参数</summary>
+
+<br>
+
+| 字段 | 类型 | 说明 | 可用参数 |
+| :-- | :-- | :-- | :-- |
+| `model` | string | 视频模型名 | `grok-imagine-1.0-video` |
+| `prompt` | string | 视频提示词 | - |
+| `size` | string | 画面比例（会映射到 aspect_ratio） | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
+| `seconds` | integer | 目标时长（秒） | `6` ~ `30` |
+| `quality` | string | 视频质量（映射到 resolution） | `standard`, `high` |
+| `image_reference` | object/string | 参考图（可选） | `{"image_url":"https://..."}` 或 Data URI |
+| `input_reference` | file | multipart 参考图（可选） | `png`, `jpg`, `webp` |
+
+**注意事项**：
+
+- 服务端已支持 6~30 秒自动链式扩展，**无需使用 `/v1/video/extend`**。
+- `quality=standard` 对应 `480p`；`quality=high` 对应 `720p`。
+- 基础号池请求 `720p` 时会先产出 `480p` 再按 `video.upscale_timing` 执行超分。
+- `image_reference` 与 `input_reference` 同时传入时，会按顺序作为参考图输入；视频链路只使用第 1 张。
+
+<br>
+
+</details>
+
+<br>
+
 ## 参数配置
 
 配置文件：`data/config.toml`
@@ -288,6 +333,8 @@ curl http://localhost:8000/v1/images/edits \
 | **app** | `app_url` | 应用地址 | 当前 Grok2API 服务的外部访问 URL，用于文件链接访问。 | `http://127.0.0.1:8000` |
 |  | `app_key` | 后台密码 | 登录 Grok2API 管理后台的密码（必填）。 | `grok2api` |
 |  | `api_key` | API 密钥 | 调用 Grok2API 服务的 Token（可选）。 | `""` |
+|  | `public_enabled` | 功能玩法开关 | 是否启用功能玩法入口（关闭则功能玩法页面不可访问）。 | `false` |
+|  | `public_key` | Public 密码 | 功能玩法页面的访问密码（可选）。 | `""` |
 |  | `image_format` | 图片格式 | 生成的图片格式（url 或 base64）。 | `url` |
 |  | `video_format` | 视频格式 | 生成的视频格式（html 或 url，url 为处理后的链接）。 | `html` |
 |  | `temporary` | 临时对话 | 是否启用临时对话模式。 | `true` |
@@ -333,23 +380,43 @@ curl http://localhost:8000/v1/images/edits \
 |  | `save_delay_ms` | 保存延迟 | Token 变更合并写入的延迟（毫秒）。 | `500` |
 |  | `reload_interval_sec` | 同步间隔 | 多 worker 场景下 Token 状态刷新间隔（秒）。 | `30` |
 | **cache** | `enable_auto_clean` | 自动清理 | 是否启用缓存自动清理，开启后按上限自动回收。 | `true` |
-|  | `limit_mb` | 清理阈值 | 缓存大小阈值（MB），超过阈值会触发清理。 | `1024` |
-| **asset** | `upload_concurrent` | 上传并发 | 上传接口的最大并发数。推荐 30。 | `30` |
-|  | `upload_timeout` | 上传超时 | 上传接口超时时间（秒）。推荐 60。 | `60` |
-|  | `download_concurrent` | 下载并发 | 下载接口的最大并发数。推荐 30。 | `30` |
-|  | `download_timeout` | 下载超时 | 下载接口超时时间（秒）。推荐 60。 | `60` |
-|  | `list_concurrent` | 查询并发 | 资产查询接口的最大并发数。推荐 10。 | `10` |
-|  | `list_timeout` | 查询超时 | 资产查询接口超时时间（秒）。推荐 60。 | `60` |
-|  | `list_batch_size` | 查询批次大小 | 单次查询可处理的 Token 数量。推荐 10。 | `10` |
-|  | `delete_concurrent` | 删除并发 | 资产删除接口的最大并发数。推荐 10。 | `10` |
-|  | `delete_timeout` | 删除超时 | 资产删除接口超时时间（秒）。推荐 60。 | `60` |
-|  | `delete_batch_size` | 删除批次大小 | 单次删除可处理的 Token 数量。推荐 10。 | `10` |
-| **nsfw** | `concurrent` | 并发上限 | 批量开启 NSFW 模式时的并发请求上限。推荐 10。 | `10` |
-|  | `batch_size` | 批次大小 | 批量开启 NSFW 模式的单批处理数量。推荐 50。 | `50` |
-|  | `timeout` | 请求超时 | NSFW 开启相关请求的超时时间（秒）。推荐 60。 | `60` |
-| **usage** | `concurrent` | 并发上限 | 批量刷新用量时的并发请求上限。推荐 10。 | `10` |
-|  | `batch_size` | 批次大小 | 批量刷新用量的单批处理数量。推荐 50。 | `50` |
-|  | `timeout` | 请求超时 | 用量查询接口的超时时间（秒）。推荐 60。 | `60` |
+|  | `limit_mb` | 清理阈值 | 缓存大小阈值（MB），超过阈值会触发清理。 | `512` |
+| **chat** | `concurrent` | 并发上限 | Reverse 接口并发上限。 | `50` |
+|  | `timeout` | 请求超时 | Reverse 接口超时时间（秒）。 | `60` |
+|  | `stream_timeout` | 流空闲超时 | 流式空闲超时时间（秒）。 | `60` |
+| **image** | `timeout` | 请求超时 | WebSocket 请求超时时间（秒）。 | `60` |
+|  | `stream_timeout` | 流空闲超时 | WebSocket 流式空闲超时时间（秒）。 | `60` |
+|  | `final_timeout` | 最终图超时 | 收到中等图后等待最终图的超时秒数。 | `15` |
+|  | `blocked_grace_seconds` | 审查宽限秒数 | 收到中等图后，判定疑似被审查的宽限秒数。 | `10` |
+|  | `nsfw` | NSFW 模式 | WebSocket 请求是否启用 NSFW。 | `true` |
+|  | `medium_min_bytes` | 中等图最小字节 | 判定中等质量图的最小字节数。 | `30000` |
+|  | `final_min_bytes` | 最终图最小字节 | 判定最终图的最小字节数（通常 JPG > 100KB）。 | `100000` |
+|  | `blocked_parallel_attempts` | 并行补偿次数 | 遇到疑似审查/拦截时的并行补偿生成次数。 | `5` |
+|  | `blocked_parallel_enabled` | 并行补偿开关 | 是否启用并行补偿（启用时优先使用不同 token）。 | `true` |
+| **imagine_fast** | `n` | 生成数量 | 仅对 grok-imagine-1.0-fast 生效。 | `1` |
+|  | `size` | 图片尺寸 | `1280x720` / `720x1280` / `1792x1024` / `1024x1792` / `1024x1024` | `1024x1024` |
+|  | `response_format` | 响应格式 | `url` / `b64_json` / `base64` | `url` |
+| **video** | `concurrent` | 并发上限 | Reverse 接口并发上限。 | `100` |
+|  | `timeout` | 请求超时 | Reverse 接口超时时间（秒）。 | `60` |
+|  | `stream_timeout` | 流空闲超时 | 流式空闲超时时间（秒）。 | `60` |
+|  | `upscale_timing` | 超分时机 | Basic 号池 720p 超分模式：`single`（每轮扩展后超分）/ `complete`（所有扩展后超分）。 | `complete` |
+| **voice** | `timeout` | 请求超时 | Voice 请求超时时间（秒）。 | `60` |
+| **asset** | `upload_concurrent` | 上传并发 | 上传接口的最大并发数。 | `100` |
+|  | `upload_timeout` | 上传超时 | 上传接口超时时间（秒）。 | `60` |
+|  | `download_concurrent` | 下载并发 | 下载接口的最大并发数。 | `100` |
+|  | `download_timeout` | 下载超时 | 下载接口超时时间（秒）。 | `60` |
+|  | `list_concurrent` | 查询并发 | 资产查询接口的最大并发数。 | `100` |
+|  | `list_timeout` | 查询超时 | 资产查询接口超时时间（秒）。 | `60` |
+|  | `list_batch_size` | 查询批次大小 | 单次查询可处理的 Token 数量。 | `50` |
+|  | `delete_concurrent` | 删除并发 | 资产删除接口的最大并发数。 | `100` |
+|  | `delete_timeout` | 删除超时 | 资产删除接口超时时间（秒）。 | `60` |
+|  | `delete_batch_size` | 删除批次大小 | 单次删除可处理的 Token 数量。 | `50` |
+| **nsfw** | `concurrent` | 并发上限 | 批量开启 NSFW 模式时的并发请求上限。 | `60` |
+|  | `batch_size` | 批次大小 | 批量开启 NSFW 模式的单批处理数量。 | `30` |
+|  | `timeout` | 请求超时 | NSFW 开启相关请求的超时时间（秒）。 | `60` |
+| **usage** | `concurrent` | 并发上限 | 批量刷新用量时的并发请求上限。 | `100` |
+|  | `batch_size` | 批次大小 | 批量刷新用量的单批处理数量。 | `50` |
+|  | `timeout` | 请求超时 | 用量查询接口的超时时间（秒）。 | `60` |
 
 <br>
 
