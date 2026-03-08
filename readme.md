@@ -109,7 +109,6 @@ docker compose up -d --build grok2api
 | `grok-3-mini` | 1 | Basic/Super | 支持 | 支持 | - |
 | `grok-3-thinking` | 1 | Basic/Super | 支持 | 支持 | - |
 | `grok-4` | 1 | Basic/Super | 支持 | 支持 | - |
-| `grok-4-mini` | 1 | Basic/Super | 支持 | 支持 | - |
 | `grok-4-thinking` | 1 | Basic/Super | 支持 | 支持 | - |
 | `grok-4-heavy` | 4 | Super | 支持 | 支持 | - |
 | `grok-4.1-mini` | 1 | Basic/Super | 支持 | 支持 | - |

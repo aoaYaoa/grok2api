@@ -104,7 +104,6 @@ APP_ASSET_VERSION=20260308b docker compose up -d --build grok2api
 | `grok-3-mini` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-3-thinking` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4` | 1 | Basic/Super | Yes | Yes | - |
-| `grok-4-mini` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4-thinking` | 1 | Basic/Super | Yes | Yes | - |
 | `grok-4-heavy` | 4 | Super | Yes | Yes | - |
 | `grok-4.1-mini` | 1 | Basic/Super | Yes | Yes | - |
