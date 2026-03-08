@@ -112,11 +112,81 @@ def _build_imagine_public_url(parent_post_id: str) -> str:
     return f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
 
 
+def _resolve_parent_source_image_url(parent_post_id: str, source_image_url: Optional[str]) -> Optional[str]:
+    explicit = str(source_image_url or "").strip() or None
+    if explicit:
+        return explicit
+    parent_id = str(parent_post_id or "").strip()
+    if not parent_id:
+        return explicit
+    return _build_imagine_public_url(parent_id)
+
+
 def _mask_token(token: str) -> str:
     raw = str(token or "").replace("sso=", "")
     if len(raw) <= 12:
         return raw or "-"
     return f"{raw[:6]}...{raw[-6:]}"
+
+
+def _drain_stream_task(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+    except Exception:
+        pass
+
+
+async def _close_async_iterator(iterator: Any, timeout: float = 0.2) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        close_task = asyncio.create_task(aclose())
+        close_task.add_done_callback(_drain_stream_task)
+        done, _ = await asyncio.wait(
+            {close_task},
+            timeout=max(0.0, timeout),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if close_task not in done:
+            close_task.cancel()
+    except Exception:
+        pass
+
+
+async def _with_sse_keepalive(stream: Any, interval_seconds: float = 15.0):
+    interval_seconds = max(0.01, float(interval_seconds or 15.0))
+    iterator = stream.__aiter__()
+    pending: asyncio.Task[Any] | None = None
+
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(iterator.__anext__())
+                pending.add_done_callback(_drain_stream_task)
+
+            done, _ = await asyncio.wait(
+                {pending},
+                timeout=interval_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if pending in done:
+                try:
+                    chunk = pending.result()
+                except StopAsyncIteration:
+                    break
+                pending = None
+                yield chunk
+                continue
+
+            yield ": keepalive\n\n"
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+        await _close_async_iterator(iterator)
+
 
 
 async def _clean_sessions(now: float) -> None:
@@ -299,8 +369,7 @@ async def public_video_start(data: VideoStartRequest):
     parent_post_id = _validate_parent_post_id(data.parent_post_id or "")
     source_image_url = (data.source_image_url or "").strip() or None
     if parent_post_id:
-        # parentPostId 链路强制使用 imagine-public，避免误用 assets.grok.com。
-        source_image_url = _build_imagine_public_url(parent_post_id)
+        source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     elif source_image_url:
         _validate_image_url(source_image_url)
 
@@ -419,7 +488,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
     parent_post_id = str(session.get("parent_post_id") or "").strip()
     source_image_url = str(session.get("source_image_url") or "").strip() or None
     if parent_post_id:
-        source_image_url = _build_imagine_public_url(parent_post_id)
+        source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     reasoning_effort = session.get("reasoning_effort")
     nsfw = bool(session.get("nsfw", True))
 
@@ -496,7 +565,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
                 nsfw=nsfw,
             )
 
-            async for chunk in stream:
+            async for chunk in _with_sse_keepalive(stream):
                 if await request.is_disconnected():
                     logger.info(f"Public video client disconnected: {task_id}")
                     break

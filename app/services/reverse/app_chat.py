@@ -36,6 +36,24 @@ def _is_transient_network_error(err: Exception) -> bool:
     return any(k in s for k in keywords)
 
 
+def _resolve_request_timeout(tool_overrides: Optional[Dict[str, Any]] = None) -> tuple[float, float]:
+    read_timeout = max(
+        float(get_config("chat.timeout") or 60.0),
+        float(get_config("video.timeout") or 60.0),
+        float(get_config("image.timeout") or 60.0),
+    )
+
+    if isinstance(tool_overrides, dict) and tool_overrides.get("videoGen"):
+        total_timeout = float(get_config("video.total_timeout") or 300.0)
+        read_timeout = max(read_timeout, total_timeout + 30.0)
+
+    connect_timeout = float(
+        get_config("chat.connect_timeout")
+        or min(max(read_timeout, 1.0), 12.0)
+    )
+    return connect_timeout, read_timeout
+
+
 class AppChatReverse:
     """/rest/app-chat/conversations/new reverse interface."""
 
@@ -158,17 +176,9 @@ class AppChatReverse:
             )
 
             # Curl Config
-            base_timeout = max(
-                float(get_config("chat.timeout") or 60.0),
-                float(get_config("video.timeout") or 60.0),
-                float(get_config("image.timeout") or 60.0),
-            )
-            connect_timeout = float(
-                get_config("chat.connect_timeout")
-                or min(max(base_timeout, 1.0), 12.0)
-            )
-            # curl_cffi 支持 (connect_timeout, read_timeout)；流读取阶段仍由上层 idle timeout 控制。
-            timeout = (connect_timeout, base_timeout)
+            connect_timeout, read_timeout = _resolve_request_timeout(tool_overrides)
+            # curl_cffi 支持 (connect_timeout, read_timeout)；流读取阶段由业务层总超时接管。
+            timeout = (connect_timeout, read_timeout)
             browser = get_config("proxy.browser")
 
             async def _do_request():

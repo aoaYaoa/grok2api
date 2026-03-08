@@ -3,6 +3,7 @@ Grok video generation service.
 """
 
 import asyncio
+import inspect
 import math
 import re
 import time
@@ -237,6 +238,91 @@ def _append_unique_errors(bucket: List[Any], raw_errors: Any):
             bucket.append(text)
 
 
+def _resolve_video_total_timeout() -> float:
+    raw = get_config("video.total_timeout", 300)
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        value = 300.0
+    return max(0.0, value)
+
+
+def _remaining_before_deadline(deadline: Optional[float]) -> Optional[float]:
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _drain_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+    except Exception:
+        pass
+
+
+async def _best_effort_close_async_iterable(iterable: Any, *, timeout: float = 0.2) -> None:
+    aclose = getattr(iterable, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        result = aclose()
+        if not inspect.isawaitable(result):
+            return
+        close_task = asyncio.create_task(result)
+        close_task.add_done_callback(_drain_task_result)
+        done, _ = await asyncio.wait(
+            {close_task},
+            timeout=max(0.0, timeout),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if close_task not in done:
+            close_task.cancel()
+    except Exception:
+        pass
+
+
+async def _next_with_enforced_timeout(iterator: Any, *, timeout_seconds: float) -> Any:
+    if timeout_seconds <= 0:
+        return await iterator.__anext__()
+
+    next_task = asyncio.create_task(iterator.__anext__())
+    next_task.add_done_callback(_drain_task_result)
+    done, _ = await asyncio.wait(
+        {next_task},
+        timeout=timeout_seconds,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if next_task in done:
+        return next_task.result()
+
+    next_task.cancel()
+    await _best_effort_close_async_iterable(iterator)
+    raise asyncio.TimeoutError()
+
+
+def _build_video_total_timeout_exception(
+    *,
+    timeout_seconds: float,
+    source: str,
+    result: Optional[VideoRoundResult] = None,
+) -> UpstreamException:
+    payload = result or VideoRoundResult()
+    return UpstreamException(
+        message=f"Video stream total timeout after {timeout_seconds}s",
+        status_code=504,
+        details={
+            "type": "video_total_timeout",
+            "source": source,
+            "timeout_seconds": timeout_seconds,
+            "response_id": payload.response_id,
+            "last_progress": payload.last_progress,
+            "stream_errors": list(payload.stream_errors or []),
+        },
+    )
+
+
 def _extract_post_id_candidates(resp: Dict[str, Any]) -> List[Tuple[int, str]]:
     candidates: List[Tuple[int, str]] = []
 
@@ -302,14 +388,74 @@ async def _iter_round_events(
     *,
     model: str,
     source: str,
+    total_timeout: Optional[float] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     result = VideoRoundResult()
     idle_timeout = float(get_config("video.stream_timeout") or 60)
+    resolved_total_timeout = (
+        _resolve_video_total_timeout()
+        if total_timeout is None
+        else max(0.0, float(total_timeout or 0))
+    )
+    started_at = time.monotonic()
     iterator = None
 
     try:
-        iterator = _with_idle_timeout(response, idle_timeout, model)
-        async for raw_line in iterator:
+        iterator = response.__aiter__()
+        while True:
+            timeout_seconds = idle_timeout
+            timeout_reason = "idle"
+            remaining_total = None
+
+            if resolved_total_timeout > 0:
+                elapsed_total = time.monotonic() - started_at
+                remaining_total = resolved_total_timeout - elapsed_total
+                if remaining_total <= 0:
+                    logger.warning(
+                        "Video round total timeout reached before next event",
+                        extra={
+                            "model": model,
+                            "source": source,
+                            "timeout_seconds": resolved_total_timeout,
+                            "last_progress": result.last_progress,
+                            "stream_errors": result.stream_errors,
+                        },
+                    )
+                    raise _build_video_total_timeout_exception(
+                        timeout_seconds=resolved_total_timeout,
+                        source=source,
+                        result=result,
+                    )
+                if timeout_seconds <= 0 or remaining_total < timeout_seconds:
+                    timeout_seconds = remaining_total
+                    timeout_reason = "total"
+
+            try:
+                if timeout_seconds > 0:
+                    raw_line = await asyncio.wait_for(iterator.__anext__(), timeout=timeout_seconds)
+                else:
+                    raw_line = await iterator.__anext__()
+            except asyncio.TimeoutError:
+                if timeout_reason == "total":
+                    logger.warning(
+                        "Video round total timeout while waiting for event",
+                        extra={
+                            "model": model,
+                            "source": source,
+                            "timeout_seconds": resolved_total_timeout,
+                            "last_progress": result.last_progress,
+                            "stream_errors": result.stream_errors,
+                        },
+                    )
+                    raise _build_video_total_timeout_exception(
+                        timeout_seconds=resolved_total_timeout,
+                        source=source,
+                        result=result,
+                    )
+                raise StreamIdleTimeoutError(timeout_seconds)
+            except StopAsyncIteration:
+                break
+
             line = _normalize_line(raw_line)
             if not line:
                 continue
@@ -409,9 +555,15 @@ async def _collect_round_result(
     *,
     model: str,
     source: str,
+    total_timeout: Optional[float] = None,
 ) -> VideoRoundResult:
     result = VideoRoundResult()
-    async for event_type, payload in _iter_round_events(response, model=model, source=source):
+    async for event_type, payload in _iter_round_events(
+        response,
+        model=model,
+        source=source,
+        total_timeout=total_timeout,
+    ):
         if event_type == "done":
             result = payload
     return result
@@ -532,6 +684,12 @@ def _classify_video_error(exc: Exception) -> tuple[str, str, int]:
         or "'code': 3" in merged
     ):
         return ("视频生成被拒绝，请调整提示词或素材后重试", "video_rejected", 400)
+
+    if (
+        (isinstance(details, dict) and details.get("type") == "video_total_timeout")
+        or "total timeout" in merged
+    ):
+        return ("视频生成超时（5分钟），请稍后重试", "video_total_timeout", 504)
 
     if (
         "tls connect error" in merged
@@ -1473,6 +1631,7 @@ class VideoService:
             bound_token = await token_map.get_token(parent_post_id)
         if bound_token:
             preferred_token = bound_token
+        has_parent_token_binding = bool(bound_token or preferred_token)
 
         if preferred_token.startswith("sso="):
             preferred_token = preferred_token[4:]
@@ -1541,6 +1700,23 @@ class VideoService:
                     finally:
                         await upload_service.close()
 
+                active_parent_post_id = parent_post_id
+                active_source_image_url = source_image_url
+                active_image_url = image_url
+                if active_parent_post_id and (not has_parent_token_binding) and active_source_image_url:
+                    upload_service = UploadService()
+                    try:
+                        _, file_uri = await upload_service.upload_file(active_source_image_url, token)
+                        active_image_url = f"https://assets.grok.com/{file_uri}"
+                        active_source_image_url = active_image_url
+                        active_parent_post_id = None
+                        logger.warning(
+                            "Video parentPost fallback to uploaded source image: "
+                            f"parent_post_id={parent_post_id}, token={_token_tag(token)}, image_url={active_image_url}"
+                        )
+                    finally:
+                        await upload_service.close()
+
                 service = VideoService()
 
                 if extend_post_id and video_extension_start_time is not None:
@@ -1588,18 +1764,6 @@ class VideoService:
 
                 target_length = int(video_length or 6)
                 round_plan = _build_round_plan(target_length, is_super=is_super_pool)
-                message = VideoService._build_video_message(
-                    prompt=prompt,
-                    preset=preset,
-                    source_image_url=source_image_url or image_url or "",
-                )
-
-                if parent_post_id:
-                    seed_post_id = parent_post_id
-                elif image_url:
-                    seed_post_id = await service.create_image_post(token, image_url)
-                else:
-                    seed_post_id = await service.create_post(token, prompt)
 
                 model_info = ModelService.get(model)
                 effort = (
@@ -1608,12 +1772,12 @@ class VideoService:
                     else EffortType.LOW
                 )
 
-                if len(round_plan) == 1 and parent_post_id:
+                if len(round_plan) == 1 and active_parent_post_id:
                     response = await service.generate_from_parent_post(
                         token=token,
                         prompt=prompt,
-                        parent_post_id=parent_post_id,
-                        source_image_url=source_image_url or "",
+                        parent_post_id=active_parent_post_id,
+                        source_image_url=active_source_image_url or "",
                         aspect_ratio=aspect_ratio,
                         video_length=target_length,
                         resolution=generation_resolution,
@@ -1642,6 +1806,52 @@ class VideoService:
                         logger.warning(f"Failed to record video usage: {e}")
                     return result
 
+                if len(round_plan) == 1 and active_image_url:
+                    response = await service.generate_from_image(
+                        token=token,
+                        prompt=prompt,
+                        image_url=active_image_url,
+                        aspect_ratio=aspect_ratio,
+                        video_length=target_length,
+                        resolution=generation_resolution,
+                        preset=preset,
+                    )
+                    if is_stream:
+                        processor = VideoStreamProcessor(
+                            model,
+                            token,
+                            show_think,
+                            upscale_on_finish=should_upscale,
+                        )
+                        return wrap_stream_with_usage(
+                            processor.process(response), token_mgr, token, model
+                        )
+
+                    result = await VideoCollectProcessor(
+                        model, token, upscale_on_finish=should_upscale
+                    ).process(response)
+                    try:
+                        await token_mgr.consume(token, effort)
+                        logger.debug(
+                            f"Video completed, recorded usage (effort={effort.value})"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to record video usage: {e}")
+                    return result
+
+                message = VideoService._build_video_message(
+                    prompt=prompt,
+                    preset=preset,
+                    source_image_url=active_source_image_url or active_image_url or "",
+                )
+
+                if active_parent_post_id:
+                    seed_post_id = active_parent_post_id
+                elif active_image_url:
+                    seed_post_id = await service.create_image_post(token, active_image_url)
+                else:
+                    seed_post_id = await service.create_post(token, prompt)
+
                 async def _save_round_mapping(post_id: Optional[str]):
                     if post_id and token:
                         await token_map.save_mapping(post_id, token)
@@ -1654,23 +1864,23 @@ class VideoService:
                             details={"type": "invalid_round_plan", "round": plan.round_index},
                         )
 
-                    if parent_post_id:
+                    if active_parent_post_id:
                         return await service.generate_from_parent_post(
                             token=token,
                             prompt=prompt,
-                            parent_post_id=parent_post_id,
-                            source_image_url=source_image_url or "",
+                            parent_post_id=active_parent_post_id,
+                            source_image_url=active_source_image_url or "",
                             aspect_ratio=aspect_ratio,
                             video_length=plan.video_length,
                             resolution=generation_resolution,
                             preset=preset,
                         )
 
-                    if image_url:
+                    if active_image_url:
                         return await service.generate_from_image(
                             token=token,
                             prompt=prompt,
-                            image_url=image_url,
+                            image_url=active_image_url,
                             aspect_ratio=aspect_ratio,
                             video_length=plan.video_length,
                             resolution=generation_resolution,
@@ -1700,6 +1910,7 @@ class VideoService:
                     last_id: str,
                     original_id: Optional[str],
                     source: str,
+                    deadline_monotonic: Optional[float],
                 ) -> VideoRoundResult:
                     if plan.is_extension:
                         config_override = _build_round_config(
@@ -1719,13 +1930,22 @@ class VideoService:
                         )
                     else:
                         response = await _request_first_round_stream(plan)
-                    return await _collect_round_result(response, model=model, source=source)
+                    return await _collect_round_result(
+                        response,
+                        model=model,
+                        source=source,
+                        total_timeout=_remaining_before_deadline(deadline_monotonic),
+                    )
 
                 async def _stream_chain() -> AsyncGenerator[str, None]:
                     writer = _VideoChainSSEWriter(model, show_think)
+                    total_timeout = _resolve_video_total_timeout()
+                    deadline_monotonic = (
+                        time.monotonic() + total_timeout if total_timeout > 0 else None
+                    )
                     seed_id = seed_post_id
                     last_id = seed_id
-                    original_id: Optional[str] = None if parent_post_id else seed_id
+                    original_id: Optional[str] = None if active_parent_post_id else seed_id
                     final_result: Optional[VideoRoundResult] = None
 
                     try:
@@ -1754,6 +1974,7 @@ class VideoService:
                                 response,
                                 model=model,
                                 source=f"stream-round-{plan.round_index}",
+                                total_timeout=_remaining_before_deadline(deadline_monotonic),
                             ):
                                 if event_type == "progress":
                                     for chunk in writer.emit_progress(
@@ -1834,9 +2055,13 @@ class VideoService:
                         raise
 
                 async def _collect_chain() -> Dict[str, Any]:
+                    total_timeout = _resolve_video_total_timeout()
+                    deadline_monotonic = (
+                        time.monotonic() + total_timeout if total_timeout > 0 else None
+                    )
                     seed_id = seed_post_id
                     last_id = seed_id
-                    original_id: Optional[str] = None if parent_post_id else seed_id
+                    original_id: Optional[str] = None if active_parent_post_id else seed_id
                     final_result: Optional[VideoRoundResult] = None
 
                     for plan in round_plan:
@@ -1846,6 +2071,7 @@ class VideoService:
                             last_id=last_id,
                             original_id=original_id,
                             source=f"collect-round-{plan.round_index}",
+                            deadline_monotonic=deadline_monotonic,
                         )
 
                         _ensure_round_result(
@@ -2038,14 +2264,57 @@ class VideoStreamProcessor(BaseProcessor):
         self, response: AsyncIterable[bytes]
     ) -> AsyncGenerator[str, None]:
         """Process video stream response."""
-        idle_timeout = get_config("video.stream_timeout")
+        idle_timeout = float(get_config("video.stream_timeout") or 0)
+        total_timeout = _resolve_video_total_timeout()
+        started_at = time.monotonic()
         fallback_video_id = ""
         fallback_thumb = ""
         content_emitted = False
+        last_progress = None
+        stream_errors: List[Any] = []
+        iterator = response.__aiter__()
 
         try:
-            async for line in _with_idle_timeout(response, idle_timeout, self.model):
-                line = _normalize_line(line)
+            while True:
+                timeout_seconds = idle_timeout
+                timeout_reason = "idle"
+                if total_timeout > 0:
+                    remaining_total = total_timeout - (time.monotonic() - started_at)
+                    if remaining_total <= 0:
+                        raise _build_video_total_timeout_exception(
+                            timeout_seconds=total_timeout,
+                            source="video_stream_processor",
+                            result=VideoRoundResult(
+                                response_id=self.response_id or "",
+                                last_progress=last_progress,
+                                stream_errors=list(stream_errors),
+                            ),
+                        )
+                    if timeout_seconds <= 0 or remaining_total < timeout_seconds:
+                        timeout_seconds = remaining_total
+                        timeout_reason = "total"
+
+                try:
+                    raw_line = await _next_with_enforced_timeout(
+                        iterator,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    if timeout_reason == "total":
+                        raise _build_video_total_timeout_exception(
+                            timeout_seconds=total_timeout,
+                            source="video_stream_processor",
+                            result=VideoRoundResult(
+                                response_id=self.response_id or "",
+                                last_progress=last_progress,
+                                stream_errors=list(stream_errors),
+                            ),
+                        )
+                    raise StreamIdleTimeoutError(timeout_seconds)
+                except StopAsyncIteration:
+                    break
+
+                line = _normalize_line(raw_line)
                 if not line:
                     continue
                 try:
@@ -2058,6 +2327,8 @@ class VideoStreamProcessor(BaseProcessor):
 
                 if rid := resp.get("responseId"):
                     self.response_id = rid
+
+                _append_unique_errors(stream_errors, resp.get("streamErrors"))
 
                 if not self.role_sent:
                     yield self._sse(role="assistant")
@@ -2088,6 +2359,7 @@ class VideoStreamProcessor(BaseProcessor):
                     if thumb_from_stream:
                         fallback_thumb = thumb_from_stream
                     progress = video_resp.get("progress", 0)
+                    last_progress = progress
 
                     if is_thinking:
                         if not self.show_think:
@@ -2106,7 +2378,6 @@ class VideoStreamProcessor(BaseProcessor):
                         video_url = video_resp.get("videoUrl", "")
                         thumbnail_url = video_resp.get("thumbnailImageUrl", "")
 
-                        # [NEW] 记录生成的视频对应的 postId 与 token 以备延长
                         video_post_id = fallback_video_id or self._extract_video_id(video_url)
                         if video_post_id and self.token:
                             from app.services.grok.utils.asset_token_map import AssetTokenMap
@@ -2140,6 +2411,7 @@ class VideoStreamProcessor(BaseProcessor):
                     continue
 
                 elif model_resp := resp.get("modelResponse"):
+                    _append_unique_errors(stream_errors, model_resp.get("streamErrors"))
                     file_attachments = model_resp.get("fileAttachments", [])
                     if isinstance(file_attachments, list):
                         for fid in file_attachments:
@@ -2223,6 +2495,7 @@ class VideoStreamProcessor(BaseProcessor):
                 status_code=status,
             )
         finally:
+            await _best_effort_close_async_iterable(iterator)
             await self.close()
 
 

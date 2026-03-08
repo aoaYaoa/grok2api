@@ -315,6 +315,17 @@ async def _bind_image_token(parent_post_id: str, token: str) -> None:
             "created_at": now,
         }
 
+    try:
+        from app.services.grok.utils.asset_token_map import AssetTokenMap
+
+        token_map = await AssetTokenMap.get_instance()
+        await token_map.save_mapping(image_id, token_text)
+    except Exception as e:
+        logger.warning(
+            "Imagine image token persist failed: "
+            f"parent_post_id={image_id}, error={e}"
+        )
+
 
 async def _get_bound_image_token(parent_post_id: str) -> Optional[str]:
     image_id = _extract_parent_post_id_from_url(parent_post_id)
@@ -324,10 +335,31 @@ async def _get_bound_image_token(parent_post_id: str) -> Optional[str]:
     async with _IMAGINE_IMAGE_TOKENS_LOCK:
         await _clean_image_tokens(now)
         info = _IMAGINE_IMAGE_TOKENS.get(image_id)
-        if not info:
-            return None
-        token = str(info.get("token") or "").strip()
-        return token or None
+        if info:
+            token = str(info.get("token") or "").strip()
+            if token:
+                return token
+
+    try:
+        from app.services.grok.utils.asset_token_map import AssetTokenMap
+
+        token_map = await AssetTokenMap.get_instance()
+        token = str(await token_map.get_token(image_id) or "").strip()
+        if token:
+            async with _IMAGINE_IMAGE_TOKENS_LOCK:
+                await _clean_image_tokens(now)
+                _IMAGINE_IMAGE_TOKENS[image_id] = {
+                    "token": token,
+                    "created_at": now,
+                }
+            return token
+    except Exception as e:
+        logger.warning(
+            "Imagine image token restore failed: "
+            f"parent_post_id={image_id}, error={e}"
+        )
+
+    return None
 
 
 def _normalize_imagine_ratio(value: Optional[str]) -> str:

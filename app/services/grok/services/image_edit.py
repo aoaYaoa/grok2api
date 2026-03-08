@@ -101,6 +101,14 @@ def _normalize_fallback_image_url(url: str) -> str:
     return f"https://assets.grok.com/{raw}"
 
 
+def _is_retryable_upload_app_error(exc: Exception) -> bool:
+    if not isinstance(exc, AppException):
+        return False
+    if exc.status_code < 500:
+        return False
+    return exc.code in {"upload_network_error", "upload_failed"}
+
+
 class ImageEditService:
     """Image edit orchestration service."""
 
@@ -298,6 +306,21 @@ class ImageEditService:
                     )
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
+                        f"trying next token (attempt {attempt + 1}/{max_token_retries})"
+                    )
+                    continue
+                raise
+            except AppException as e:
+                last_error = e
+                if _is_retryable_upload_app_error(e) and attempt + 1 < max_token_retries:
+                    await self._emit_progress(
+                        progress_cb,
+                        "upload_retry_next_token",
+                        18,
+                        "图片上传失败，正在切换令牌重试",
+                    )
+                    logger.warning(
+                        f"Token {current_token[:10]}... upload failed with code={e.code}, "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
