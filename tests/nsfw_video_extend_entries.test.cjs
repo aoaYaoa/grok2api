@@ -90,3 +90,23 @@ test('video preview placeholders show percentage progress during generation and 
   assert.match(videoJs, /setPreviewPlaceholderText\(taskState\.previewItem, `进度 \$\{value\}%`\);/);
   assert.match(videoJs, /setPreviewPlaceholderText\(item, `进度 \$\{lastValue\}%`\);/);
 });
+
+test('video extend startup failures centralize cleanup so timers and loading state stop', () => {
+  assert.match(videoJs, /function finalizeExtendRun\(/);
+  assert.match(videoJs, /function finalizeExtendRun\([\s\S]*stopElapsedTimer\(\);/);
+  assert.match(videoJs, /function finalizeExtendRun\([\s\S]*setIndeterminate\(false\);/);
+  assert.match(videoJs, /catch \(e\) \{[\s\S]*finalizeExtendRun\(spliceRun, \{ statusState: 'error', statusText: '延长失败' \}\);/);
+});
+
+test('video extend sse connection errors are recorded as failures before finalizing', () => {
+  assert.match(videoJs, /source\.onerror = \(err\) => \{[\s\S]*spliceRun\.failedReasons\.push\('连接异常'\);/);
+  assert.match(videoJs, /source\.onerror = \(err\) => \{[\s\S]*spliceRun\.failedPlaceholders\.add\(tid\);/);
+  assert.match(videoJs, /source\.onerror = \(err\) => \{[\s\S]*setPreviewTitle\(item, '延长失败: 连接异常'\);/);
+});
+
+test('video extend finish_reason stop without a parsed video link is treated as a failed run', () => {
+  assert.match(videoJs, /const choice = parsed\.choices && parsed\.choices\[0\];[\s\S]*if \(choice && choice\.finish_reason === 'stop'\) \{/);
+  assert.match(videoJs, /if \(choice && choice\.finish_reason === 'stop'\) \{[\s\S]*if \(!taskState\.videoUrl\) \{/);
+  assert.match(videoJs, /if \(choice && choice\.finish_reason === 'stop'\) \{[\s\S]*spliceRun\.failedReasons\.push\('未返回视频链接'\);/);
+  assert.match(videoJs, /if \(choice && choice\.finish_reason === 'stop'\) \{[\s\S]*source\.close\(\);[\s\S]*checkAllExtendDone\(spliceRun\);/);
+});

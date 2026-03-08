@@ -1927,12 +1927,41 @@
                 }
               }
             }
+            if (choice && choice.finish_reason === 'stop') {
+              if (!taskState.videoUrl && !taskState.error) {
+                taskState.error = true;
+                spliceRun.failedReasons.push('未返回视频链接');
+                spliceRun.failedPlaceholders.add(tid);
+                const item = spliceRun.placeholders.get(tid);
+                if (item) {
+                  item.classList.remove('is-generating');
+                  item.classList.add('is-failed');
+                  setPreviewTitle(item, '延长失败: 未返回视频链接');
+                  setPreviewPlaceholderText(item, '未返回视频链接');
+                }
+              }
+              taskState.done = true;
+              source.close();
+              checkAllExtendDone(spliceRun);
+              return;
+            }
           } catch (e) {
             // debugLog('runExtendVideo:parse_error', e); // ignore chunks split issues
           }
         };
         source.onerror = (err) => {
           console.error('[SSE 调试] EventSource 抛出 onerror 异常', err);
+          if (!taskState.error) {
+            spliceRun.failedReasons.push('连接异常');
+            spliceRun.failedPlaceholders.add(tid);
+            const item = spliceRun.placeholders.get(tid);
+            if (item) {
+              item.classList.remove('is-generating');
+              item.classList.add('is-failed');
+              setPreviewTitle(item, '延长失败: 连接异常');
+              setPreviewPlaceholderText(item, '连接异常');
+            }
+          }
           taskState.error = true;
           taskState.done = true;
           source.close();
@@ -1942,12 +1971,31 @@
     } catch (e) {
       debugLog('runExtendVideo:error', e);
       toast(String(e.message || '视频延长失败'), 'error');
-      setStatus('error', '延长失败');
+      finalizeExtendRun(spliceRun, { statusState: 'error', statusText: '延长失败' });
+    }
+  }
+
+  function finalizeExtendRun(spliceRun, options = {}) {
+    if (spliceRun) {
       spliceRun.done = true;
+    }
+    if (activeSpliceRun === spliceRun) {
       activeSpliceRun = null;
-      editingBusy = false;
-      setEditTimelineLock(false);
-      setSpliceButtonState('idle');
+    }
+    editingBusy = false;
+    setEditTimelineLock(false);
+    setSpliceButtonState('idle');
+    stopElapsedTimer();
+    setIndeterminate(false);
+    if (typeof options.progressValue === 'number') {
+      updateProgress(options.progressValue);
+    }
+    if (durationValue && startAt) {
+      const seconds = Math.max(0, Math.round((Date.now() - startAt) / 1000));
+      durationValue.textContent = `耗时 ${seconds}s`;
+    }
+    if (Object.prototype.hasOwnProperty.call(options, 'statusText')) {
+      setStatus(options.statusState || '', options.statusText || '');
     }
   }
 
@@ -1961,41 +2009,25 @@
     for (const src of spliceRun.sources) {
       if (src.readyState !== EventSource.CLOSED) openSources++;
     }
-    if (openSources > 0) return;
-    spliceRun.done = true;
-    activeSpliceRun = null;
-    editingBusy = false;
-    setEditTimelineLock(false);
-    setSpliceButtonState('idle');
-    stopElapsedTimer();
-    setIndeterminate(false);
-    if (!spliceRun.failedReasons.length) {
-      updateProgress(100);
-    }
+    if (!allDone && openSources > 0) return;
     if (spliceRun.failedReasons.length) {
-      setStatus('error', '延长部分失败');
-    } else {
-      setStatus('connected', '延长完成');
+      finalizeExtendRun(spliceRun, { statusState: 'error', statusText: '延长部分失败' });
+      return;
     }
+    finalizeExtendRun(spliceRun, { statusState: 'connected', statusText: '延长完成', progressValue: 100 });
   }
 
   async function requestCancelExtend() {
     if (!activeSpliceRun || activeSpliceRun.done) return;
-    activeSpliceRun.cancelled = true;
-    activeSpliceRun.cancelling = true;
+    const spliceRun = activeSpliceRun;
+    spliceRun.cancelled = true;
+    spliceRun.cancelling = true;
     setSpliceButtonState('stopping');
-    for (const src of activeSpliceRun.sources) {
+    for (const src of spliceRun.sources) {
       try { src.close(); } catch (e) { /* ignore */ }
     }
-    const taskIdsToStop = Array.from(activeSpliceRun.taskIds || []);
-    activeSpliceRun.done = true;
-    activeSpliceRun = null;
-    editingBusy = false;
-    setEditTimelineLock(false);
-    setSpliceButtonState('idle');
-    stopElapsedTimer();
-    setIndeterminate(false);
-    setStatus('disconnected', '已取消');
+    const taskIdsToStop = Array.from(spliceRun.taskIds || []);
+    finalizeExtendRun(spliceRun, { statusState: 'disconnected', statusText: '已取消' });
     toast('已中止延长', 'info');
 
     if (taskIdsToStop.length > 0) {
