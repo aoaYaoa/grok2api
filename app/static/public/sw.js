@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "grok2api-pwa-";
-const CACHE_NAME = `${CACHE_PREFIX}v2`;
+const CACHE_NAME = `${CACHE_PREFIX}v3`;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());

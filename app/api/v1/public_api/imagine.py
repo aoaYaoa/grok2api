@@ -78,6 +78,30 @@ def _to_assets_url(path: str) -> str:
     return f"https://assets.grok.com{raw}"
 
 
+def _to_local_image_file_url(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        raw = parsed.path or ""
+
+    marker = "/v1/files/image/"
+    if marker in raw:
+        suffix = raw.split(marker, 1)[1]
+        local_path = f"/v1/files/image/{suffix.lstrip('/')}"
+    elif raw.startswith("/users/") or raw.startswith("users/"):
+        local_path = f"/v1/files/image/{raw.lstrip('/')}"
+    else:
+        return ""
+
+    app_url = str(get_config("app.app_url") or "").strip().rstrip("/")
+    if app_url.startswith("http://") or app_url.startswith("https://"):
+        return f"{app_url}{local_path}"
+    return local_path
+
+
 def _resolve_source_image_url(
     image_url: str,
     parent_post_id: str = "",
@@ -89,22 +113,21 @@ def _resolve_source_image_url(
             parsed = urlparse(raw)
             host = (parsed.netloc or "").lower()
             path = parsed.path or ""
-            if "assets.grok.com" in host and path:
-                return _to_assets_url(path)
+            local_url = _to_local_image_file_url(path)
+            if "assets.grok.com" in host and local_url:
+                return local_url
+            if marker := "/v1/files/image/":
+                if marker in path:
+                    return _to_local_image_file_url(path) or raw
+            if path.startswith("/users/") and local_url:
+                return local_url
             if "imagine-public.x.ai" in host:
                 return raw
-            marker = "/v1/files/image/"
-            if marker in path:
-                suffix = path.split(marker, 1)[1]
-                return _to_assets_url(suffix)
-            if path.startswith("/users/"):
-                return _to_assets_url(path)
             return raw
         if raw.startswith("/v1/files/image/"):
-            suffix = raw.split("/v1/files/image/", 1)[1]
-            return _to_assets_url(suffix)
+            return _to_local_image_file_url(raw) or raw
         if raw.startswith("/users/") or raw.startswith("users/"):
-            return _to_assets_url(raw)
+            return _to_local_image_file_url(raw) or _to_assets_url(raw)
         if raw.startswith("/imagine-public/images/"):
             return f"https://imagine-public.x.ai{raw}"
 

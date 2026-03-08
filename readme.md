@@ -20,16 +20,24 @@
 
 ```bash
 uv sync
-uv run main.py
+uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 main:app
 ```
 
 ### Docker Compose
+
+> 当前仓库默认使用本地 `Dockerfile` 构建 `grok2api` 服务，不再建议直接依赖远程 `ghcr.io/chenyme/grok2api:latest` 镜像。
+>
+> 首次启动或代码更新后，请执行：`docker compose up -d --build grok2api`
+>
+> 如需强制浏览器刷新前端静态资源缓存，可临时指定：`APP_ASSET_VERSION=20260308b docker compose up -d --build grok2api`
+>
+> 只有 `warp`、`flaresolverr` 仍然使用远程镜像；业务服务 `grok2api` 以当前仓库代码为准。
 
 ```bash
 git clone https://github.com/chenyme/grok2api
 cd grok2api
 
-docker compose up -d
+docker compose up -d --build grok2api
 ```
 
 ### Vercel 部署
@@ -68,7 +76,7 @@ docker compose up -d
 
 ## 环境变量
 
-> 配置 `.env` 文件
+> 可从 `.env.example` 复制为 `.env` 后按需修改。
 
 | 变量名 | 说明 | 默认值 | 示例 |
 | :-- | :-- | :-- | :-- |
@@ -77,7 +85,8 @@ docker compose up -d
 | `DATA_DIR` | 数据目录（配置/Token/锁） | `./data` | `/data` |
 | `SERVER_HOST` | 服务监听地址 | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | 服务端口 | `8000` | `8000` |
-| `SERVER_WORKERS` | Uvicorn worker 数量 | `1` | `2` |
+| `SERVER_WORKERS` | 服务进程数量 | `1` | `2` |
+| `APP_ASSET_VERSION` | 前端静态资源版本 | 自动取项目版本，可手动覆盖 | `20260308b` |
 | `SERVER_STORAGE_TYPE` | 存储类型（`local`/`redis`/`mysql`/`pgsql`） | `local` | `pgsql` |
 | `SERVER_STORAGE_URL` | 存储连接串（local 时可为空） | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
 
@@ -144,7 +153,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `top_p` | number | nucleus 采样 | `0` ~ `1` |
 | `video_config` | object | **视频模型专用配置对象** | 支持：`grok-imagine-1.0-video` |
 | └─`aspect_ratio` | string | 视频宽高比 | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`, `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
-| └─`video_length` | integer | 视频时长 (秒) | `6`, `10`, `15` |
+| └─`video_length` | integer | 视频时长 (秒) | `6 ~ 30` |
 | └─`resolution_name` | string | 分辨率 | `480p`, `720p` |
 | └─`preset` | string | 风格预设 | `fun`, `normal`, `spicy`, `custom` |
 | `image_config` | object | **图片模型专用配置对象** | 支持：`grok-imagine-1.0` / `grok-imagine-1.0-edit` |

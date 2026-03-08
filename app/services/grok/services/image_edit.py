@@ -179,22 +179,33 @@ class ImageEditService:
                     f"图片上传完成，共 {len(image_urls)} 张",
                     count=len(image_urls),
                 )
-                await self._emit_progress(
-                    progress_cb,
-                    "pre_create_start",
-                    36,
-                    "正在创建媒体帖子",
-                )
-                parent_post_id = await self._get_parent_post_id(
-                    current_token, image_urls
-                )
-                await self._emit_progress(
-                    progress_cb,
-                    "pre_create_done",
-                    42,
-                    "媒体帖子创建完成",
-                    parent_post_id=parent_post_id or "",
-                )
+                use_reference_merge_mode = len(image_urls) >= 2
+                parent_post_id = ""
+                if use_reference_merge_mode:
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_skipped",
+                        36,
+                        "多参考图模式，跳过媒体帖子创建",
+                        count=len(image_urls),
+                    )
+                else:
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_start",
+                        36,
+                        "正在创建媒体帖子",
+                    )
+                    parent_post_id = await self._get_parent_post_id(
+                        current_token, image_urls
+                    )
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_done",
+                        42,
+                        "媒体帖子创建完成",
+                        parent_post_id=parent_post_id or "",
+                    )
 
                 model_config_override = {
                     "modelMap": {
@@ -343,10 +354,17 @@ class ImageEditService:
                 "已匹配编辑令牌",
             )
             try:
-                image_ref = (source_image_url or "").strip()
-                if not image_ref:
-                    image_ref = (
-                        f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
+                raw_source_image_url = (source_image_url or "").strip()
+                image_ref = (
+                    f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
+                )
+                fallback_upload_image_ref = raw_source_image_url or image_ref
+                if raw_source_image_url and raw_source_image_url != image_ref:
+                    logger.info(
+                        "Image edit(parentPostId) source image normalized to imagine-public: "
+                        f"parent_post_id={parent_post_id}, "
+                        f"raw_source_image_url={raw_source_image_url}, "
+                        f"normalized_source_image_url={image_ref}"
                     )
                 effective_parent_post_id = parent_post_id
                 await self._emit_progress(
@@ -433,22 +451,72 @@ class ImageEditService:
                     "已提交编辑请求",
                     parent_post_id=effective_parent_post_id,
                 )
-                images_out = await self._collect_images(
-                    token=current_token,
-                    prompt=prompt,
-                    model_info=model_info,
-                    response_format=response_format,
-                    tool_overrides=tool_overrides,
-                    model_config_override=model_config_override,
-                    return_all_images=return_all_images,
-                    progress_cb=progress_cb,
-                )
+                try:
+                    images_out = await self._collect_images(
+                        token=current_token,
+                        prompt=prompt,
+                        model_info=model_info,
+                        response_format=response_format,
+                        tool_overrides=tool_overrides,
+                        model_config_override=model_config_override,
+                        return_all_images=return_all_images,
+                        progress_cb=progress_cb,
+                    )
+                except UpstreamException as collect_error:
+                    collect_details = collect_error.details or {}
+                    if isinstance(collect_details, dict) and collect_details.get("error") == "empty_result":
+                        logger.warning(
+                            "Image edit(parentPostId) upstream returned empty_result, falling back to upload mode: "
+                            f"parent_post_id={parent_post_id}, media_url={image_ref}, details={collect_details}"
+                        )
+                        await self._emit_progress(
+                            progress_cb,
+                            "fallback_to_upload",
+                            52,
+                            "parentPostId 编辑无结果，回退到单图编辑",
+                        )
+                        return await self.edit(
+                            token_mgr=token_mgr,
+                            token=current_token,
+                            model_info=model_info,
+                            prompt=prompt,
+                            images=[fallback_upload_image_ref],
+                            n=1,
+                            response_format=response_format,
+                            stream=False,
+                            return_all_images=return_all_images,
+                            progress_cb=progress_cb,
+                        )
+                    raise
                 await self._emit_progress(
                     progress_cb,
                     "collect_done",
                     92,
                     f"已收到 {len(images_out)} 张结果",
                 )
+                if not images_out:
+                    logger.warning(
+                        "Image edit(parentPostId) returned no results, falling back to upload mode: "
+                        f"parent_post_id={parent_post_id}, media_url={image_ref}"
+                    )
+                    await self._emit_progress(
+                        progress_cb,
+                        "fallback_to_upload",
+                        52,
+                        "parentPostId 编辑无结果，回退到单图编辑",
+                    )
+                    return await self.edit(
+                        token_mgr=token_mgr,
+                        token=current_token,
+                        model_info=model_info,
+                        prompt=prompt,
+                        images=[fallback_upload_image_ref],
+                        n=1,
+                        response_format=response_format,
+                        stream=False,
+                        return_all_images=return_all_images,
+                        progress_cb=progress_cb,
+                    )
                 try:
                     effort = (
                         EffortType.HIGH
@@ -574,6 +642,31 @@ class ImageEditService:
         return_all_images: bool = False,
         progress_cb: Callable[[str, dict], Any] | None = None,
     ) -> List[str]:
+        image_edit_config = ((model_config_override or {}).get("modelMap") or {}).get(
+            "imageEditModelConfig"
+        ) or {}
+        reference_count = len(image_edit_config.get("imageReferences") or [])
+        collect_state = {
+            "chat_connected": False,
+            "image_count": 0,
+            "last_event": "",
+        }
+
+        async def tracked_progress_cb(event: str, payload: dict):
+            collect_state["last_event"] = str(event or "").strip()
+            if event == "chat_connected":
+                collect_state["chat_connected"] = True
+            elif event == "image_downloaded":
+                try:
+                    count = int((payload or {}).get("count") or 0)
+                except Exception:
+                    count = 0
+                collect_state["image_count"] = max(collect_state["image_count"], count)
+            if progress_cb:
+                result = progress_cb(event, payload)
+                if asyncio.iscoroutine(result):
+                    await result
+
         async def _call_edit():
             response = await GrokChatService().chat(
                 token=token,
@@ -589,16 +682,30 @@ class ImageEditService:
                 model_info.model_id,
                 token,
                 response_format=response_format,
-                progress_cb=progress_cb,
+                progress_cb=tracked_progress_cb,
             )
             return await processor.process(response)
 
         all_images = await _call_edit()
 
         if not all_images:
-            raise UpstreamException(
-                "Image edit returned no results", details={"error": "empty_result"}
+            details = {
+                "error": "empty_result",
+                "chat_connected": collect_state["chat_connected"],
+                "image_count": 0,
+                "last_event": collect_state["last_event"],
+                "reference_count": reference_count,
+            }
+            message = (
+                "Image edit upstream connected but returned no image URLs"
+                if collect_state["chat_connected"]
+                else "Image edit upstream ended before any image URL was returned"
             )
+            logger.warning(
+                "Image edit returned no results: "
+                f"message={message}, details={details}"
+            )
+            raise UpstreamException(message, details=details)
         if return_all_images:
             return all_images
         return [all_images[0]]

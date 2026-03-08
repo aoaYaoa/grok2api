@@ -349,6 +349,12 @@
     textarea.value = value;
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    textarea.dispatchEvent(new CustomEvent('prompt-enhance-applied', {
+      bubbles: true,
+      detail: {
+        value: String(value || ''),
+      },
+    }));
   }
 
   function updateToggleButtonText(toggleBtn, mode) {
@@ -661,6 +667,11 @@
     const areas = Array.from(document.querySelectorAll('textarea'));
     areas.forEach((area) => mountEnhancer(area));
   }
+
+  window.PromptEnhancer = {
+    init,
+    mount: mountEnhancer,
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init, { once: true });

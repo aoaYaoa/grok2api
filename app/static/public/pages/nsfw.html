@@ -16,10 +16,10 @@
   <script src="/static/vendor/tailwind/tailwindcss-cdn.js"></script>
   <link href="/static/vendor/geist/geist-sans.css" rel="stylesheet">
   <link href="/static/vendor/geist/geist-mono.css" rel="stylesheet">
-  <script src="/static/common/js/theme.js?v=0.1.0"></script>
-  <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
+  <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
-  <link href="/static/public/css/nsfw.css?v=0.3.6" rel="stylesheet">
+  <link href="/static/public/css/nsfw.css?v=__ASSET_VERSION__" rel="stylesheet">
 </head>
 
 <body class="public-page min-h-screen flex flex-col" style="background-color: var(--bg);">
@@ -85,6 +85,9 @@
                 <option value="6" selected>6 秒</option>
                 <option value="10">10 秒</option>
                 <option value="15">15 秒</option>
+                <option value="20">20 秒</option>
+                <option value="25">25 秒</option>
+                <option value="30">30 秒</option>
               </select>
             </div>
             <div class="field">
@@ -105,10 +108,52 @@
             <button id="nextBatchBtn" class="geist-button-outline text-xs px-3">再来一批</button>
             <button id="clearImagesBtn" class="geist-button-outline text-xs px-3">清空图片</button>
             <button id="startVideoBtn" class="geist-button text-xs px-3">选中图生视频</button>
+            <button id="extendVideoBtn" class="geist-button-outline text-xs px-3">延长当前视频</button>
             <button id="stopVideoBtn" class="geist-button-outline text-xs px-3">中断视频</button>
             <button id="clearVideosBtn" class="geist-button-outline text-xs px-3 action-wide">清空视频结果</button>
           </div>
+          <div class="video-ref-block ref-block">
+            <label class="field-label">本地参考图（优先）</label>
+            <div class="ref-controls">
+              <div class="video-ref-actions">
+                <button id="selectVideoImageBtn" class="geist-button-outline text-xs px-3" type="button">上传本地参考图</button>
+                <button id="clearVideoImageBtn" class="geist-button-outline text-xs px-3" type="button">清除参考图</button>
+              </div>
+              <input id="videoImageFileInput" class="ref-file-input" type="file" accept="image/*">
+            </div>
+            <div class="ref-meta">
+              <span id="videoImageFileName" class="ref-name">未选择文件</span>
+              <span class="ref-drop-hint">将以 base64 方式发送</span>
+            </div>
+            <div id="videoReferencePreview" class="ref-preview hidden">
+              <img id="videoReferencePreviewImg" class="ref-preview-image" alt="本地参考图预览">
+              <div id="videoReferencePreviewMeta" class="ref-preview-meta"></div>
+            </div>
+          </div>
           <div id="selectedMeta" class="selected-meta">未选择候选图</div>
+          <div id="videoExtendWorkspace" class="video-extend-workspace hidden">
+            <div class="video-extend-workspace-head">
+              <div class="panel-title">视频延长定位</div>
+              <div id="videoExtendDurationText" class="head-meta">总时长 -</div>
+            </div>
+            <div id="videoExtendWorkspaceEmpty" class="empty-state video-extend-empty">选择一个已完成视频后，可拖动时间条设置延长起点</div>
+            <div id="videoExtendWorkspaceBody" class="video-extend-workspace-body hidden">
+              <div class="video-extend-preview-wrap">
+                <video id="videoExtendPreview" controls preload="metadata" playsinline webkit-playsinline></video>
+              </div>
+              <div class="video-extend-slider-wrap">
+                <div class="video-extend-slider-head">
+                  <span class="video-extend-slider-title">延长起点 <strong id="videoExtendTimeInline" class="video-extend-time-inline">00:00.000</strong></span>
+                  <span id="videoExtendHintText" class="video-extend-slider-hint">拖动到要继续生成的位置</span>
+                </div>
+                <input id="videoExtendTimeline" class="timeline-delete-zone" data-delete-side="right" type="range" min="0" max="100000" step="1" value="0">
+                <div class="progress-meta">
+                  <span id="videoExtendTimeText">00:00.000</span>
+                  <span id="videoExtendLimitText">可拖动到需要续接的位置</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -140,6 +185,7 @@
         <button class="geist-button-outline" data-proxy-click="#nextBatchBtn" type="button">再来一批</button>
         <button class="geist-button-outline" data-proxy-click="#clearImagesBtn" type="button">清图片</button>
         <button class="geist-button" data-proxy-click="#startVideoBtn" type="button">开始视频</button>
+        <button class="geist-button-outline" data-proxy-click="#extendVideoBtn" type="button">延长视频</button>
         <button class="geist-button-outline" data-proxy-click="#stopVideoBtn" type="button">停视频</button>
         <button class="geist-button-outline" data-proxy-click="#clearVideosBtn" type="button">清视频</button>
       </div>
@@ -195,15 +241,15 @@
 
   <div id="app-footer"></div>
 
-  <script src="/static/common/js/admin-auth.js?v=0.3.0"></script>
-  <script src="/static/common/js/parentpost-memory.js?v=0.1.0"></script>
-  <script src="/static/common/js/public-header.js?v=0.3.3"></script>
-  <script src="/static/common/js/footer.js?v=0.3.0"></script>
-  <script src="/static/common/js/mobile-fab.js?v=0.1.1"></script>
+  <script src="/static/common/js/admin-auth.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/parentpost-memory.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/public-header.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/footer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/mobile-fab.js?v=__ASSET_VERSION__"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
-  <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/nsfw.js?v=0.3.5"></script>
+  <script src="/static/common/js/prompt-enhancer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/pwa.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/public/js/nsfw.js?v=__ASSET_VERSION__"></script>
 </body>
 
 </html>

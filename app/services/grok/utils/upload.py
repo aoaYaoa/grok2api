@@ -24,6 +24,22 @@ from app.services.reverse.assets_upload import AssetsUploadReverse
 from app.services.grok.utils.locks import _get_upload_semaphore, _file_lock
 
 
+DEFAULT_UPLOAD_TIMEOUT = 60.0
+
+
+def _safe_upload_timeout_seconds() -> float:
+    raw_timeout = get_config("asset.upload_timeout", DEFAULT_UPLOAD_TIMEOUT)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return DEFAULT_UPLOAD_TIMEOUT
+    return timeout if timeout > 0 else DEFAULT_UPLOAD_TIMEOUT
+
+
+def _safe_upload_lock_timeout() -> int:
+    return max(1, int(_safe_upload_timeout_seconds()))
+
+
 class UploadService:
     """Assets upload service."""
 
@@ -204,7 +220,7 @@ class UploadService:
 
         local_path = local_dir / name
         lock_name = f"ul_local_{hashlib.sha1(str(local_path).encode()).hexdigest()[:16]}"
-        lock_timeout = max(1, int(get_config("asset.upload_timeout")))
+        lock_timeout = _safe_upload_lock_timeout()
         async with _file_lock(lock_name, timeout=lock_timeout):
             if not local_path.exists():
                 raise ValidationException(f"Local file not found: {local_path}")
@@ -226,15 +242,9 @@ class UploadService:
     async def parse_b64(self, url: str) -> Tuple[str, str, str]:
         """Fetch URL content and return (filename, base64, mime)."""
         try:
-            app_url = get_config("app.app_url") or ""
-            if app_url and self._is_url(url):
+            if self._is_url(url):
                 parsed = urlparse(url)
-                app_parsed = urlparse(app_url)
-                if (
-                    parsed.scheme == app_parsed.scheme
-                    and parsed.netloc == app_parsed.netloc
-                    and parsed.path.startswith("/v1/files/")
-                ):
+                if parsed.path.startswith("/v1/files/"):
                     parts = parsed.path.strip("/").split("/", 3)
                     if len(parts) >= 4:
                         local_type = parts[2]
@@ -242,11 +252,11 @@ class UploadService:
                         return await self._read_local_file(local_type, name)
 
             lock_name = f"ul_url_{hashlib.sha1(url.encode()).hexdigest()[:16]}"
-            timeout = float(get_config("asset.upload_timeout"))
+            timeout = _safe_upload_timeout_seconds()
             proxy_url = get_config("proxy.base_proxy_url")
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
-            lock_timeout = max(1, int(get_config("asset.upload_timeout")))
+            lock_timeout = _safe_upload_lock_timeout()
             async with _file_lock(lock_name, timeout=lock_timeout):
                 session = await self.create()
                 response = await session.get(

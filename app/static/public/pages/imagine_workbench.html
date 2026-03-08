@@ -16,10 +16,10 @@
   <script src="/static/vendor/tailwind/tailwindcss-cdn.js"></script>
   <link href="/static/vendor/geist/geist-sans.css" rel="stylesheet">
   <link href="/static/vendor/geist/geist-mono.css" rel="stylesheet">
-  <script src="/static/common/js/theme.js?v=0.1.0"></script>
-  <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
+  <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
-  <link href="/static/public/css/imagine_workbench.css?v=0.1.9" rel="stylesheet">
+  <link href="/static/public/css/imagine_workbench.css?v=__ASSET_VERSION__" rel="stylesheet">
 </head>
 
 <body class="public-page min-h-screen flex flex-col" style="background-color: var(--bg);">
@@ -125,17 +125,30 @@
     </button>
   </div>
 
+  <div id="previewLightbox" class="preview-lightbox" aria-hidden="true">
+    <div class="preview-lightbox-dialog" role="dialog" aria-modal="true" aria-label="当前画面预览">
+      <div class="preview-lightbox-actions">
+        <a id="previewLightboxDownload" class="preview-lightbox-download" href="#" download>下载</a>
+        <button id="previewLightboxClose" class="preview-lightbox-close" type="button" aria-label="关闭预览">关闭</button>
+      </div>
+      <div class="preview-lightbox-stage">
+        <img id="previewLightboxImg" src="" alt="当前画面预览">
+      </div>
+      <div id="previewLightboxCaption" class="preview-lightbox-caption">当前画面预览</div>
+    </div>
+  </div>
+
   <div id="app-footer"></div>
 
-  <script src="/static/common/js/admin-auth.js?v=0.3.0"></script>
-  <script src="/static/common/js/parentpost-memory.js?v=0.1.0"></script>
-  <script src="/static/common/js/public-header.js?v=0.3.3"></script>
-  <script src="/static/common/js/footer.js?v=0.3.0"></script>
-  <script src="/static/common/js/mobile-fab.js?v=0.1.1"></script>
+  <script src="/static/common/js/admin-auth.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/parentpost-memory.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/public-header.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/footer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/mobile-fab.js?v=__ASSET_VERSION__"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
-  <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/imagine_workbench.js?v=0.1.4"></script>
+  <script src="/static/common/js/prompt-enhancer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/pwa.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/public/js/imagine_workbench.js?v=__ASSET_VERSION__"></script>
 </body>
 
 </html>

@@ -17,9 +17,9 @@
   <script src="/static/vendor/tailwind/tailwindcss-cdn.js"></script>
   <link href="/static/vendor/geist/geist-sans.css" rel="stylesheet">
   <link href="/static/vendor/geist/geist-mono.css" rel="stylesheet">
-  <script src="/static/common/js/theme.js?v=0.1.0"></script>
-  <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
-  <link href="/static/public/css/video.css?v=0.4.16" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
+  <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <link href="/static/public/css/video.css?v=__ASSET_VERSION__" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
 </head>
 
@@ -82,6 +82,9 @@
                   <option value="6" selected>6 秒</option>
                   <option value="10">10 秒</option>
                   <option value="15">15 秒</option>
+                  <option value="20">20 秒</option>
+                  <option value="25">25 秒</option>
+                  <option value="30">30 秒</option>
                 </select>
               </div>
               <div class="settings-block resolution-block">
@@ -162,6 +165,10 @@
                 <video id="editVideo" controls preload="metadata" playsinline webkit-playsinline></video>
               </div>
               <div class="edit-slider-wrap">
+                <div class="timeline-caption">
+                  <span class="timeline-caption-title">延长起点 <strong id="editTimeInline" class="timeline-caption-time">00:00.000</strong></span>
+                  <span class="timeline-caption-hint">拖动到要继续生成的位置，接口会按当前刻度发起延长</span>
+                </div>
                 <input id="editTimeline" class="timeline-delete-zone" data-delete-side="right" type="range" min="0"
                   max="100000" step="1" value="0">
                 <div class="progress-meta">
@@ -270,14 +277,14 @@
 
   <div id="app-footer"></div>
 
-  <script src="/static/common/js/admin-auth.js?v=0.3.0"></script>
-  <script src="/static/common/js/parentpost-memory.js?v=0.1.0"></script>
-  <script src="/static/common/js/public-header.js?v=0.3.3"></script>
-  <script src="/static/common/js/footer.js?v=0.3.0"></script>
+  <script src="/static/common/js/admin-auth.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/parentpost-memory.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/public-header.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/footer.js?v=__ASSET_VERSION__"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
-  <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/video.js?v=0.6.0"></script>
+  <script src="/static/common/js/prompt-enhancer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/pwa.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/public/js/video.js?v=__ASSET_VERSION__"></script>
 </body>
 
 </html>

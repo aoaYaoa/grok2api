@@ -138,6 +138,7 @@ async def _new_session(
     image_url: Optional[str],
     parent_post_id: Optional[str],
     source_image_url: Optional[str],
+    nsfw: Optional[bool],
     reasoning_effort: Optional[str],
     # 视频延长相关
     is_video_extension: bool = False,
@@ -160,6 +161,7 @@ async def _new_session(
             "image_url": image_url,
             "parent_post_id": parent_post_id,
             "source_image_url": source_image_url,
+            "nsfw": bool(nsfw if nsfw is not None else True),
             "reasoning_effort": reasoning_effort,
             "is_video_extension": is_video_extension,
             "extend_post_id": extend_post_id,
@@ -245,6 +247,7 @@ class VideoStartRequest(BaseModel):
     image_url: Optional[str] = None
     parent_post_id: Optional[str] = None
     source_image_url: Optional[str] = None
+    nsfw: Optional[bool] = None
     reasoning_effort: Optional[str] = None
     edit_context: Optional[Dict[str, Any]] = None
     # 视频延长相关字段
@@ -268,9 +271,9 @@ async def public_video_start(data: VideoStartRequest):
         )
 
     video_length = int(data.video_length or 6)
-    if video_length not in (6, 10, 15):
+    if video_length < 6 or video_length > 30:
         raise HTTPException(
-            status_code=400, detail="video_length must be 6, 10, or 15 seconds"
+            status_code=400, detail="video_length must be between 6 and 30 seconds"
         )
 
     resolution_name = str(data.resolution_name or "480p")
@@ -343,6 +346,8 @@ async def public_video_start(data: VideoStartRequest):
                 detail="Prompt cannot be empty when no image_url/parent_post_id is provided",
             )
 
+    nsfw = True if data.nsfw is None else bool(data.nsfw)
+
     reasoning_effort = (data.reasoning_effort or "").strip() or None
     if reasoning_effort:
         allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
@@ -377,6 +382,7 @@ async def public_video_start(data: VideoStartRequest):
             image_url,
             parent_post_id,
             source_image_url,
+            nsfw,
             reasoning_effort,
             is_video_extension=is_video_extension,
             extend_post_id=extend_post_id,
@@ -415,6 +421,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
     if parent_post_id:
         source_image_url = _build_imagine_public_url(parent_post_id)
     reasoning_effort = session.get("reasoning_effort")
+    nsfw = bool(session.get("nsfw", True))
 
     async def event_stream():
         try:
@@ -486,6 +493,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
                 stitch_with_extend=stitch_with_extend,
                 source_image_url=source_image_url,
                 preferred_token=preferred_token,
+                nsfw=nsfw,
             )
 
             async for chunk in stream:

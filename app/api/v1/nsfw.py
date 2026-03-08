@@ -69,7 +69,7 @@ class NSFWRequest(BaseModel):
     image_parallel: int = Field(4, ge=1, le=8, description="并发生图数")
     video_parallel: int = Field(4, ge=1, le=8, description="并发视频数")
     max_image_attempts: int = Field(20, ge=1, le=50, description="生图最大尝试次数")
-    video_length: int = Field(6, ge=5, le=15, description="视频秒数")
+    video_length: int = Field(6, ge=6, le=30, description="视频秒数")
     resolution: str = Field("480p", description="视频分辨率: 480p/720p")
     preset: str = Field("spicy", description="视频风格: fun/normal/spicy")
     upscale: bool = Field(True, description="视频完成后是否尝试超分")

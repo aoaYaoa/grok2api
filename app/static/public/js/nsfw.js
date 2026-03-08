@@ -13,8 +13,26 @@
   const clearImagesBtn = document.getElementById('clearImagesBtn');
 
   const startVideoBtn = document.getElementById('startVideoBtn');
+  const extendVideoBtn = document.getElementById('extendVideoBtn');
   const stopVideoBtn = document.getElementById('stopVideoBtn');
   const clearVideosBtn = document.getElementById('clearVideosBtn');
+  const selectVideoImageBtn = document.getElementById('selectVideoImageBtn');
+  const clearVideoImageBtn = document.getElementById('clearVideoImageBtn');
+  const videoImageFileInput = document.getElementById('videoImageFileInput');
+  const videoImageFileName = document.getElementById('videoImageFileName');
+  const videoReferencePreview = document.getElementById('videoReferencePreview');
+  const videoReferencePreviewImg = document.getElementById('videoReferencePreviewImg');
+  const videoReferencePreviewMeta = document.getElementById('videoReferencePreviewMeta');
+  const videoExtendWorkspace = document.getElementById('videoExtendWorkspace');
+  const videoExtendWorkspaceEmpty = document.getElementById('videoExtendWorkspaceEmpty');
+  const videoExtendWorkspaceBody = document.getElementById('videoExtendWorkspaceBody');
+  const videoExtendPreview = document.getElementById('videoExtendPreview');
+  const videoExtendTimeline = document.getElementById('videoExtendTimeline');
+  const videoExtendTimeText = document.getElementById('videoExtendTimeText');
+  const videoExtendTimeInline = document.getElementById('videoExtendTimeInline');
+  const videoExtendDurationText = document.getElementById('videoExtendDurationText');
+  const videoExtendLimitText = document.getElementById('videoExtendLimitText');
+  const videoExtendHintText = document.getElementById('videoExtendHintText');
 
   const imageStatusText = document.getElementById('imageStatusText');
   const videoStatusText = document.getElementById('videoStatusText');
@@ -54,8 +72,16 @@
     videoJobs: new Map(),
     videoTaskIds: [],
     videoRunning: false,
+    selectedVideoTaskId: '',
+    extendRunning: false,
+    extendSourceTaskId: '',
+    extendRunningTaskId: '',
+    videoExtendLockedMs: 0,
+    videoExtendDurationMs: 0,
     videoAuthHeader: '',
     videoRawPublicKey: '',
+    videoImageDataUrl: '',
+    videoImageFileName: '',
     lightboxIndex: -1,
     editProgressValue: 0,
     editProgressTimer: null,
@@ -64,6 +90,17 @@
     editDurationEstimateMs: 14000,
     imageFullscreen: false,
   };
+  const VIDEO_EXTEND_TIMELINE_MAX = 100000;
+  const VIDEO_EXTEND_START_LIMIT_MS = 20000;
+  const TAIL_FRAME_GUARD_MS = 80;
+
+  function mountVideoExtendPromptEnhancer(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    const api = window.PromptEnhancer;
+    if (!api || typeof api.mount !== 'function') return;
+    api.mount(textarea);
+  }
+
   let lightboxEditAbortController = null;
   if (lightboxEditSend) {
     lightboxEditSend.disabled = true;
@@ -106,6 +143,191 @@
     if (!raw) return '-';
     if (raw.length <= 12) return raw;
     return `${raw.slice(0, 6)}...${raw.slice(-6)}`;
+  }
+
+  function formatMs(ms) {
+    const safe = Math.max(0, Number(ms) || 0);
+    const totalSeconds = Math.floor(safe / 1000);
+    const milli = Math.floor(safe % 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milli).padStart(3, '0')}`;
+  }
+
+  function enforceInlinePlayback(videoEl) {
+    if (!(videoEl instanceof HTMLVideoElement)) return;
+    videoEl.playsInline = true;
+    videoEl.setAttribute('playsinline', '');
+    videoEl.setAttribute('webkit-playsinline', '');
+    videoEl.setAttribute('x5-playsinline', 'true');
+    videoEl.style.objectFit = 'contain';
+    videoEl.style.maxWidth = '100%';
+    videoEl.style.maxHeight = '100%';
+  }
+
+  function updateVideoExtendTrack() {
+    if (!videoExtendTimeline) return;
+    const maxRaw = Number(videoExtendTimeline.max || VIDEO_EXTEND_TIMELINE_MAX);
+    const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : VIDEO_EXTEND_TIMELINE_MAX;
+    const valueRaw = Number(videoExtendTimeline.value || 0);
+    const value = Math.max(0, Math.min(max, Number.isFinite(valueRaw) ? valueRaw : 0));
+    const pct = (value / max) * 100;
+    videoExtendTimeline.style.setProperty('--cut-pct', `${pct}%`);
+  }
+
+  function getSafeVideoExtendMaxTimestampMs() {
+    const durationMs = Math.floor(Math.max(0, Number(state.videoExtendDurationMs || 0)));
+    if (!durationMs) return VIDEO_EXTEND_START_LIMIT_MS;
+    return Math.max(0, Math.min(VIDEO_EXTEND_START_LIMIT_MS, durationMs - TAIL_FRAME_GUARD_MS));
+  }
+
+  function clampVideoExtendTimestampMs(ms) {
+    const safe = Math.max(0, Math.round(Number(ms) || 0));
+    const maxMs = getSafeVideoExtendMaxTimestampMs();
+    return Math.max(0, Math.min(safe, maxMs));
+  }
+
+  function syncVideoExtendTimelineAvailability() {
+    const selectedJob = getSelectedVideoJob();
+    const hasVideo = Boolean(selectedJob && selectedJob.item && String(selectedJob.item.dataset.videoUrl || '').trim());
+    const hasDuration = Number(state.videoExtendDurationMs || 0) > 0;
+    if (!videoExtendTimeline) return;
+    videoExtendTimeline.disabled = state.extendRunning || !hasVideo || !hasDuration;
+    videoExtendTimeline.classList.toggle('is-disabled', videoExtendTimeline.disabled);
+  }
+
+  function renderVideoExtendSelection() {
+    const maxMs = getSafeVideoExtendMaxTimestampMs();
+    const atLimit = maxMs > 0 && state.videoExtendLockedMs >= maxMs;
+    const durationLimited = Number(state.videoExtendDurationMs || 0) > VIDEO_EXTEND_START_LIMIT_MS;
+    const timeLabel = formatMs(state.videoExtendLockedMs);
+    if (videoExtendTimeText) {
+      videoExtendTimeText.textContent = timeLabel;
+      if (atLimit && durationLimited) {
+        videoExtendTimeText.textContent += ' (官方上限20s)';
+      }
+    }
+    if (videoExtendTimeInline) {
+      videoExtendTimeInline.textContent = timeLabel;
+    }
+    if (videoExtendDurationText) {
+      videoExtendDurationText.textContent = state.videoExtendDurationMs > 0
+        ? `总时长 ${formatMs(state.videoExtendDurationMs)}`
+        : '总时长 -';
+    }
+    if (videoExtendLimitText) {
+      videoExtendLimitText.textContent = durationLimited
+        ? '当前视频最多可从 00:20.000 开始延长'
+        : '可拖动到需要续接的位置';
+    }
+    if (videoExtendHintText) {
+      videoExtendHintText.textContent = state.extendRunning
+        ? '延长任务运行中，时间点已锁定'
+        : '拖动到要继续生成的位置';
+    }
+  }
+
+  function syncVideoExtendTimelineFromPlayer() {
+    if (!videoExtendPreview) return;
+    const durationMs = Math.round(Math.max(0, Number(videoExtendPreview.duration || 0) * 1000));
+    state.videoExtendDurationMs = durationMs;
+    const lockedMs = clampVideoExtendTimestampMs(Math.round(Math.max(0, Number(videoExtendPreview.currentTime || 0) * 1000)));
+    state.videoExtendLockedMs = lockedMs;
+    if (videoExtendTimeline) {
+      const ratio = durationMs > 0 ? (lockedMs / durationMs) : 0;
+      videoExtendTimeline.value = String(Math.round(ratio * VIDEO_EXTEND_TIMELINE_MAX));
+      updateVideoExtendTrack();
+    }
+    renderVideoExtendSelection();
+    syncVideoExtendTimelineAvailability();
+  }
+
+  function clearVideoExtendWorkspace(message) {
+    state.videoExtendLockedMs = 0;
+    state.videoExtendDurationMs = 0;
+    if (videoExtendTimeline) {
+      videoExtendTimeline.value = '0';
+      updateVideoExtendTrack();
+    }
+    if (videoExtendPreview) {
+      videoExtendPreview.pause();
+      videoExtendPreview.removeAttribute('src');
+      videoExtendPreview.dataset.taskId = '';
+      videoExtendPreview.dataset.videoUrl = '';
+      videoExtendPreview.load();
+    }
+    if (videoExtendWorkspace) {
+      videoExtendWorkspace.classList.add('hidden');
+    }
+    if (videoExtendWorkspaceBody) {
+      videoExtendWorkspaceBody.classList.add('hidden');
+    }
+    if (videoExtendWorkspaceEmpty) {
+      videoExtendWorkspaceEmpty.classList.remove('hidden');
+      videoExtendWorkspaceEmpty.textContent = message || '选择一个已完成视频后，可拖动时间条设置延长起点';
+    }
+    renderVideoExtendSelection();
+    syncVideoExtendTimelineAvailability();
+  }
+
+  function syncVideoExtendWorkspace() {
+    const selectedJob = getSelectedVideoJob();
+    if (!selectedJob || !selectedJob.item) {
+      clearVideoExtendWorkspace('选择一个已完成视频后，可拖动时间条设置延长起点');
+      return;
+    }
+    const safeUrl = String(selectedJob.item.dataset.videoUrl || '').trim();
+    if (videoExtendWorkspace) {
+      videoExtendWorkspace.classList.remove('hidden');
+    }
+    if (!safeUrl) {
+      if (videoExtendWorkspaceBody) {
+        videoExtendWorkspaceBody.classList.add('hidden');
+      }
+      if (videoExtendWorkspaceEmpty) {
+        videoExtendWorkspaceEmpty.classList.remove('hidden');
+        videoExtendWorkspaceEmpty.textContent = '当前视频还在生成中，返回链接后可拖动时间条设置延长起点';
+      }
+      state.videoExtendLockedMs = 0;
+      state.videoExtendDurationMs = 0;
+      if (videoExtendPreview) {
+        videoExtendPreview.pause();
+        videoExtendPreview.removeAttribute('src');
+        videoExtendPreview.dataset.taskId = '';
+        videoExtendPreview.dataset.videoUrl = '';
+        videoExtendPreview.load();
+      }
+      if (videoExtendTimeline) {
+        videoExtendTimeline.value = '0';
+        updateVideoExtendTrack();
+      }
+      renderVideoExtendSelection();
+      syncVideoExtendTimelineAvailability();
+      return;
+    }
+    if (videoExtendWorkspaceEmpty) {
+      videoExtendWorkspaceEmpty.classList.add('hidden');
+    }
+    if (videoExtendWorkspaceBody) {
+      videoExtendWorkspaceBody.classList.remove('hidden');
+    }
+    if (!videoExtendPreview) {
+      renderVideoExtendSelection();
+      syncVideoExtendTimelineAvailability();
+      return;
+    }
+    const taskId = String(selectedJob.taskId || selectedJob.item.dataset.taskId || '').trim();
+    const changed = videoExtendPreview.dataset.taskId !== taskId || videoExtendPreview.dataset.videoUrl !== safeUrl;
+    if (changed) {
+      state.videoExtendLockedMs = 0;
+      state.videoExtendDurationMs = 0;
+      videoExtendPreview.dataset.taskId = taskId;
+      videoExtendPreview.dataset.videoUrl = safeUrl;
+      videoExtendPreview.src = safeUrl;
+      videoExtendPreview.load();
+    }
+    renderVideoExtendSelection();
+    syncVideoExtendTimelineAvailability();
   }
 
   function getParentMemoryApi() {
@@ -162,11 +384,12 @@
   }
 
   function updateVideoButtons() {
-    const hasSelected = Boolean(getSelectedCandidate());
+    const hasSource = Boolean(state.videoImageDataUrl) || Boolean(getSelectedCandidate());
     const running = state.videoRunning;
     setToggleButtonState(startVideoBtn, running, '中止');
-    if (startVideoBtn) startVideoBtn.disabled = running ? false : !hasSelected;
+    if (startVideoBtn) startVideoBtn.disabled = running ? false : !hasSource;
     if (stopVideoBtn) stopVideoBtn.disabled = !state.videoRunning;
+    syncVideoExtendButtons();
   }
 
   function inferMime(raw) {
@@ -201,12 +424,48 @@
     return `data:${mime};base64,${compact}`;
   }
 
+  async function readFileAsDataUrl(file) {
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   function normalizeAuthHeader(authHeader) {
     if (!authHeader) return '';
     if (authHeader.startsWith('Bearer ')) {
       return authHeader.slice(7).trim();
     }
     return authHeader;
+  }
+
+  function clearVideoImagePreview() {
+    if (!videoReferencePreview) return;
+    videoReferencePreview.classList.add('hidden');
+    if (videoReferencePreviewImg) {
+      videoReferencePreviewImg.removeAttribute('src');
+    }
+    if (videoReferencePreviewMeta) {
+      videoReferencePreviewMeta.textContent = '';
+    }
+  }
+
+  function setVideoImagePreview(dataUrl, fileName) {
+    const safe = String(dataUrl || '').trim();
+    if (!safe || !videoReferencePreview || !videoReferencePreviewImg) {
+      clearVideoImagePreview();
+      return;
+    }
+    videoReferencePreview.classList.remove('hidden');
+    videoReferencePreviewImg.src = safe;
+    videoReferencePreviewImg.alt = fileName ? `本地参考图: ${fileName}` : '本地参考图预览';
+    if (videoReferencePreviewMeta) {
+      const commaIndex = safe.indexOf(',');
+      const sizeText = commaIndex >= 0 ? Math.max(0, safe.length - commaIndex - 1) : safe.length;
+      videoReferencePreviewMeta.textContent = `来源：本地文件(base64) | 文件：${fileName || '-'} | 载荷长度：${sizeText}`;
+    }
   }
 
   function buildImagineSseUrl(taskId, rawPublicKey) {
@@ -448,6 +707,60 @@
 
   function getSelectedCandidate() {
     return state.candidates.find((item) => item.id === state.selectedCandidateId) || null;
+  }
+
+  function getVideoJob(taskId) {
+    const key = String(taskId || '').trim();
+    if (!key) return null;
+    return state.videoJobs.get(key) || null;
+  }
+
+  function getSelectedVideoJob() {
+    return getVideoJob(state.selectedVideoTaskId);
+  }
+
+  function getVideoCardTitle(item) {
+    const el = item ? item.querySelector('.video-item-title') : null;
+    return el ? String(el.textContent || '').trim() : '';
+  }
+
+  function selectVideoCard(taskId) {
+    state.selectedVideoTaskId = String(taskId || '').trim();
+    const items = videoResults ? videoResults.querySelectorAll('.video-item') : [];
+    items.forEach((item) => {
+      if (!(item instanceof HTMLElement)) return;
+      item.classList.toggle('selected', item.dataset.taskId === state.selectedVideoTaskId);
+    });
+    syncVideoExtendWorkspace();
+    updateSelectedMeta();
+  }
+
+  function syncVideoExtendButtons() {
+    const selectedJob = getSelectedVideoJob();
+    const selectedVideoUrl = selectedJob && selectedJob.item
+      ? String(selectedJob.item.dataset.videoUrl || '').trim()
+      : '';
+    if (extendVideoBtn) {
+      if (!extendVideoBtn.dataset.defaultText) {
+        extendVideoBtn.dataset.defaultText = String(extendVideoBtn.textContent || '').trim() || '延长当前视频';
+      }
+      extendVideoBtn.textContent = state.extendRunning
+        ? '延长中...'
+        : (extendVideoBtn.dataset.defaultText || '延长当前视频');
+      extendVideoBtn.disabled = state.extendRunning || !selectedVideoUrl;
+    }
+    state.videoJobs.forEach((job, taskId) => {
+      const btn = job && job.item ? job.item.querySelector('.video-extend-btn') : null;
+      if (!btn) return;
+      if (!btn.dataset.defaultText) {
+        btn.dataset.defaultText = String(btn.textContent || '').trim() || '延长';
+      }
+      const isRunningSource = state.extendRunning && state.extendSourceTaskId === taskId;
+      btn.textContent = isRunningSource ? '延长中...' : (btn.dataset.defaultText || '延长');
+      btn.disabled = state.extendRunning || !String(job.item.dataset.videoUrl || '').trim();
+    });
+    syncVideoExtendTimelineAvailability();
+    renderVideoExtendSelection();
   }
 
   function getCandidateById(id) {
@@ -717,16 +1030,77 @@
 
   function updateSelectedMeta() {
     const selected = getSelectedCandidate();
-    if (!selected) {
-      if (selectedMeta) selectedMeta.textContent = '未选择候选图';
+    const selectedVideoJob = getSelectedVideoJob();
+    const localName = String(state.videoImageFileName || '').trim();
+    if (!selected && !state.videoImageDataUrl && !selectedVideoJob) {
+      if (selectedMeta) selectedMeta.textContent = '未选择候选图（可上传本地参考图直接生视频）';
       updateVideoButtons();
       return;
     }
-    const prompt = (selected.prompt || '').slice(0, 34) || '-';
+    const parts = [];
+    if (state.videoImageDataUrl) {
+      parts.push(`本地参考图=${localName || '已加载'}（优先）`);
+    }
+    if (selected) {
+      const prompt = (selected.prompt || '').slice(0, 34) || '-';
+      parts.push(`候选#${selected.index}`);
+      parts.push(`parentPostId=${shortId(selected.parentPostId)}`);
+      parts.push(prompt);
+    }
+    if (selectedVideoJob && selectedVideoJob.item) {
+      const taskTitle = getVideoCardTitle(selectedVideoJob.item) || '当前视频';
+      const videoPostId = String(selectedVideoJob.item.dataset.postId || '').trim();
+      parts.push(`当前视频=${taskTitle}`);
+      parts.push(`videoPostId=${shortId(videoPostId)}`);
+      parts.push(`延长起点=${formatMs(state.videoExtendLockedMs)}`);
+    }
     if (selectedMeta) {
-      selectedMeta.textContent = `已选中 #${selected.index} | parentPostId=${shortId(selected.parentPostId)} | ${prompt}`;
+      selectedMeta.textContent = parts.join(' | ');
     }
     updateVideoButtons();
+  }
+
+  function clearLocalVideoImage(options = {}) {
+    const silent = Boolean(options.silent);
+    state.videoImageDataUrl = '';
+    state.videoImageFileName = '';
+    if (videoImageFileInput) {
+      videoImageFileInput.value = '';
+    }
+    if (videoImageFileName) {
+      videoImageFileName.textContent = '未选择文件';
+    }
+    clearVideoImagePreview();
+    updateSelectedMeta();
+    if (!silent) {
+      toast('已清除本地参考图', 'info');
+    }
+  }
+
+  async function applyLocalVideoImageFile(file, sourceLabel) {
+    if (!file) return;
+    const mimeType = String(file.type || '');
+    if (mimeType && !mimeType.startsWith('image/')) {
+      toast('仅支持图片文件', 'warning');
+      return;
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    if (!dataUrl.startsWith('data:image/')) {
+      throw new Error('图片格式不受支持');
+    }
+    state.videoImageDataUrl = dataUrl;
+    state.videoImageFileName = file.name || '';
+    if (videoImageFileInput) {
+      videoImageFileInput.value = '';
+    }
+    if (videoImageFileName) {
+      videoImageFileName.textContent = state.videoImageFileName || '已选择图片';
+    }
+    setVideoImagePreview(state.videoImageDataUrl, state.videoImageFileName);
+    updateSelectedMeta();
+    if (sourceLabel) {
+      toast(`${sourceLabel}已载入`, 'success');
+    }
   }
 
   function updateLightbox(index) {
@@ -1246,20 +1620,29 @@
   }
 
   function createVideoCard(index, taskId) {
+    const title = typeof index === 'number' ? `任务 ${index}` : String(index || '任务');
     const item = document.createElement('div');
     item.className = 'video-item';
     item.dataset.taskId = taskId;
     item.innerHTML = `
       <div class="video-item-head">
-        <div class="video-item-title">任务 ${index}</div>
+        <div class="video-item-title">${title}</div>
         <div class="video-item-status running">排队中</div>
       </div>
       <div class="video-body">等待上游返回视频流...</div>
+      <div class="video-extend-row">
+        <textarea class="geist-input video-extend-prompt" rows="2" placeholder="延长提示词（可选，留空沿用上方视频提示词）"></textarea>
+        <button class="geist-button-outline text-xs px-3 video-extend-btn" type="button" disabled>延长</button>
+      </div>
       <div class="video-actions">
         <a class="geist-button-outline text-xs px-3 hidden video-open" target="_blank" rel="noopener">打开</a>
         <button class="geist-button-outline text-xs px-3 video-download" type="button" disabled>下载</button>
       </div>
     `;
+    const promptEl = item.querySelector('.video-extend-prompt');
+    if (promptEl instanceof HTMLTextAreaElement) {
+      mountVideoExtendPromptEnhancer(promptEl);
+    }
     videoResults.appendChild(item);
     return item;
   }
@@ -1288,10 +1671,13 @@
     if (!item) return;
     const open = item.querySelector('.video-open');
     const download = item.querySelector('.video-download');
-    item.dataset.videoUrl = url || '';
+    const extendBtn = item.querySelector('.video-extend-btn');
+    const safeUrl = String(url || '').trim();
+    item.dataset.videoUrl = safeUrl;
+    item.dataset.postId = extractParentPostIdFromText(safeUrl);
     if (open) {
-      if (url) {
-        open.href = url;
+      if (safeUrl) {
+        open.href = safeUrl;
         open.classList.remove('hidden');
       } else {
         open.classList.add('hidden');
@@ -1299,8 +1685,17 @@
       }
     }
     if (download) {
-      download.disabled = !url;
-      download.dataset.url = url || '';
+      download.disabled = !safeUrl;
+      download.dataset.url = safeUrl;
+    }
+    if (extendBtn) {
+      extendBtn.disabled = !safeUrl || state.extendRunning;
+    }
+    if (safeUrl) {
+      selectVideoCard(item.dataset.taskId || '');
+    } else {
+      syncVideoExtendButtons();
+      syncVideoExtendWorkspace();
     }
   }
 
@@ -1337,6 +1732,11 @@
     const job = state.videoJobs.get(taskId);
     if (!job || job.done) return;
     job.done = true;
+    if (state.extendRunningTaskId === taskId) {
+      state.extendRunning = false;
+      state.extendSourceTaskId = '';
+      state.extendRunningTaskId = '';
+    }
 
     if (job.source) {
       try {
@@ -1355,6 +1755,7 @@
       setVideoItemStatus(job.item, '完成', 'done');
     }
 
+    updateVideoButtons();
     const allDone = Array.from(state.videoJobs.values()).every((it) => it.done);
     if (allDone) {
       state.videoRunning = false;
@@ -1471,13 +1872,126 @@
     return generic.has(text) || generic.has(key);
   }
 
-  async function startVideos() {
-    const selected = getSelectedCandidate();
-    if (!selected) {
-      toast('请先选中一张候选图', 'error');
+  function getVideoPromptPreset() {
+    const promptRaw = String(videoPromptInput?.value || '').trim();
+    const genericPrompt = isGenericVideoPrompt(promptRaw);
+    return {
+      prompt: genericPrompt ? '' : promptRaw,
+      preset: genericPrompt ? 'spicy' : 'custom',
+    };
+  }
+
+  async function runVideoExtend(taskId, promptOverride) {
+    const sourceJob = getVideoJob(taskId) || getSelectedVideoJob();
+    if (!sourceJob || !sourceJob.item) {
+      toast('请先选择一个已完成视频', 'warning');
       return;
     }
-    if (!selected.parentPostId) {
+    if (state.extendRunning) {
+      toast('视频延长任务正在运行中', 'warning');
+      return;
+    }
+    const videoUrl = String(sourceJob.item.dataset.videoUrl || '').trim();
+    if (!videoUrl) {
+      toast('当前视频还没有可用链接', 'warning');
+      return;
+    }
+    const currentPostId = String(sourceJob.item.dataset.postId || extractParentPostIdFromText(videoUrl)).trim();
+    if (!currentPostId) {
+      toast('无法识别当前视频的 postId', 'error');
+      return;
+    }
+
+    const authHeader = await ensurePublicKey();
+    if (authHeader === null) {
+      toast('请先配置 Public Key', 'error');
+      window.location.href = '/login';
+      return;
+    }
+
+    state.videoAuthHeader = authHeader;
+    state.videoRawPublicKey = normalizeAuthHeader(authHeader);
+
+    const overridePrompt = String(promptOverride || '').trim();
+    const promptRaw = overridePrompt || String(videoPromptInput?.value || '').trim();
+    const genericPrompt = isGenericVideoPrompt(promptRaw);
+    const prompt = genericPrompt ? '' : promptRaw;
+    const preset = genericPrompt ? 'spicy' : 'custom';
+    const originalPostId = String(
+      sourceJob.originParentPostId
+      || sourceJob.item.dataset.originParentPostId
+      || ''
+    ).trim() || currentPostId;
+    const extendStartTime = Math.max(0, state.videoExtendLockedMs / 1000);
+
+    let data;
+    try {
+      data = await createVideoTask(authHeader, {
+        prompt,
+        aspect_ratio: ratioSelect ? ratioSelect.value : '16:9',
+        video_length: 10,
+        resolution_name: resolutionSelect ? resolutionSelect.value : '480p',
+        preset,
+        is_video_extension: true,
+        extend_post_id: currentPostId,
+        video_extension_start_time: extendStartTime,
+        original_post_id: originalPostId,
+        file_attachment_id: originalPostId || currentPostId,
+        stitch_with_extend: true,
+      });
+    } catch (e) {
+      toast('视频延长创建失败', 'error');
+      return;
+    }
+
+    const newTaskId = String(data && data.task_id ? data.task_id : '');
+    if (!newTaskId) {
+      toast('视频延长创建失败', 'error');
+      return;
+    }
+
+    if (videoEmpty) videoEmpty.classList.add('hidden');
+    state.videoRunning = true;
+    if (!state.videoTaskIds.includes(newTaskId)) {
+      state.videoTaskIds.push(newTaskId);
+    }
+    state.extendRunning = true;
+    state.extendSourceTaskId = String(sourceJob.taskId || '');
+    state.extendRunningTaskId = newTaskId;
+
+    const title = `延长 · ${getVideoCardTitle(sourceJob.item) || shortId(currentPostId)}`;
+    const card = createVideoCard(title, newTaskId);
+    card.dataset.originTaskId = String(sourceJob.taskId || '');
+    card.dataset.originParentPostId = originalPostId;
+
+    state.videoJobs.set(newTaskId, {
+      taskId: newTaskId,
+      item: card,
+      source: null,
+      buffer: '',
+      progressBuffer: '',
+      collecting: false,
+      done: false,
+      originParentPostId: originalPostId,
+      sourceImageUrl: sourceJob.sourceImageUrl || '',
+      isExtension: true,
+    });
+
+    selectVideoCard(newTaskId);
+    updateCounters();
+    updateVideoButtons();
+    setChip(videoStatusText, '视频：延长中', 'running');
+    openVideoStream(newTaskId, card);
+  }
+
+  async function startVideos() {
+    const selected = getSelectedCandidate();
+    const useLocalImage = Boolean(state.videoImageDataUrl);
+    if (!selected && !useLocalImage) {
+      toast('请先选中候选图，或上传本地参考图', 'error');
+      return;
+    }
+    if (!useLocalImage && !selected.parentPostId) {
       toast('该候选图缺少 parentPostId，无法走 NSFW 全流程', 'error');
       return;
     }
@@ -1499,10 +2013,7 @@
     state.videoRawPublicKey = normalizeAuthHeader(authHeader);
 
     const parallel = Math.max(1, Math.min(4, parseInt(videoParallelSelect?.value || '1', 10)));
-    const promptRaw = String(videoPromptInput?.value || '').trim();
-    const genericPrompt = isGenericVideoPrompt(promptRaw);
-    const prompt = genericPrompt ? '' : promptRaw;
-    const preset = genericPrompt ? 'spicy' : 'custom';
+    const { prompt, preset } = getVideoPromptPreset();
 
     const payload = {
       prompt,
@@ -1510,12 +2021,18 @@
       video_length: parseInt(videoLengthSelect?.value || '6', 10),
       resolution_name: resolutionSelect ? resolutionSelect.value : '480p',
       preset,
-      parent_post_id: selected.parentPostId,
-      source_image_url: pickSourceImageUrl(
+    };
+    if (useLocalImage) {
+      payload.image_url = state.videoImageDataUrl;
+      payload.parent_post_id = null;
+      payload.source_image_url = null;
+    } else {
+      payload.parent_post_id = selected.parentPostId;
+      payload.source_image_url = pickSourceImageUrl(
         [selected.sourceImageUrl, selected.imageUrl],
         selected.parentPostId
-      ),
-    };
+      );
+    }
 
     const taskIds = [];
     for (let i = 0; i < parallel; i++) {
@@ -1555,6 +2072,12 @@
         progressBuffer: '',
         collecting: false,
         done: false,
+        originParentPostId: useLocalImage ? '' : String(selected.parentPostId || '').trim(),
+        sourceImageUrl: useLocalImage ? '' : pickSourceImageUrl(
+          [selected.sourceImageUrl, selected.imageUrl],
+          selected.parentPostId
+        ),
+        isExtension: false,
       });
       openVideoStream(taskId, card);
     });
@@ -1563,6 +2086,9 @@
   async function stopVideos(silent) {
     const runningTaskIds = state.videoTaskIds.slice();
     await stopVideoTasks(state.videoAuthHeader, runningTaskIds);
+    state.extendRunning = false;
+    state.extendSourceTaskId = '';
+    state.extendRunningTaskId = '';
 
     state.videoJobs.forEach((job) => {
       if (job.source) {
@@ -1595,6 +2121,11 @@
     }
     state.videoJobs.clear();
     state.videoTaskIds = [];
+    state.selectedVideoTaskId = '';
+    state.extendRunning = false;
+    state.extendSourceTaskId = '';
+    state.extendRunningTaskId = '';
+    clearVideoExtendWorkspace('选择一个已完成视频后，可拖动时间条设置延长起点');
     if (videoResults) {
       videoResults.innerHTML = '';
     }
@@ -1602,11 +2133,50 @@
       videoEmpty.classList.remove('hidden');
     }
     updateCounters();
+    updateSelectedMeta();
     updateVideoButtons();
     if (!silent) {
       setChip(videoStatusText, '视频：已清空', '');
     }
   }
+
+  if (videoExtendTimeline) {
+    videoExtendTimeline.addEventListener('input', () => {
+      const durationMs = Math.round(Math.max(0, Number(state.videoExtendDurationMs || 0)));
+      const ratio = Number(videoExtendTimeline.value || 0) / VIDEO_EXTEND_TIMELINE_MAX;
+      const nextMs = clampVideoExtendTimestampMs(Math.round(durationMs * ratio));
+      state.videoExtendLockedMs = nextMs;
+      if (videoExtendPreview && durationMs > 0) {
+        videoExtendPreview.currentTime = nextMs / 1000;
+      }
+      if (durationMs > 0) {
+        videoExtendTimeline.value = String(Math.round((nextMs / durationMs) * VIDEO_EXTEND_TIMELINE_MAX));
+      }
+      updateVideoExtendTrack();
+      renderVideoExtendSelection();
+      updateSelectedMeta();
+    });
+  }
+
+  if (videoExtendPreview) {
+    enforceInlinePlayback(videoExtendPreview);
+    videoExtendPreview.addEventListener('loadedmetadata', () => {
+      syncVideoExtendTimelineFromPlayer();
+      if (state.videoExtendLockedMs > 0) {
+        videoExtendPreview.currentTime = state.videoExtendLockedMs / 1000;
+      }
+    });
+    videoExtendPreview.addEventListener('timeupdate', () => {
+      syncVideoExtendTimelineFromPlayer();
+      updateSelectedMeta();
+    });
+    videoExtendPreview.addEventListener('seeked', () => {
+      syncVideoExtendTimelineFromPlayer();
+      updateSelectedMeta();
+    });
+  }
+
+  clearVideoExtendWorkspace('选择一个已完成视频后，可拖动时间条设置延长起点');
 
   if (candidateWaterfall) {
     candidateWaterfall.addEventListener('click', async (event) => {
@@ -1642,6 +2212,20 @@
     videoResults.addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      const item = target.closest('.video-item');
+      if (!item) return;
+      const taskId = String(item.dataset.taskId || '');
+      if (taskId) {
+        selectVideoCard(taskId);
+      }
+      if (target.classList.contains('video-extend-btn')) {
+        event.preventDefault();
+        const promptInput = item.querySelector('.video-extend-prompt');
+        const promptRaw = promptInput ? String(promptInput.value || '') : '';
+        const promptOverride = promptRaw.trim();
+        await runVideoExtend(taskId, promptOverride);
+        return;
+      }
       if (!target.classList.contains('video-download')) return;
 
       const url = String(target.dataset.url || '');
@@ -1690,6 +2274,12 @@
     });
   }
 
+  if (extendVideoBtn) {
+    extendVideoBtn.addEventListener('click', () => {
+      runVideoExtend(state.selectedVideoTaskId);
+    });
+  }
+
   if (startVideoBtn) {
     startVideoBtn.addEventListener('click', () => {
       if (String(startVideoBtn.dataset.running || '0') === '1') {
@@ -1707,6 +2297,31 @@
   if (clearVideosBtn) {
     clearVideosBtn.addEventListener('click', () => {
       clearVideos(false);
+    });
+  }
+
+  if (videoImageFileInput) {
+    videoImageFileInput.addEventListener('change', async () => {
+      const file = videoImageFileInput.files && videoImageFileInput.files[0];
+      if (!file) return;
+      try {
+        await applyLocalVideoImageFile(file, '本地参考图');
+      } catch (e) {
+        clearLocalVideoImage({ silent: true });
+        toast(String(e && e.message ? e.message : '图片读取失败'), 'error');
+      }
+    });
+  }
+
+  if (selectVideoImageBtn && videoImageFileInput) {
+    selectVideoImageBtn.addEventListener('click', () => {
+      videoImageFileInput.click();
+    });
+  }
+
+  if (clearVideoImageBtn) {
+    clearVideoImageBtn.addEventListener('click', () => {
+      clearLocalVideoImage();
     });
   }
 

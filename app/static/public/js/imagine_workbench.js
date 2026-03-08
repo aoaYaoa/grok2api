@@ -8,6 +8,11 @@
   const previewShell = document.getElementById('previewShell');
   const currentGallery = document.getElementById('currentGallery');
   const previewEmpty = document.getElementById('previewEmpty');
+  const previewLightbox = document.getElementById('previewLightbox');
+  const previewLightboxImg = document.getElementById('previewLightboxImg');
+  const previewLightboxDownload = document.getElementById('previewLightboxDownload');
+  const previewLightboxClose = document.getElementById('previewLightboxClose');
+  const previewLightboxCaption = document.getElementById('previewLightboxCaption');
   const currentParentId = document.getElementById('currentParentId');
   const currentMode = document.getElementById('currentMode');
   const editPromptInput = document.getElementById('editPromptInput');
@@ -34,6 +39,7 @@
     history: [],
     editRound: 0,
   };
+  const WORKBENCH_IMAGE_ACTION_PROMPT_KEY = 'imagine_workbench_image_action_prompt_draft';
   let workbenchEditAbortController = null;
   let editProgressTimer = null;
   let editProgressHideTimer = null;
@@ -104,6 +110,70 @@
     return raw;
   }
 
+  function getRememberedHistoryImageActionPrompt() {
+    try {
+      return String(window.localStorage.getItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY) || '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function rememberHistoryImageActionPrompt(value) {
+    const safe = String(value || '');
+    try {
+      if (!safe.trim()) {
+        window.localStorage.removeItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY);
+      } else {
+        window.localStorage.setItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY, safe);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function bindHistoryImageActionPrompt(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    if (textarea.dataset.historyImageActionPromptBound === '1') return;
+    const sync = () => {
+      rememberHistoryImageActionPrompt(textarea.value);
+    };
+    textarea.addEventListener('input', sync);
+    textarea.addEventListener('change', sync);
+    textarea.addEventListener('blur', sync);
+    textarea.addEventListener('prompt-enhance-applied', sync);
+    textarea.dataset.historyImageActionPromptBound = '1';
+  }
+
+  function mountHistoryImageActionPromptEnhancer(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    bindHistoryImageActionPrompt(textarea);
+    const api = window.PromptEnhancer;
+    if (!api || typeof api.mount !== 'function') return;
+    api.mount(textarea);
+    const wrapper = textarea.parentElement;
+    if (wrapper && wrapper.classList && wrapper.classList.contains('prompt-enhance-wrap')) {
+      wrapper.classList.add('history-prompt-enhance-wrap');
+    }
+  }
+
+  function getWorkbenchImageActionLabel(mode) {
+    return mode === 'outpaint' ? '扩图' : '续图';
+  }
+
+  function buildWorkbenchImageActionPrompt(mode, promptValue, entry) {
+    const raw = String(promptValue || '').trim();
+    if (raw) return raw;
+    const seedPrompt = String(entry && entry.prompt ? entry.prompt : '').trim();
+    if (mode === 'outpaint') {
+      return seedPrompt
+        ? `在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容：${seedPrompt}`
+        : '在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容。';
+    }
+    return seedPrompt
+      ? `延续当前画面内容和风格，自然生成后续画面：${seedPrompt}`
+      : '延续当前画面内容和风格，自然生成后续画面。';
+  }
+
   function buildImaginePublicUrl(parentPostId) {
     return `https://imagine-public.x.ai/imagine-public/images/${parentPostId}.jpg`;
   }
@@ -125,10 +195,10 @@
     const candidates = [
       hit && hit.current_source_image_url,
       hit && hit.currentSourceImageUrl,
-      hit && hit.source_image_url,
-      hit && hit.sourceImageUrl,
       hit && hit.image_url,
       hit && hit.imageUrl,
+      hit && hit.source_image_url,
+      hit && hit.sourceImageUrl,
       fallbackValue,
     ];
     for (const candidate of candidates) {
@@ -569,6 +639,39 @@
     if (!previewShell) return;
     previewShell.classList.toggle('dragover', Boolean(active));
   }
+  function closePreviewLightbox() {
+    if (!previewLightbox) return;
+    previewLightbox.classList.remove('active');
+    previewLightbox.setAttribute('aria-hidden', 'true');
+    document.body.style.removeProperty('overflow');
+  }
+
+  function buildPreviewDownloadName() {
+    const parentId = String(state.currentParentPostId || '').trim();
+    if (parentId) {
+      return 'imagine-workbench-' + parentId + '.jpg';
+    }
+    return 'imagine-workbench-preview.jpg';
+  }
+
+  function openPreviewLightbox(url) {
+    const safeUrl = String(url || '').trim();
+    if (!safeUrl || !previewLightbox || !previewLightboxImg) return;
+    previewLightboxImg.src = safeUrl;
+    if (previewLightboxDownload) {
+      previewLightboxDownload.href = safeUrl;
+      previewLightboxDownload.setAttribute('download', buildPreviewDownloadName());
+    }
+    if (previewLightboxCaption) {
+      const label = state.currentParentPostId
+        ? '当前画面预览 · ' + shortId(state.currentParentPostId)
+        : '当前画面预览';
+      previewLightboxCaption.textContent = label;
+    }
+    previewLightbox.classList.add('active');
+    previewLightbox.setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';
+  }
 
   function hasFiles(dataTransfer) {
     if (!dataTransfer) return false;
@@ -614,6 +717,17 @@
     img.loading = 'lazy';
     img.decoding = 'async';
     item.appendChild(img);
+    item.addEventListener('click', () => {
+      openPreviewLightbox(primaryUrl);
+    });
+    item.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openPreviewLightbox(primaryUrl);
+    });
+    item.tabIndex = 0;
+    item.setAttribute('role', 'button');
+    item.setAttribute('aria-label', '打开当前画面大图预览');
     currentGallery.appendChild(item);
 
     currentGallery.classList.remove('hidden');
@@ -661,7 +775,7 @@
   function setCurrentFromEntry(entry) {
     if (!entry) return;
     state.currentParentPostId = String(entry.parentPostId || '').trim();
-    state.currentSourceImageUrl = String(entry.sourceImageUrl || '').trim();
+    state.currentSourceImageUrl = pickSourceImageUrl(entry, state.currentParentPostId);
     state.currentModeValue = String(entry.mode || '').trim() || 'parent_post';
     if (parentPostInput) {
       parentPostInput.value = state.currentParentPostId;
@@ -751,10 +865,45 @@
       actions.appendChild(applyBtn);
       actions.appendChild(copyBtn);
 
+      const actionRow = document.createElement('div');
+      actionRow.className = 'history-image-action-row';
+
+      const promptInput = document.createElement('textarea');
+      promptInput.className = 'geist-input history-image-action-prompt';
+      promptInput.rows = 2;
+      promptInput.placeholder = '图片提示词（可选，可增强；续图留空自然延续，扩图留空自动补边）';
+      promptInput.value = getRememberedHistoryImageActionPrompt();
+      mountHistoryImageActionPromptEnhancer(promptInput);
+
+      const actionButtons = document.createElement('div');
+      actionButtons.className = 'history-image-action-buttons';
+
+      const continueBtn = document.createElement('button');
+      continueBtn.type = 'button';
+      continueBtn.className = 'geist-button-outline history-image-continue-btn';
+      continueBtn.textContent = '续图';
+      continueBtn.addEventListener('click', async () => {
+        await runHistoryImageAction(entry, 'continue', promptInput);
+      });
+
+      const outpaintBtn = document.createElement('button');
+      outpaintBtn.type = 'button';
+      outpaintBtn.className = 'geist-button-outline history-image-outpaint-btn';
+      outpaintBtn.textContent = '扩图';
+      outpaintBtn.addEventListener('click', async () => {
+        await runHistoryImageAction(entry, 'outpaint', promptInput);
+      });
+
+      actionButtons.appendChild(continueBtn);
+      actionButtons.appendChild(outpaintBtn);
+      actionRow.appendChild(promptInput);
+      actionRow.appendChild(actionButtons);
+
       main.appendChild(line1);
       main.appendChild(line2);
       main.appendChild(prompt);
       main.appendChild(actions);
+      main.appendChild(actionRow);
 
       item.appendChild(thumb);
       item.appendChild(main);
@@ -905,44 +1054,13 @@
     return authHeader;
   }
 
-  async function runEdit() {
-    if (state.editing) {
-      if (workbenchEditAbortController) {
-        workbenchEditAbortController.abort();
-      }
-      return;
-    }
-
-    const prompt = String(editPromptInput ? editPromptInput.value : '').trim();
-    if (!prompt) {
-      toast('请输入编辑提示词', 'warning');
-      return;
-    }
-
-    if (!state.currentParentPostId && !state.referenceImages.length) {
-      toast('请先添加参考图', 'warning');
-      return;
-    }
-
-    let authHeader = '';
-    try {
-      authHeader = await ensurePublicAuth();
-    } catch (e) {
-      toast(String(e.message || e), 'error');
-      if (String(e.message || '').includes('登录')) {
-        window.location.href = '/login';
-      }
-      return;
-    }
-
-    const body = {
-      prompt,
-    };
-
-    const references = state.referenceImages
+  function buildWorkbenchEditBody(prompt, options = {}) {
+    const body = { prompt };
+    const references = (Array.isArray(options.references) ? options.references : [])
       .slice(0, REFERENCE_LIMIT)
-      .map((item) => String(item.data || '').trim())
+      .map((item) => String(item || '').trim())
       .filter(Boolean);
+    const useReferenceMergeMode = references.length >= 2;
     if (references.length) {
       body.image_references = references;
       const firstRef = references[0];
@@ -953,14 +1071,50 @@
       }
     }
 
-    if (state.currentParentPostId) {
-      body.parent_post_id = state.currentParentPostId;
-      if (state.currentSourceImageUrl) {
-        body.source_image_url = state.currentSourceImageUrl;
+    const parentPostId = String(options.parentPostId || '').trim();
+    const sourceImageUrl = pickSourceImageUrl(
+      { sourceImageUrl: options.sourceImageUrl },
+      parentPostId,
+      options.sourceImageUrl
+    );
+    if (parentPostId && !useReferenceMergeMode) {
+      body.parent_post_id = parentPostId;
+      if (sourceImageUrl) {
+        body.source_image_url = sourceImageUrl;
       }
     } else if (!references.length) {
+      return null;
+    }
+
+    return body;
+  }
+
+  async function performWorkbenchEdit(options = {}) {
+    const prompt = String(options.prompt || '').trim();
+    if (!prompt) {
+      toast('请输入编辑提示词', 'warning');
+      return false;
+    }
+
+    let authHeader = '';
+    try {
+      authHeader = await ensurePublicAuth();
+    } catch (e) {
+      toast(String(e.message || e), 'error');
+      if (String(e.message || '').includes('登录')) {
+        window.location.href = '/login';
+      }
+      return false;
+    }
+
+    const body = buildWorkbenchEditBody(prompt, {
+      references: options.references,
+      parentPostId: options.parentPostId,
+      sourceImageUrl: options.sourceImageUrl,
+    });
+    if (!body) {
       toast('请先添加参考图', 'warning');
-      return;
+      return false;
     }
 
     setEditing(true);
@@ -992,15 +1146,16 @@
         throw new Error('返回结果缺少图片 URL');
       }
 
-      const previousParentPostId = state.currentParentPostId;
+      const fallbackParentPostId = String(options.parentPostId || state.currentParentPostId || '').trim();
       const generatedParent = String(
         payload.current_parent_post_id
         || payload.generated_parent_post_id
         || payload.input_parent_post_id
         || extractParentPostId(imageUrl)
       ).trim();
-      const resolvedParentPostId = generatedParent || previousParentPostId;
+      const resolvedParentPostId = generatedParent || fallbackParentPostId;
 
+      const fallbackSourceImageUrl = String(options.sourceImageUrl || state.currentSourceImageUrl || '').trim();
       const sourceImageUrl = pickSourceImageUrl(
         {
           current_source_image_url: payload.current_source_image_url,
@@ -1008,15 +1163,16 @@
           imageUrl,
         },
         resolvedParentPostId,
-        state.currentSourceImageUrl
+        fallbackSourceImageUrl
       );
 
-      const mode = String(payload.mode || (state.currentParentPostId ? 'parent_post' : 'upload')).trim();
+      const mode = String(options.mode || payload.mode || (resolvedParentPostId ? 'parent_post' : 'upload')).trim() || 'parent_post';
       const elapsedMs = Number(payload.elapsed_ms || 0);
+      const historyPrompt = String(options.historyPrompt || prompt).trim() || prompt;
 
       state.currentParentPostId = resolvedParentPostId;
       state.currentSourceImageUrl = sourceImageUrl;
-      state.currentModeValue = mode || 'parent_post';
+      state.currentModeValue = mode;
       if (parentPostInput) {
         parentPostInput.value = state.currentParentPostId || '';
       }
@@ -1032,12 +1188,20 @@
           round: state.editRound,
           roundIndex: index + 1,
           roundTotal: imageUrls.length,
-          prompt,
-          mode: state.currentModeValue,
+          prompt: historyPrompt,
+          mode,
           imageUrl: url,
           imageUrls,
           parentPostId: perParentPostId,
-          sourceImageUrl: String(url || sourceImageUrl || '').trim(),
+          sourceImageUrl: pickSourceImageUrl(
+            {
+              current_source_image_url: payload.current_source_image_url,
+              source_image_url: payload.source_image_url,
+              imageUrl: url,
+            },
+            perParentPostId,
+            sourceImageUrl
+          ),
           elapsedMs: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : 0,
           createdAt,
         };
@@ -1049,13 +1213,14 @@
           parentPostId: entry.parentPostId || resolvedParentPostId,
           sourceImageUrl: entry.sourceImageUrl || sourceImageUrl,
           imageUrl: entry.imageUrl || imageUrl,
-          origin: 'workbench_edit',
+          origin: options.origin || 'workbench_edit',
         });
       });
 
       finishEditProgress(true, '编辑完成 100%');
-      setStatus('done', `编辑完成 · round #${state.editRound}（${imageUrls.length} 张）`);
-      toast('编辑成功，已更新当前画面', 'success');
+      setStatus('done', options.successStatus || `编辑完成 · round #${state.editRound}（${imageUrls.length} 张）`);
+      toast(options.successToast || '编辑成功，已更新当前画面', 'success');
+      return true;
     } catch (e) {
       if (e && e.name === 'AbortError') {
         finishEditProgress(false, '已中止');
@@ -1066,13 +1231,77 @@
         setStatus('error', '编辑失败');
         toast(String(e.message || e), 'error');
       }
+      return false;
     } finally {
       workbenchEditAbortController = null;
       setEditing(false);
     }
   }
 
+  async function runHistoryImageAction(entry, mode, promptInput) {
+    if (state.editing) {
+      toast('当前有任务执行中，请稍候', 'warning');
+      return;
+    }
+    const parentPostId = String(entry && entry.parentPostId ? entry.parentPostId : '').trim();
+    if (!parentPostId) {
+      toast('当前记录没有 parentPostId，无法继续处理', 'warning');
+      return;
+    }
+    const promptRaw = promptInput ? String(promptInput.value || '') : '';
+    const finalPrompt = buildWorkbenchImageActionPrompt(mode, promptRaw, entry);
+    const label = getWorkbenchImageActionLabel(mode);
+    rememberHistoryImageActionPrompt(promptRaw);
+    await performWorkbenchEdit({
+      prompt: finalPrompt,
+      historyPrompt: String(promptRaw || finalPrompt).trim(),
+      mode,
+      parentPostId,
+      sourceImageUrl: String(entry.sourceImageUrl || entry.imageUrl || '').trim(),
+      origin: `workbench_${mode}`,
+      successStatus: `${label}完成 · round #${state.editRound + 1}`,
+      successToast: `${label}成功，已更新当前画面`,
+    });
+  }
+
+  async function runEdit() {
+    if (state.editing) {
+      if (workbenchEditAbortController) {
+        workbenchEditAbortController.abort();
+      }
+      return;
+    }
+
+    const prompt = String(editPromptInput ? editPromptInput.value : '').trim();
+    if (!prompt) {
+      toast('请输入编辑提示词', 'warning');
+      return;
+    }
+
+    if (!state.currentParentPostId && !state.referenceImages.length) {
+      toast('请先添加参考图', 'warning');
+      return;
+    }
+
+    const references = state.referenceImages
+      .slice(0, REFERENCE_LIMIT)
+      .map((item) => String(item.data || '').trim())
+      .filter(Boolean);
+    const useReferenceMergeMode = references.length >= 2;
+
+    await performWorkbenchEdit({
+      prompt,
+      historyPrompt: prompt,
+      mode: useReferenceMergeMode ? 'upload' : (state.currentParentPostId ? 'parent_post' : 'upload'),
+      parentPostId: useReferenceMergeMode ? '' : state.currentParentPostId,
+      sourceImageUrl: useReferenceMergeMode ? '' : state.currentSourceImageUrl,
+      references,
+      origin: 'workbench_edit',
+    });
+  }
+
   function bindEvents() {
+
     if (selectSeedBtn && seedImageInput) {
       selectSeedBtn.addEventListener('click', () => {
         seedImageInput.click();
@@ -1240,6 +1469,24 @@
       dragCounter = 0;
     });
   }
+  if (previewLightbox) {
+    previewLightbox.addEventListener('click', (event) => {
+      if (event.target !== previewLightbox) return;
+      closePreviewLightbox();
+    });
+  }
+
+  if (previewLightboxClose) {
+    previewLightboxClose.addEventListener('click', () => {
+      closePreviewLightbox();
+    });
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!previewLightbox || !previewLightbox.classList.contains('active')) return;
+    closePreviewLightbox();
+  });
 
   function mountInlineSubmitButton() {
     if (!editPromptInput || !submitEditBtn) return false;

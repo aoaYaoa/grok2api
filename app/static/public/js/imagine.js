@@ -60,6 +60,7 @@
   let lightboxEditAbortController = null;
   let finalMinBytesDefault = 100000;
   const lightboxHistoryByItem = new WeakMap();
+  const IMAGINE_IMAGE_ACTION_PROMPT_KEY = 'imagine_image_action_prompt_draft';
   if (lightboxEditSend) {
     lightboxEditSend.disabled = true;
   }
@@ -68,6 +69,104 @@
     if (typeof showToast === 'function') {
       showToast(message, type);
     }
+  }
+
+  function getRememberedImageActionPrompt() {
+    try {
+      return String(window.localStorage.getItem(IMAGINE_IMAGE_ACTION_PROMPT_KEY) || '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function rememberImageActionPrompt(value) {
+    const safe = String(value || '');
+    try {
+      if (!safe.trim()) {
+        window.localStorage.removeItem(IMAGINE_IMAGE_ACTION_PROMPT_KEY);
+      } else {
+        window.localStorage.setItem(IMAGINE_IMAGE_ACTION_PROMPT_KEY, safe);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function bindRememberedImageActionPrompt(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    if (textarea.dataset.imageActionPromptBound === '1') return;
+    const sync = () => {
+      rememberImageActionPrompt(textarea.value);
+    };
+    textarea.addEventListener('input', sync);
+    textarea.addEventListener('change', sync);
+    textarea.addEventListener('blur', sync);
+    textarea.addEventListener('prompt-enhance-applied', sync);
+    textarea.dataset.imageActionPromptBound = '1';
+  }
+
+  function mountImageActionPromptEnhancer(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    bindRememberedImageActionPrompt(textarea);
+    const api = window.PromptEnhancer;
+    if (!api || typeof api.mount !== 'function') return;
+    api.mount(textarea);
+  }
+
+  function getImageActionLabel(mode) {
+    return mode === 'outpaint' ? '扩图' : '续图';
+  }
+
+  function buildImageActionPrompt(mode, promptValue, item) {
+    const raw = String(promptValue || '').trim();
+    if (raw) return raw;
+    const seedPrompt = item ? String(item.dataset.prompt || '').trim() : '';
+    if (mode === 'outpaint') {
+      return seedPrompt
+        ? `在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容：${seedPrompt}`
+        : '在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容。';
+    }
+    return seedPrompt
+      ? `延续当前画面内容和风格，自然生成后续画面：${seedPrompt}`
+      : '延续当前画面内容和风格，自然生成后续画面。';
+  }
+
+  function attachWaterfallItemActionControls(item) {
+    if (!item || item.querySelector('.image-action-row')) return;
+    const row = document.createElement('div');
+    row.className = 'image-action-row';
+    row.innerHTML = `
+      <textarea class="geist-input image-action-prompt" rows="2" placeholder="图片提示词（可选，可增强；续图留空自然延续，扩图留空自动补边）"></textarea>
+      <div class="image-action-buttons">
+        <button class="geist-button-outline text-xs px-3 image-continue-btn" type="button">续图</button>
+        <button class="geist-button-outline text-xs px-3 image-outpaint-btn" type="button">扩图</button>
+      </div>
+    `;
+    row.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+    const promptInput = row.querySelector('.image-action-prompt');
+    const continueBtn = row.querySelector('.image-continue-btn');
+    const outpaintBtn = row.querySelector('.image-outpaint-btn');
+    if (promptInput instanceof HTMLTextAreaElement) {
+      promptInput.value = getRememberedImageActionPrompt();
+      mountImageActionPromptEnhancer(promptInput);
+    }
+    if (continueBtn instanceof HTMLButtonElement) {
+      continueBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runWaterfallImageAction(item, 'continue');
+      });
+    }
+    if (outpaintBtn instanceof HTMLButtonElement) {
+      outpaintBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runWaterfallImageAction(item, 'outpaint');
+      });
+    }
+    item.appendChild(row);
   }
 
   function setStatus(state, text) {
@@ -272,6 +371,45 @@
       // ignore
     }
     return fallback;
+  }
+
+  function extractParentPostIdFromText(text) {
+    return extractParentPostId(text);
+  }
+
+  function resolveWaterfallParentPostId(item) {
+    if (!item) return '';
+    const direct = extractParentPostIdFromText(String(item.dataset.parentPostId || '').trim());
+    if (direct) {
+      item.dataset.parentPostId = direct;
+      return direct;
+    }
+    const img = item.querySelector('img');
+    const inferred = extractParentPostIdFromText(
+      String(item.dataset.sourceImageUrl || '').trim()
+      || String(item.dataset.imageUrl || '').trim()
+      || String((img && (img.currentSrc || img.src)) || '').trim()
+    );
+    if (!inferred) {
+      return '';
+    }
+    item.dataset.parentPostId = inferred;
+    item.dataset.sourceImageUrl = pickSourceImageUrl(
+      [
+        String(item.dataset.sourceImageUrl || '').trim(),
+        String(item.dataset.imageUrl || '').trim(),
+        String((img && (img.currentSrc || img.src)) || '').trim(),
+      ],
+      inferred
+    );
+    rememberParentPost({
+      parentPostId: inferred,
+      sourceImageUrl: item.dataset.sourceImageUrl,
+      imageUrl: String(item.dataset.imageUrl || '').trim() || String((img && (img.currentSrc || img.src)) || '').trim(),
+      origin: 'imagine_waterfall_resolve',
+    });
+    updateCopyIdButton(item);
+    return inferred;
   }
 
   function toDisplayImageUrl(raw) {
@@ -782,6 +920,129 @@
     }
   }
 
+  async function runWaterfallImageAction(item, mode) {
+    if (!item) return;
+    const label = getImageActionLabel(mode);
+    const parentPostId = resolveWaterfallParentPostId(item);
+    if (!parentPostId) {
+      toast('当前图片缺少 parentPostId，无法继续处理', 'warning');
+      return;
+    }
+    const promptInput = item.querySelector('.image-action-prompt');
+    const promptRaw = promptInput ? String(promptInput.value || '') : '';
+    const finalPrompt = buildImageActionPrompt(mode, promptRaw, item);
+    rememberImageActionPrompt(promptRaw);
+
+    const continueBtn = item.querySelector('.image-continue-btn');
+    const outpaintBtn = item.querySelector('.image-outpaint-btn');
+    if (continueBtn) continueBtn.disabled = true;
+    if (outpaintBtn) outpaintBtn.disabled = true;
+    if (promptInput) promptInput.disabled = true;
+    const activeBtn = mode === 'outpaint' ? outpaintBtn : continueBtn;
+    const originalText = activeBtn ? String(activeBtn.textContent || '') : '';
+    if (activeBtn) activeBtn.textContent = `${label}中...`;
+
+    try {
+      const authHeader = await ensurePublicKey();
+      if (authHeader === null) {
+        toast('请先配置 Public Key', 'error');
+        window.location.href = '/login';
+        return;
+      }
+      const sourceImgEl = item.querySelector('img');
+      const sourceImageUrl = resolveSourceImageByParentPostId(
+        parentPostId,
+        pickSourceImageUrl(
+          [
+            String(item.dataset.sourceImageUrl || '').trim(),
+            String(item.dataset.imageUrl || '').trim(),
+            String((sourceImgEl && (sourceImgEl.currentSrc || sourceImgEl.src)) || '').trim(),
+          ],
+          parentPostId
+        )
+      );
+      if (sourceImageUrl) {
+        item.dataset.sourceImageUrl = sourceImageUrl;
+      }
+      const data = await requestImagineEdit(authHeader, finalPrompt, parentPostId, sourceImageUrl);
+      const list = (data && Array.isArray(data.data)) ? data.data : [];
+      const first = list.length ? list[0] : null;
+      const output = first ? (first.url || first.b64_json || first.image || '') : '';
+      if (!output) {
+        throw new Error(`${label}结果为空`);
+      }
+      const generatedParent = extractParentPostId(data && data.current_parent_post_id)
+        || extractParentPostId(data && data.generated_parent_post_id)
+        || extractParentPostId(output)
+        || parentPostId;
+      const nextSourceImageUrl = pickSourceImageUrl(
+        [
+          data && data.current_source_image_url,
+          data && data.source_image_url,
+          output,
+          item.dataset.sourceImageUrl,
+        ],
+        generatedParent
+      );
+      const displayUrl = toDisplayImageUrl(output);
+      if (!displayUrl) {
+        throw new Error(`${label}结果格式无效`);
+      }
+      const oldParent = String(item.dataset.parentPostId || '').trim();
+      if (oldParent && streamImageMap.get(oldParent) === item) {
+        streamImageMap.delete(oldParent);
+      }
+      const img = item.querySelector('img');
+      if (img) {
+        img.src = displayUrl;
+      }
+      item.dataset.imageUrl = displayUrl;
+      item.dataset.prompt = String(promptRaw || finalPrompt).trim();
+      item.dataset.parentPostId = generatedParent;
+      item.dataset.sourceImageUrl = nextSourceImageUrl;
+      streamImageMap.set(generatedParent, item);
+      rememberParentPost({
+        parentPostId: generatedParent,
+        sourceImageUrl: nextSourceImageUrl,
+        imageUrl: displayUrl,
+        origin: `imagine_${mode}`,
+      });
+      const elapsed = Number(data && data.elapsed_ms ? data.elapsed_ms : 0);
+      updateEditDurationEstimate(elapsed);
+      const metaRight = item.querySelector('.waterfall-meta span');
+      if (metaRight && elapsed > 0) {
+        metaRight.textContent = `${elapsed}ms`;
+      }
+      const history = getLightboxHistory(item);
+      const maxRound = history.reduce((max, it) => Math.max(max, Number(it && it.round ? it.round : 0)), 0);
+      history.unshift({
+        id: `${mode}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        round: maxRound + 1,
+        mode,
+        prompt: String(promptRaw || finalPrompt).trim(),
+        imageUrl: displayUrl,
+        parentPostId: generatedParent,
+        sourceImageUrl: nextSourceImageUrl,
+        elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.round(elapsed)) : 0,
+        createdAt: Date.now(),
+      });
+      updateCopyIdButton(item);
+      if (getItemByImageIndex(currentImageIndex) === item) {
+        lightboxImg.src = displayUrl;
+        renderLightboxHistory(item);
+      }
+      toast(`${label}完成`, 'success');
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      toast(`${label}失败：${msg}`, 'error');
+    } finally {
+      if (continueBtn) continueBtn.disabled = false;
+      if (outpaintBtn) outpaintBtn.disabled = false;
+      if (promptInput) promptInput.disabled = false;
+      if (activeBtn) activeBtn.textContent = originalText || label;
+    }
+  }
+
   function renderLightboxHistory(item) {
     if (!lightboxHistoryCount || !lightboxHistoryEmpty || !lightboxHistoryList) return;
     lightboxHistoryList.innerHTML = '';
@@ -955,6 +1216,7 @@
     item.appendChild(checkbox);
     item.appendChild(img);
     item.appendChild(metaBar);
+    attachWaterfallItemActionControls(item);
 
     const prompt = (meta && meta.prompt) ? String(meta.prompt) : (promptInput ? promptInput.value.trim() : '');
     item.dataset.imageUrl = dataUrl;
@@ -1081,6 +1343,7 @@
       item.appendChild(checkbox);
       item.appendChild(img);
       item.appendChild(metaBar);
+      attachWaterfallItemActionControls(item);
 
       const prompt = (meta && meta.prompt) ? String(meta.prompt) : (promptInput ? promptInput.value.trim() : '');
       item.dataset.imageUrl = dataUrl;
@@ -1819,6 +2082,22 @@
         e.preventDefault();
         e.stopPropagation();
         copyParentPostIdFromItem(item);
+        return;
+      }
+      if (e.target.closest('.image-continue-btn')) {
+        e.preventDefault();
+        e.stopPropagation();
+        runWaterfallImageAction(item, 'continue');
+        return;
+      }
+      if (e.target.closest('.image-outpaint-btn')) {
+        e.preventDefault();
+        e.stopPropagation();
+        runWaterfallImageAction(item, 'outpaint');
+        return;
+      }
+      if (e.target.closest('.image-action-prompt') || e.target.closest('.image-action-row')) {
+        e.stopPropagation();
         return;
       }
 

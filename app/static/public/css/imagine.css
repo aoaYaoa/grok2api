@@ -719,6 +719,38 @@
   display: none;
 }
 
+.image-action-row {
+  padding: 8px 12px 12px;
+  display: grid;
+  gap: 8px;
+  background: #fff;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+  cursor: default;
+}
+
+.image-action-row .prompt-enhance-wrap {
+  width: 100%;
+}
+
+.image-action-prompt {
+  min-height: 66px;
+  resize: vertical;
+  font-size: 12px;
+}
+
+.image-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.image-action-buttons .geist-button-outline {
+  height: 28px;
+  padding: 0 10px;
+}
+
 html[data-theme='dark'] .waterfall-item {
   background: #111821;
   border: 1px solid #2b3440 !important;
@@ -748,6 +780,11 @@ html[data-theme='dark'] .copy-parent-id-btn:hover {
   background: #243244;
   border-color: #5d6a7b;
   color: #f2f6fa;
+}
+
+html[data-theme='dark'] .image-action-row {
+  background: #111821;
+  border-top-color: #2b3440;
 }
 
 html[data-theme='dark'] .waterfall-item .image-checkbox {
@@ -1138,6 +1175,14 @@ html[data-theme='dark'] .waterfall-item.selected .image-checkbox::after {
 }
 
 @media (max-width: 768px) {
+  .image-action-buttons {
+    justify-content: stretch;
+  }
+
+  .image-action-buttons .geist-button-outline {
+    flex: 1 1 calc(50% - 4px);
+  }
+
   .lightbox-nav {
     width: 40px;
     height: 40px;

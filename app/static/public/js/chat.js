@@ -1228,6 +1228,22 @@
       return;
     }
 
+    const adminShortcut = window.ChatAdminShortcut || null;
+    if (
+      prompt
+      && attachments.length === 0
+      && adminShortcut
+      && typeof adminShortcut.maybeHandleHiddenAdminCommand === 'function'
+    ) {
+      const handled = adminShortcut.maybeHandleHiddenAdminCommand(prompt, (url) => {
+        if (promptInput) promptInput.value = '';
+        window.location.href = url;
+      });
+      if (handled) {
+        return;
+      }
+    }
+
     const attachmentsSnapshot = attachments.map((item) => ({ ...item }));
     const userEntry = createMessage('user', '');
     renderUserMessage(userEntry, prompt, attachmentsSnapshot);

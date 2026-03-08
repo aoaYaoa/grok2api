@@ -27,7 +27,7 @@ env_file = BASE_DIR / ".env"
 if env_file.exists():
     load_dotenv(env_file)
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi import Depends  # noqa: E402
 
@@ -48,6 +48,7 @@ from app.api.v1.public_api import router as public_router
 from app.api.v1.video_api import router as video_router
 from app.api.pages import router as pages_router
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # 初始化日志
 setup_logging(
@@ -250,6 +251,17 @@ def create_app() -> FastAPI:
     app.include_router(public_router, prefix="/v1/public")
     app.include_router(pages_router)
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        file_path = static_dir / "common/img/favicon/favicon.ico"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(file_path, media_type="image/x-icon")
+
+    @app.get("/health", include_in_schema=False)
+    async def health():
+        return {"status": "ok"}
+
     return app
 
 
@@ -257,63 +269,17 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="启动 Grok2API 服务")
-    parser.add_argument(
-        "--host",
-        default=os.getenv("SERVER_HOST", "0.0.0.0"),
-        help="监听地址，默认读取 SERVER_HOST 或 0.0.0.0",
+    host = os.getenv("SERVER_HOST", "0.0.0.0")
+    port = int(os.getenv("SERVER_PORT", "8000"))
+    workers = int(os.getenv("SERVER_WORKERS", "1"))
+    log_level = os.getenv("LOG_LEVEL", "INFO").lower()
+    logger.error(
+        "Direct startup via `python main.py` is disabled. "
+        "Please run with Granian CLI to avoid Python wrapper issues."
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("SERVER_PORT", "8000")),
-        help="监听端口，默认读取 SERVER_PORT 或 8000",
+    logger.error(
+        "Use: uv run granian --interface asgi "
+        f"--host {host} --port {port} --workers {workers} "
+        f"--log-level {log_level} main:app"
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=int(os.getenv("SERVER_WORKERS", "1")),
-        help="Worker 数量，默认读取 SERVER_WORKERS 或 1",
-    )
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        help="开启热重载（开发模式）",
-    )
-
-    args = parser.parse_args()
-
-    host = args.host
-    port = args.port
-    workers = args.workers
-    reload_enabled = args.reload
-
-    # 平台检查
-    is_windows = platform.system() == "Windows"
-
-    # 自动降级
-    if is_windows and workers > 1:
-        logger.warning(
-            f"Windows platform detected. Multiple workers ({workers}) is not supported. "
-            "Using single worker instead."
-        )
-        workers = 1
-
-    # uvicorn 不支持 reload 与多 worker 同时启用
-    if reload_enabled and workers > 1:
-        logger.warning(
-            f"Reload mode detected. Multiple workers ({workers}) is not supported. "
-            "Using single worker instead."
-        )
-        workers = 1
-
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        workers=workers,
-        reload=reload_enabled,
-        log_level=os.getenv("LOG_LEVEL", "INFO").lower(),
-    )
+    raise SystemExit(1)

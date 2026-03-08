@@ -28,7 +28,7 @@ class TokenPool:
         """获取 Token"""
         return self._tokens.get(token_str)
 
-    def select(self, exclude: set = None) -> Optional[TokenInfo]:
+    def select(self, exclude: set = None, preferred_tags: Optional[List[str]] = None) -> Optional[TokenInfo]:
         """
         选择一个可用 Token
         策略:
@@ -46,6 +46,15 @@ class TokenPool:
 
         if not available:
             return None
+
+        preferred = [tag.strip().lower() for tag in (preferred_tags or []) if str(tag).strip()]
+        if preferred:
+            tagged = [
+                t for t in available
+                if {str(tag).strip().lower() for tag in (t.tags or [])} & set(preferred)
+            ]
+            if tagged:
+                available = tagged
 
         # 找到最大额度
         max_quota = max(t.quota for t in available)

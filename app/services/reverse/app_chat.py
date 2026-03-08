@@ -77,7 +77,7 @@ class AppChatReverse:
             if image_generation_count is not None
             else 2,
             "isAsyncChat": False,
-            "isReasoning": False,
+            "isReasoning": "THINKING" in (mode or "") or "GROK_420" in (mode or ""),
             "message": message,
             "modelMode": mode,
             "modelName": model,

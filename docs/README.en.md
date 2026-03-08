@@ -20,7 +20,7 @@ Grok2API rebuilt with **FastAPI**, fully aligned with the latest web call format
 
 ```bash
 uv sync
-uv run main.py
+uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 main:app
 ```
 
 ### Docker Compose
@@ -29,7 +29,10 @@ uv run main.py
 git clone https://github.com/chenyme/grok2api
 cd grok2api
 
-docker compose up -d
+docker compose up -d --build grok2api
+
+# Force-refresh frontend asset cache when needed
+APP_ASSET_VERSION=20260308b docker compose up -d --build grok2api
 ```
 
 ### Vercel
@@ -68,7 +71,7 @@ docker compose up -d
 
 ## Environment Variables
 
-> Configure `.env`
+> Copy `.env.example` to `.env` and adjust as needed.
 
 | Name | Description | Default | Example |
 | :-- | :-- | :-- | :-- |
@@ -77,7 +80,8 @@ docker compose up -d
 | `DATA_DIR` | Data dir (config/tokens/locks) | `./data` | `/data` |
 | `SERVER_HOST` | Bind address | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | Server port | `8000` | `8000` |
-| `SERVER_WORKERS` | Uvicorn worker count | `1` | `2` |
+| `SERVER_WORKERS` | Service worker count | `1` | `2` |
+| `APP_ASSET_VERSION` | Frontend asset version override | Auto-derived from project version unless set | `20260308b` |
 | `SERVER_STORAGE_TYPE` | Storage type (`local`/`redis`/`mysql`/`pgsql`) | `local` | `pgsql` |
 | `SERVER_STORAGE_URL` | Storage DSN (optional for local) | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
 
@@ -144,7 +148,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `top_p` | number | Nucleus sampling | `0` ~ `1` |
 | `video_config` | object | **Video model only** | Supported: `grok-imagine-1.0-video` |
 | └─ `aspect_ratio` | string | Video aspect ratio | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`, `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
-| └─ `video_length` | integer | Video length (seconds) | `6`, `10`, `15` |
+| └─ `video_length` | integer | Video length (seconds) | `6 ~ 30` |
 | └─ `resolution_name` | string | Resolution | `480p`, `720p` |
 | └─ `preset` | string | Style preset | `fun`, `normal`, `spicy`, `custom` |
 | `image_config` | object | **Image models only** | Supported: `grok-imagine-1.0` / `grok-imagine-1.0-edit` |

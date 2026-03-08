@@ -16,6 +16,7 @@
   const editVideo = document.getElementById('editVideo');
   const editTimeline = document.getElementById('editTimeline');
   const editTimeText = document.getElementById('editTimeText');
+  const editTimeInline = document.getElementById('editTimeInline');
   const editDurationText = document.getElementById('editDurationText');
   const editFrameIndex = document.getElementById('editFrameIndex');
   const editTimestampMs = document.getElementById('editTimestampMs');
@@ -107,6 +108,16 @@
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milli).padStart(3, '0')}`;
+  }
+
+  function setEditTimelineTimeLabel(text) {
+    const safe = String(text || '00:00.000');
+    if (editTimeText) {
+      editTimeText.textContent = safe;
+    }
+    if (editTimeInline) {
+      editTimeInline.textContent = safe.split(' ')[0];
+    }
   }
 
   function enforceInlinePlayback(videoEl) {
@@ -587,7 +598,7 @@
     title.textContent = `视频 ${previewCount}`;
 
     const actions = document.createElement('div');
-    actions.className = 'video-item-actions video-item-actions-overlay';
+    actions.className = 'video-item-actions';
 
     const openBtn = document.createElement('a');
     openBtn.className = 'geist-button-outline text-xs px-3 video-open hidden';
@@ -607,15 +618,22 @@
     editBtn.textContent = '编辑';
     editBtn.disabled = true;
 
+    const extendBtn = document.createElement('button');
+    extendBtn.className = 'geist-button-outline text-xs px-3 video-extend';
+    extendBtn.type = 'button';
+    extendBtn.textContent = '延长';
+    extendBtn.disabled = true;
+
     actions.appendChild(openBtn);
     actions.appendChild(downloadBtn);
     actions.appendChild(editBtn);
+    actions.appendChild(extendBtn);
     header.appendChild(title);
+    header.appendChild(actions);
 
     const body = document.createElement('div');
     body.className = 'video-item-body';
-    body.innerHTML = '<div class="video-item-placeholder">生成中…</div>';
-    body.appendChild(actions);
+    body.innerHTML = '<div class="video-item-placeholder">进度 0%</div>';
 
     const link = document.createElement('div');
     link.className = 'video-item-link';
@@ -637,6 +655,7 @@
     const openBtn = item.querySelector('.video-open');
     const downloadBtn = item.querySelector('.video-download');
     const editBtn = item.querySelector('.video-edit');
+    const extendBtn = item.querySelector('.video-extend');
     const link = item.querySelector('.video-item-link');
     const safeUrl = url || '';
     item.dataset.url = safeUrl;
@@ -660,6 +679,9 @@
     }
     if (editBtn) {
       editBtn.disabled = !safeUrl;
+    }
+    if (extendBtn) {
+      extendBtn.disabled = !safeUrl;
     }
     if (safeUrl) {
       item.classList.remove('is-pending');
@@ -932,11 +954,7 @@
     if (!container) return;
     const body = container.querySelector('.video-item-body');
     if (!body) return;
-    const actions = body.querySelector('.video-item-actions-overlay');
     body.innerHTML = html;
-    if (actions) {
-      body.appendChild(actions);
-    }
     const videoEl = body.querySelector('video');
     let videoUrl = '';
     if (videoEl) {
@@ -973,6 +991,13 @@
     if (title) {
       title.textContent = String(text || '');
     }
+  }
+
+  function setPreviewPlaceholderText(item, text) {
+    if (!item) return;
+    const body = item.querySelector('.video-item-body');
+    if (!body) return;
+    body.innerHTML = `<div class="video-item-placeholder">${String(text || '')}</div>`;
   }
 
   function getSelectedVideoItem() {
@@ -1176,7 +1201,10 @@
           <div class="cache-video-name">${name || `video_${idx + 1}.mp4`}</div>
           <div class="cache-video-sub">${size} · ${mtime}</div>
         </div>
-        <button class="geist-button-outline text-xs px-3 cache-video-use" type="button">使用</button>
+        <div class="cache-video-actions">
+          <button class="geist-button-outline text-xs px-3 cache-video-use" type="button">使用</button>
+          <button class="geist-button-outline text-xs px-3 cache-video-extend" type="button">延长</button>
+        </div>
       </div>`;
     }).join('');
     cacheVideoList.innerHTML = html;
@@ -1229,6 +1257,30 @@
     setEditMeta();
   }
 
+  async function quickExtendVideoSource(url, options = {}) {
+    const safeUrl = String(url || '').trim();
+    if (!safeUrl) {
+      toast('该视频暂无可用地址', 'warning');
+      return;
+    }
+    if (options.item) {
+      selectedVideoItemId = String(options.item.dataset.index || selectedVideoItemId || '');
+      refreshVideoSelectionUi();
+    }
+    selectedVideoUrl = safeUrl;
+    const extractedPostId = extractPostIdFromFileName(String(options.name || ''))
+      || extractPostIdFromFileName(safeUrl);
+    if (extractedPostId) {
+      currentExtendPostId = extractedPostId;
+      currentFileAttachmentId = extractedPostId;
+      originalFileAttachmentId = extractedPostId;
+    }
+    if (enterEditBtn) enterEditBtn.disabled = false;
+    openEditPanel();
+    setEditMeta();
+    await runExtendVideo();
+  }
+
   function updateTimelineByVideoTime() {
     if (!editVideo || !editTimeline) return;
     const duration = Number(editVideo.duration || 0);
@@ -1238,7 +1290,7 @@
     editTimeline.value = String(Math.round(ratio * EDIT_TIMELINE_MAX));
     updateDeleteZoneTrack(editTimeline);
     lockedTimestampMs = clampEditTimestampMs(Math.round(current * 1000));
-    if (editTimeText) editTimeText.textContent = formatMs(lockedTimestampMs);
+    setEditTimelineTimeLabel(formatMs(lockedTimestampMs));
   }
 
   function lockFrameByCurrentTime() {
@@ -1248,11 +1300,12 @@
     // 强制限制提取的秒数上限为 20s
     if (currentTime > 20) {
       currentTime = 20;
-      if (editTimeText) {
-        editTimeText.textContent = formatMs(clampEditTimestampMs(Math.round(currentTime * 1000))) + " (已达官方20s延长上限)";
-      }
+      setEditTimelineTimeLabel(formatMs(clampEditTimestampMs(Math.round(currentTime * 1000))) + " (已达官方20s延长上限)");
     }
     lockedTimestampMs = clampEditTimestampMs(Math.round(currentTime * 1000));
+    if (currentTime <= 20) {
+      setEditTimelineTimeLabel(formatMs(lockedTimestampMs));
+    }
     const approxFps = 30;
     lockedFrameIndex = Math.max(0, Math.round(currentTime * approxFps));
     setEditMeta();
@@ -1312,6 +1365,9 @@
       const value = parseInt(last[1], 10);
       setIndeterminate(false);
       taskState.progress = value;
+      if (taskState.previewItem && !String(taskState.previewItem.dataset.url || '').trim()) {
+        setPreviewPlaceholderText(taskState.previewItem, `进度 ${value}%`);
+      }
       updateAggregateProgress();
       taskState.progressBuffer = taskState.progressBuffer.slice(
         Math.max(0, taskState.progressBuffer.length - 200)
@@ -1746,6 +1802,18 @@
           console.log('[SSE 调试] 收到数据:', raw);
           if (raw === '[DONE]') {
             console.log('[SSE 调试] 收到 [DONE] 标记');
+            if (!taskState.videoUrl) {
+              taskState.error = true;
+              spliceRun.failedReasons.push('未返回视频链接');
+              spliceRun.failedPlaceholders.add(tid);
+              const item = spliceRun.placeholders.get(tid);
+              if (item) {
+                item.classList.remove('is-generating');
+                item.classList.add('is-failed');
+                setPreviewTitle(item, '延长失败: 未返回视频链接');
+                setPreviewPlaceholderText(item, '未返回视频链接');
+              }
+            }
             taskState.done = true;
             source.close();
             checkAllExtendDone(spliceRun);
@@ -1762,6 +1830,7 @@
               const item = spliceRun.placeholders.get(tid);
               if (item) {
                 setPreviewTitle(item, `延长失败: ${parsed.error}`);
+                setPreviewPlaceholderText(item, parsed.error);
                 item.classList.add('is-failed');
               }
               source.close();
@@ -1841,6 +1910,10 @@
                     taskState.progress = lastValue;
                     setIndeterminate(false);
                     updateProgress(taskState.progress);
+                    const item = spliceRun.placeholders.get(tid);
+                    if (item && !String(item.dataset.url || '').trim()) {
+                      setPreviewPlaceholderText(item, `进度 ${lastValue}%`);
+                    }
                   }
                 }
                 if (text.includes('超分辨率')) {
@@ -2000,12 +2073,11 @@
       editVideo.currentTime = nextTime;
       updateDeleteZoneTrack(editTimeline);
       lockedTimestampMs = clampEditTimestampMs(Math.round(nextTime * 1000));
-      if (editTimeText) {
-        editTimeText.textContent = formatMs(lockedTimestampMs);
-        if (nextTime === 20 && duration > 20) {
-          editTimeText.textContent += " (已达官方20s延长上限)";
-        }
+      let timelineText = formatMs(lockedTimestampMs);
+      if (nextTime === 20 && duration > 20) {
+        timelineText += " (已达官方20s延长上限)";
       }
+      setEditTimelineTimeLabel(timelineText);
       lockFrameByCurrentTime();
     });
   }
@@ -2117,13 +2189,20 @@
   }, { passive: true });
 
   if (cacheVideoList) {
-    cacheVideoList.addEventListener('click', (event) => {
+    cacheVideoList.addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (!target.classList.contains('cache-video-use')) return;
       const row = target.closest('.cache-video-item');
       if (!row) return;
+      if (target.classList.contains('cache-video-use')) {
+        useCachedVideo(row.getAttribute('data-url') || '', row.getAttribute('data-name') || '');
+        return;
+      }
+      if (!target.classList.contains('cache-video-extend')) return;
       useCachedVideo(row.getAttribute('data-url') || '', row.getAttribute('data-name') || '');
+      await quickExtendVideoSource(row.getAttribute('data-url') || '', {
+        name: row.getAttribute('data-name') || '',
+      });
     });
   }
 
@@ -2162,6 +2241,11 @@
       if (target.classList.contains('video-edit')) {
         event.preventDefault();
         openEditPanel();
+        return;
+      }
+      if (target.classList.contains('video-extend')) {
+        event.preventDefault();
+        await quickExtendVideoSource(selectedVideoUrl, { item });
         return;
       }
       if (!target.classList.contains('video-download')) {

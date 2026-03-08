@@ -74,6 +74,7 @@ class ImageGenerationRequest(BaseModel):
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
+    nsfw: Optional[bool] = Field(None, description="是否启用 NSFW")
 
 
 class ImageEditRequest(BaseModel):
@@ -277,6 +278,9 @@ async def create_image(request: ImageGenerationRequest):
         if request.response_format is None:
             request.response_format = resolve_response_format(None)
 
+        if request.nsfw is None:
+            request.nsfw = True
+
         # 参数验证
         validate_generation_request(request)
 
@@ -302,6 +306,7 @@ async def create_image(request: ImageGenerationRequest):
             size=request.size,
             aspect_ratio=aspect_ratio,
             stream=bool(request.stream),
+            enable_nsfw=request.nsfw,
         )
 
         if result.stream:
