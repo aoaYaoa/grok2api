@@ -126,22 +126,25 @@ def _build_extension_config(
     start_time: float,
     stitch_with_extend: bool = True,
 ) -> Dict[str, Any]:
+    video_gen_config = {
+        "isVideoExtension": True,
+        "videoExtensionStartTime": float(start_time),
+        "extendPostId": extend_post_id,
+        "originalPostId": original_post_id,
+        "originalRefType": "ORIGINAL_REF_TYPE_VIDEO_EXTENSION",
+        "mode": "custom",
+        "aspectRatio": aspect_ratio,
+        "videoLength": video_length,
+        "resolutionName": resolution_name,
+        "parentPostId": parent_post_id,
+        "isVideoEdit": False,
+    }
+    if stitch_with_extend:
+        video_gen_config["stitchWithExtendPostId"] = extend_post_id
+
     payload = {
         "modelMap": {
-            "videoGenModelConfig": {
-                "isVideoExtension": True,
-                "videoExtensionStartTime": float(start_time),
-                "extendPostId": extend_post_id,
-                "stitchWithExtendPostId": stitch_with_extend,
-                "originalPostId": original_post_id,
-                "originalRefType": "ORIGINAL_REF_TYPE_VIDEO_EXTENSION",
-                "mode": "custom",
-                "aspectRatio": aspect_ratio,
-                "videoLength": video_length,
-                "resolutionName": resolution_name,
-                "parentPostId": parent_post_id,
-                "isVideoEdit": False,
-            }
+            "videoGenModelConfig": video_gen_config
         }
     }
     if original_prompt:
@@ -1489,7 +1492,6 @@ class VideoService:
             "isVideoExtension": True,
             "videoExtensionStartTime": video_extension_start_time,
             "extendPostId": extend_post_id,
-            "stitchWithExtendPostId": stitch_with_extend,
             "originalPostId": effective_original,
             "originalRefType": "ORIGINAL_REF_TYPE_VIDEO_EXTENSION",
             "mode": mode,
@@ -1499,6 +1501,8 @@ class VideoService:
             "parentPostId": extend_post_id,
             "isVideoEdit": False,
         }
+        if stitch_with_extend:
+            video_gen_config["stitchWithExtendPostId"] = extend_post_id
         if prompt_text:
             video_gen_config["originalPrompt"] = prompt_text
 
