@@ -675,8 +675,10 @@ def _classify_video_error(exc: Exception) -> tuple[str, str, int]:
     text = str(exc or "").lower()
     details = getattr(exc, "details", None)
     body = ""
+    err_type = ""
     if isinstance(details, dict):
         body = str(details.get("body") or "").lower()
+        err_type = str(details.get("type") or "").lower()
     merged = f"{text}\n{body}"
 
     if (
@@ -687,6 +689,16 @@ def _classify_video_error(exc: Exception) -> tuple[str, str, int]:
         or "'code': 3" in merged
     ):
         return ("视频生成被拒绝，请调整提示词或素材后重试", "video_rejected", 400)
+
+    if err_type == "video_extension_token_unbound":
+        return (
+            "视频延长失败：当前 token 池中没有可访问该视频的账号，请使用通过当前服务生成的视频 post_id，或先绑定原视频账号的 token。",
+            "video_extension_token_unbound",
+            502,
+        )
+
+    if err_type in {"empty_video_stream", "missing_video_url"}:
+        return ("视频生成失败：上游未返回视频结果，请稍后重试", "video_empty_stream", 502)
 
     if (
         (isinstance(details, dict) and details.get("type") == "video_total_timeout")
@@ -1609,7 +1621,11 @@ class VideoService:
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
 
-        max_token_retries = int(get_config("retry.max_retry"))
+        max_token_retries = int(
+            get_config("video.extension_token_retry", 20)
+            if extend_post_id
+            else get_config("retry.max_retry")
+        )
         last_error: Exception | None = None
 
         if reasoning_effort is None:
@@ -2184,6 +2200,13 @@ class VideoService:
                 )
 
         if last_error:
+            if extend_post_id and _is_video_auth_error(last_error):
+                raise AppException(
+                    message="视频延长失败：当前 token 池中没有可访问该视频的账号，请使用通过当前服务生成的视频 post_id，或先绑定原视频账号的 token。",
+                    error_type=ErrorType.SERVER.value,
+                    code="video_extension_token_unbound",
+                    status_code=502,
+                )
             raise last_error
         raise AppException(
             message="No available tokens. Please try again later.",
@@ -2452,6 +2475,18 @@ class VideoStreamProcessor(BaseProcessor):
                         "Video stream finished without video url and assets fallback missed: "
                         f"video_id={fallback_video_id}"
                     )
+
+            if not content_emitted:
+                raise UpstreamException(
+                    message="Video stream finished without any playable result",
+                    status_code=502,
+                    details={
+                        "type": "empty_video_stream",
+                        "response_id": self.response_id or "",
+                        "last_progress": last_progress,
+                        "stream_errors": list(stream_errors),
+                    },
+                )
 
             yield self._sse(finish="stop")
             yield "data: [DONE]\n\n"

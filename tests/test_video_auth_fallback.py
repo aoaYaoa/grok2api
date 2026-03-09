@@ -1,6 +1,26 @@
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+if 'aiohttp' not in sys.modules:
+    aiohttp = types.ModuleType('aiohttp')
+    aiohttp.BaseConnector = object
+    aiohttp.TCPConnector = lambda *args, **kwargs: object()
+    aiohttp.ClientSession = object
+    aiohttp.ClientWebSocketResponse = object
+    aiohttp.ClientTimeout = lambda *args, **kwargs: object()
+    sys.modules['aiohttp'] = aiohttp
+
+if 'aiohttp_socks' not in sys.modules:
+    aiohttp_socks = types.ModuleType('aiohttp_socks')
+    class _ProxyConnector:
+        @staticmethod
+        def from_url(*args, **kwargs):
+            return object()
+    aiohttp_socks.ProxyConnector = _ProxyConnector
+    sys.modules['aiohttp_socks'] = aiohttp_socks
 
 from app.core.exceptions import UpstreamException
 from app.services.grok.services.video import VideoService
