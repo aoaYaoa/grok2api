@@ -216,6 +216,11 @@ body {
   .video-main-grid {
     grid-template-columns: 1fr;
   }
+
+  .history-panel .video-stage {
+    max-height: none;
+    overflow: visible;
+  }
 }
 
 .video-card {

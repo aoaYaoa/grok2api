@@ -110,3 +110,8 @@ test('video extend finish_reason stop without a parsed video link is treated as 
   assert.match(videoJs, /if \(choice && choice\.finish_reason === 'stop'\) \{[\s\S]*spliceRun\.failedReasons\.push\('未返回视频链接'\);/);
   assert.match(videoJs, /if \(choice && choice\.finish_reason === 'stop'\) \{[\s\S]*source\.close\(\);[\s\S]*checkAllExtendDone\(spliceRun\);/);
 });
+
+test('video workstation history panel disables nested scrolling on mobile', () => {
+  assert.match(videoCss, /@media \(max-width: 820px\)[\s\S]*\.history-panel \.video-stage\s*\{[\s\S]*max-height:\s*none;/);
+  assert.match(videoCss, /@media \(max-width: 820px\)[\s\S]*\.history-panel \.video-stage\s*\{[\s\S]*overflow:\s*visible;/);
+});
