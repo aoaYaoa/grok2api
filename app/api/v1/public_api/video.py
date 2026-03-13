@@ -208,8 +208,9 @@ async def _new_session(
     image_url: Optional[str],
     parent_post_id: Optional[str],
     source_image_url: Optional[str],
-    nsfw: Optional[bool],
-    reasoning_effort: Optional[str],
+    reference_items: Optional[List[Dict[str, str]]] = None,
+    nsfw: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
     # 视频延长相关
     is_video_extension: bool = False,
     extend_post_id: Optional[str] = None,
@@ -231,6 +232,7 @@ async def _new_session(
             "image_url": image_url,
             "parent_post_id": parent_post_id,
             "source_image_url": source_image_url,
+            "reference_items": reference_items or [],
             "nsfw": bool(nsfw if nsfw is not None else True),
             "reasoning_effort": reasoning_effort,
             "is_video_extension": is_video_extension,
@@ -307,6 +309,91 @@ def _validate_parent_post_id(parent_post_id: str) -> str:
     return value
 
 
+def _normalize_string_list(values: Optional[List[str]]) -> List[str]:
+    if not values:
+        return []
+    normalized: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+
+    for raw in data.reference_items or []:
+        if not isinstance(raw, dict):
+            continue
+        parent_post_id = _validate_parent_post_id(str(raw.get("parent_post_id") or ""))
+        image_url = str(raw.get("image_url") or "").strip()
+        source_image_url = str(raw.get("source_image_url") or "").strip()
+        mention_alias = str(raw.get("mention_alias") or "").strip()
+        if image_url:
+            _validate_image_url(image_url)
+        if source_image_url:
+            _validate_image_url(source_image_url)
+        if parent_post_id or image_url or source_image_url:
+            items.append(
+                {
+                    "parent_post_id": parent_post_id,
+                    "image_url": image_url,
+                    "source_image_url": source_image_url,
+                    "mention_alias": mention_alias,
+                }
+            )
+
+    for value in _normalize_string_list(data.image_references):
+        _validate_image_url(value)
+        items.append({"parent_post_id": "", "image_url": value, "source_image_url": value})
+
+    for value in _normalize_string_list(data.source_image_urls):
+        _validate_image_url(value)
+        items.append({"parent_post_id": "", "image_url": value, "source_image_url": value})
+
+    for value in _normalize_string_list(data.parent_post_ids):
+        items.append({"parent_post_id": _validate_parent_post_id(value), "image_url": "", "source_image_url": ""})
+
+    single_parent = _validate_parent_post_id(data.parent_post_id or "")
+    single_image_url = (data.image_url or "").strip()
+    single_source_image_url = (data.source_image_url or "").strip()
+    if single_image_url:
+        _validate_image_url(single_image_url)
+    if single_source_image_url:
+        _validate_image_url(single_source_image_url)
+    if single_parent or single_image_url or single_source_image_url:
+        items.insert(
+            0,
+            {
+                "parent_post_id": single_parent,
+                "image_url": single_image_url,
+                "source_image_url": single_source_image_url,
+            },
+        )
+
+    deduped: List[Dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("parent_post_id") or "").strip(),
+            str(item.get("image_url") or "").strip(),
+            str(item.get("source_image_url") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "parent_post_id": key[0],
+                "image_url": key[1],
+                "source_image_url": key[2],
+                "mention_alias": str(item.get("mention_alias") or "").strip(),
+            }
+        )
+    return deduped
+
+
 class VideoStartRequest(BaseModel):
     prompt: Optional[str] = ""
     aspect_ratio: Optional[str] = "3:2"
@@ -318,6 +405,10 @@ class VideoStartRequest(BaseModel):
     parent_post_id: Optional[str] = None
     source_image_url: Optional[str] = None
     nsfw: Optional[bool] = None
+    image_references: Optional[List[str]] = None
+    parent_post_ids: Optional[List[str]] = None
+    source_image_urls: Optional[List[str]] = None
+    reference_items: Optional[List[Dict[str, Any]]] = None
     reasoning_effort: Optional[str] = None
     edit_context: Optional[Dict[str, Any]] = None
     # 视频延长相关字段
@@ -363,11 +454,21 @@ async def public_video_start(data: VideoStartRequest):
     if concurrent < 1 or concurrent > 4:
         raise HTTPException(status_code=400, detail="concurrent must be between 1 and 4")
 
-    image_url = (data.image_url or "").strip() or None
-    if image_url:
-        _validate_image_url(image_url)
-    parent_post_id = _validate_parent_post_id(data.parent_post_id or "")
-    source_image_url = (data.source_image_url or "").strip() or None
+    reference_items = _build_reference_items(data)
+    if len(reference_items) > 7:
+        raise HTTPException(status_code=400, detail="最多支持 7 张参考图")
+    parent_post_refs = [item for item in reference_items if item.get("parent_post_id")]
+    parent_post_id = str(parent_post_refs[0].get("parent_post_id") or "").strip() if parent_post_refs else ""
+    image_url = (
+        str(reference_items[0].get("image_url") or "").strip() or None
+        if reference_items
+        else None
+    )
+    source_image_url = (
+        str(reference_items[0].get("source_image_url") or "").strip() or None
+        if reference_items
+        else None
+    )
     if parent_post_id:
         source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     elif source_image_url:
@@ -405,11 +506,11 @@ async def public_video_start(data: VideoStartRequest):
             f"file_attachment_id={file_attachment_id}"
         )
     else:
-        if parent_post_id and image_url:
+        if parent_post_id and image_url and len(reference_items) <= 1:
             raise HTTPException(
                 status_code=400, detail="image_url and parent_post_id cannot be used together"
             )
-        if not prompt and not image_url and not parent_post_id:
+        if not prompt and not reference_items:
             raise HTTPException(
                 status_code=400,
                 detail="Prompt cannot be empty when no image_url/parent_post_id is provided",
@@ -451,8 +552,9 @@ async def public_video_start(data: VideoStartRequest):
             image_url,
             parent_post_id,
             source_image_url,
-            nsfw,
-            reasoning_effort,
+            reference_items=reference_items,
+            nsfw=data.nsfw,
+            reasoning_effort=reasoning_effort,
             is_video_extension=is_video_extension,
             extend_post_id=extend_post_id,
             video_extension_start_time=video_extension_start_time,
@@ -468,6 +570,7 @@ async def public_video_start(data: VideoStartRequest):
         "concurrent": concurrent,
         "aspect_ratio": aspect_ratio,
         "parent_post_id": parent_post_id,
+        "reference_count": len(reference_items),
         "extend_post_id": extend_post_id,
         "file_attachment_id": file_attachment_id or "",
     }
@@ -487,6 +590,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
     image_url = session.get("image_url")
     parent_post_id = str(session.get("parent_post_id") or "").strip()
     source_image_url = str(session.get("source_image_url") or "").strip() or None
+    reference_items = session.get("reference_items") or []
     if parent_post_id:
         source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     reasoning_effort = session.get("reasoning_effort")
@@ -561,6 +665,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
                 file_attachment_id=file_attachment_id if is_video_extension else None,
                 stitch_with_extend=stitch_with_extend,
                 source_image_url=source_image_url,
+                reference_items=reference_items,
                 preferred_token=preferred_token,
                 nsfw=nsfw,
             )

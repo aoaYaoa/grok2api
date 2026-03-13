@@ -7,6 +7,7 @@ import random
 import re
 from dataclasses import dataclass
 from typing import AsyncGenerator, AsyncIterable, List, Union, Any, Callable
+from urllib.parse import urlparse
 
 import orjson
 from curl_cffi.requests.errors import RequestsError
@@ -107,6 +108,80 @@ def _is_retryable_upload_app_error(exc: Exception) -> bool:
     if exc.status_code < 500:
         return False
     return exc.code in {"upload_network_error", "upload_failed"}
+
+
+def _normalize_asset_url(file_uri: str) -> str:
+    raw = str(file_uri or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    if raw.startswith("/"):
+        return f"https://assets.grok.com{raw}"
+    return f"https://assets.grok.com/{raw}"
+
+
+def _is_assets_content_url(url: str) -> bool:
+    raw = str(url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    return host == "assets.grok.com" and "/content" in path
+
+
+def _needs_reference_upload(item: dict[str, Any], source_url: str) -> bool:
+    raw = str(source_url or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("data:image/"):
+        return True
+    if _is_assets_content_url(raw):
+        return False
+    if str(item.get("parent_post_id") or "").strip():
+        return True
+    if raw.startswith("http://127.0.0.1") or raw.startswith("http://localhost"):
+        return True
+    if "imagine-public.x.ai/" in raw:
+        return True
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return True
+    return False
+
+
+def _needs_image_edit_reference_upload(item: dict[str, Any], source_url: str) -> bool:
+    """
+    图片编辑参考图的上传策略与视频不同：
+    - 本地 data URI / 本地代理图：需要先上传
+    - 公开 imagine-public / assets content：直接透传给 app-chat
+    - parentPostId 来源图：保持原始公开 URL，让上游在 attachments preprocessing 阶段处理
+    """
+    raw = str(source_url or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("data:image/"):
+        return True
+    if raw.startswith("http://127.0.0.1") or raw.startswith("http://localhost"):
+        return True
+    if raw.startswith("https://127.0.0.1") or raw.startswith("https://localhost"):
+        return True
+    if raw.startswith("/v1/files/image/"):
+        return True
+    if raw.startswith("/users/") or raw.startswith("users/"):
+        return False
+    if _is_assets_content_url(raw):
+        return False
+    if "imagine-public.x.ai/" in raw:
+        return False
+    if str(item.get("parent_post_id") or "").strip():
+        return False
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return False
+    return True
 
 
 class ImageEditService:
@@ -627,6 +702,265 @@ class ImageEditService:
 
         return image_urls
 
+    async def _prepare_reference_items(
+        self,
+        token: str,
+        reference_items: List[dict[str, Any]],
+    ) -> List[dict[str, str]]:
+        prepared: List[dict[str, str]] = []
+        upload_service = UploadService()
+        try:
+            for item in reference_items:
+                raw_source = str(
+                    item.get("source_image_url")
+                    or item.get("image_url")
+                    or item.get("data")
+                    or ""
+                ).strip()
+                if not raw_source:
+                    continue
+                original_id = str(item.get("original_id") or "").strip()
+                if not original_id:
+                    original_id = (
+                        str(item.get("parent_post_id") or "").strip()
+                        or _extract_image_post_id(raw_source)
+                    )
+                mention_alias = str(item.get("mention_alias") or "").strip()
+                request_url = raw_source
+                mention_id = original_id
+                attachment_id = ""
+                should_upload_for_attachment = _needs_image_edit_reference_upload(
+                    item, raw_source
+                )
+                if not should_upload_for_attachment:
+                    normalized_raw = _normalize_asset_url(raw_source)
+                    if normalized_raw and not _is_assets_content_url(normalized_raw):
+                        should_upload_for_attachment = True
+                if should_upload_for_attachment:
+                    file_id, file_uri = await upload_service.upload_file(raw_source, token)
+                    resolved_url = _normalize_asset_url(file_uri)
+                    resolved_id = str(file_id or "").strip() or _extract_image_post_id(
+                        resolved_url
+                    )
+                    attachment_id = str(file_id or "").strip() or resolved_id
+                    if raw_source.startswith("http://") or raw_source.startswith("https://"):
+                        request_url = raw_source
+                    else:
+                        request_url = resolved_url
+                    mention_id = resolved_id or mention_id
+                else:
+                    if raw_source.startswith("/users/") or raw_source.startswith("users/"):
+                        request_url = _normalize_asset_url(raw_source)
+                    else:
+                        request_url = raw_source
+                    resolved_url = _normalize_asset_url(raw_source)
+                    resolved_id = _extract_image_post_id(resolved_url)
+                    mention_id = mention_id or resolved_id
+                    attachment_id = resolved_id
+                prepared.append(
+                    {
+                        "source_url": raw_source,
+                        "request_url": request_url,
+                        "resolved_url": resolved_url,
+                        "original_id": original_id,
+                        "resolved_id": resolved_id,
+                        "mention_id": mention_id,
+                        "attachment_id": attachment_id,
+                        "parent_post_id": str(item.get("parent_post_id") or "").strip(),
+                        "mention_alias": mention_alias,
+                    }
+                )
+        finally:
+            await upload_service.close()
+        return prepared
+
+    async def edit_with_reference_items(
+        self,
+        *,
+        token_mgr: Any,
+        token: str,
+        model_info: Any,
+        prompt: str,
+        reference_items: List[dict[str, Any]],
+        root_parent_post_id: str = "",
+        response_format: str,
+        stream: bool,
+        return_all_images: bool = False,
+        progress_cb: Callable[[str, dict], Any] | None = None,
+    ) -> ImageEditResult:
+        max_token_retries = int(get_config("retry.max_retry"))
+        tried_tokens: set[str] = set()
+        last_error: Exception | None = None
+
+        for attempt in range(max_token_retries):
+            preferred = token if attempt == 0 else None
+            current_token = await pick_token(
+                token_mgr, model_info.model_id, tried_tokens, preferred=preferred
+            )
+            if not current_token:
+                if last_error:
+                    raise last_error
+                raise AppException(
+                    message="No available tokens. Please try again later.",
+                    error_type=ErrorType.RATE_LIMIT.value,
+                    code="rate_limit_exceeded",
+                    status_code=429,
+                )
+
+            tried_tokens.add(current_token)
+            try:
+                await self._emit_progress(
+                    progress_cb, "prepare_start", 8, "正在整理参考图"
+                )
+                prepared_refs = await self._prepare_reference_items(
+                    current_token, reference_items
+                )
+                if not prepared_refs:
+                    raise AppException(
+                        message="至少需要 1 张有效参考图",
+                        error_type=ErrorType.INVALID_REQUEST.value,
+                        code="invalid_reference_images",
+                        status_code=400,
+                    )
+
+                prompt_text = str(prompt or "").strip()
+                replacement_pairs: list[tuple[str, str]] = []
+                for index, item in enumerate(prepared_refs, start=1):
+                    mention_id = str(
+                        item.get("mention_id")
+                        or item.get("original_id")
+                        or item.get("resolved_id")
+                        or ""
+                    ).strip()
+                    if not mention_id:
+                        continue
+                    token_text = f"@{mention_id}"
+                    original_id = str(item.get("original_id") or "").strip()
+                    if original_id:
+                        replacement_pairs.append((f"@{original_id}", token_text))
+                    alias = str(item.get("mention_alias") or "").strip() or f"Image {index}"
+                    replacement_pairs.append((f"@{alias}", token_text))
+                    replacement_pairs.append((f"@{alias.replace(' ', '')}", token_text))
+
+                for source_token, target_token in replacement_pairs:
+                    if source_token and source_token in prompt_text:
+                        prompt_text = prompt_text.replace(source_token, target_token)
+
+                request_urls = [
+                    str(item.get("request_url") or item.get("resolved_url") or "").strip()
+                    for item in prepared_refs
+                    if str(item.get("request_url") or item.get("resolved_url") or "").strip()
+                ]
+                file_attachments = [
+                    str(
+                        item.get("attachment_id")
+                        or item.get("resolved_id")
+                        or item.get("mention_id")
+                        or ""
+                    ).strip()
+                    for item in prepared_refs
+                    if str(
+                        item.get("attachment_id")
+                        or item.get("resolved_id")
+                        or item.get("mention_id")
+                        or ""
+                    ).strip()
+                ]
+                if not request_urls:
+                    raise AppException(
+                        message="参考图解析失败",
+                        error_type=ErrorType.INVALID_REQUEST.value,
+                        code="invalid_reference_images",
+                        status_code=400,
+                    )
+
+                effective_parent_post_id = str(root_parent_post_id or "").strip()
+                if not effective_parent_post_id:
+                    first_parent = str(
+                        prepared_refs[0].get("parent_post_id") or ""
+                    ).strip()
+                    if first_parent:
+                        effective_parent_post_id = first_parent
+                if not effective_parent_post_id:
+                    effective_parent_post_id = await VideoService().create_image_post(
+                        current_token, request_urls[0]
+                    )
+
+                await self._emit_progress(
+                    progress_cb, "chat_request_start", 42, "已提交编辑请求"
+                )
+                tool_overrides = {"imageGen": True}
+                model_config_override = {
+                    "modelMap": {
+                        "imageEditModel": "imagine",
+                        "imageEditModelConfig": {
+                            "imageReferences": request_urls,
+                            "parentPostId": effective_parent_post_id,
+                        },
+                    }
+                }
+                if stream:
+                    response = await GrokChatService().chat(
+                        token=current_token,
+                        message=prompt_text,
+                        model=model_info.grok_model,
+                        mode=None,
+                        stream=True,
+                        file_attachments=file_attachments,
+                        tool_overrides=tool_overrides,
+                        model_config_override=model_config_override,
+                    )
+                    return ImageEditResult(
+                        stream=True,
+                        data=wrap_stream_with_usage(
+                            response, token_mgr=token_mgr, token=current_token, effort=EffortType.HIGH
+                        ),
+                        token_used=current_token,
+                    )
+
+                images_out = await self._collect_images(
+                    token=current_token,
+                    prompt=prompt_text,
+                    model_info=model_info,
+                    response_format=response_format,
+                    tool_overrides=tool_overrides,
+                    model_config_override=model_config_override,
+                    file_attachments=file_attachments,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
+                try:
+                    await token_mgr.consume(current_token, EffortType.HIGH)
+                except Exception as e:
+                    logger.warning(f"Failed to record image edit(reference_items) usage: {e}")
+                return ImageEditResult(
+                    stream=False,
+                    data=images_out,
+                    token_used=current_token,
+                )
+            except Exception as e:
+                last_error = e
+                is_rl = rate_limited(e)
+                is_upload_rejected = _is_upload_rejected_error(e)
+                is_upload_network = _is_upload_network_error(e)
+                if not (is_rl or is_upload_rejected or is_upload_network):
+                    raise
+                if attempt >= max_token_retries - 1:
+                    raise
+                logger.warning(
+                    f"Image edit(reference_items) token failed, retrying with another token: {e}"
+                )
+                continue
+
+        if last_error:
+            raise last_error
+        raise AppException(
+            message="No available tokens. Please try again later.",
+            error_type=ErrorType.RATE_LIMIT.value,
+            code="rate_limit_exceeded",
+            status_code=429,
+        )
+
     async def _get_parent_post_id(self, token: str, image_urls: List[str]) -> str:
         parent_post_id = None
         try:
@@ -662,6 +996,7 @@ class ImageEditService:
         response_format: str,
         tool_overrides: dict,
         model_config_override: dict,
+        file_attachments: List[str] | None = None,
         return_all_images: bool = False,
         progress_cb: Callable[[str, dict], Any] | None = None,
     ) -> List[str]:
@@ -697,6 +1032,7 @@ class ImageEditService:
                 model=model_info.grok_model,
                 mode=None,
                 stream=True,
+                file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
                 image_generation_count=1,

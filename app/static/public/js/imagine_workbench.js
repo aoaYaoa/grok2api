@@ -8,14 +8,11 @@
   const previewShell = document.getElementById('previewShell');
   const currentGallery = document.getElementById('currentGallery');
   const previewEmpty = document.getElementById('previewEmpty');
-  const previewLightbox = document.getElementById('previewLightbox');
-  const previewLightboxImg = document.getElementById('previewLightboxImg');
-  const previewLightboxDownload = document.getElementById('previewLightboxDownload');
-  const previewLightboxClose = document.getElementById('previewLightboxClose');
-  const previewLightboxCaption = document.getElementById('previewLightboxCaption');
   const currentParentId = document.getElementById('currentParentId');
   const currentMode = document.getElementById('currentMode');
+  const editPromptRichInput = document.getElementById('editPromptRichInput');
   const editPromptInput = document.getElementById('editPromptInput');
+  const editPromptMentionMenu = document.getElementById('editPromptMentionMenu');
   const submitEditBtn = document.getElementById('submitEditBtn');
   const resetCycleBtn = document.getElementById('resetCycleBtn');
   const clearHistoryBtn = document.getElementById('clearHistoryBtn');
@@ -26,7 +23,7 @@
   const editProgressWrap = document.getElementById('editProgressWrap');
   const editProgressBar = document.getElementById('editProgressBar');
   const editProgressText = document.getElementById('editProgressText');
-  const REFERENCE_LIMIT = 3;
+  const REFERENCE_LIMIT = 5;
 
   const state = {
     editing: false,
@@ -39,12 +36,15 @@
     history: [],
     editRound: 0,
   };
-  const WORKBENCH_IMAGE_ACTION_PROMPT_KEY = 'imagine_workbench_image_action_prompt_draft';
   let workbenchEditAbortController = null;
   let editProgressTimer = null;
   let editProgressHideTimer = null;
   let editProgressValue = 0;
   let dragCounter = 0;
+  let activePromptMentionIndex = -1;
+  let isSyncingPromptEditor = false;
+  let lastPromptMentionRange = null;
+  let lastPromptMentionContext = null;
 
   function toast(message, type) {
     if (typeof showToast === 'function') {
@@ -110,72 +110,23 @@
     return raw;
   }
 
-  function getRememberedHistoryImageActionPrompt() {
-    try {
-      return String(window.localStorage.getItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY) || '');
-    } catch (e) {
-      return '';
-    }
-  }
-
-  function rememberHistoryImageActionPrompt(value) {
-    const safe = String(value || '');
-    try {
-      if (!safe.trim()) {
-        window.localStorage.removeItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY);
-      } else {
-        window.localStorage.setItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY, safe);
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  function bindHistoryImageActionPrompt(textarea) {
-    if (!(textarea instanceof HTMLTextAreaElement)) return;
-    if (textarea.dataset.historyImageActionPromptBound === '1') return;
-    const sync = () => {
-      rememberHistoryImageActionPrompt(textarea.value);
-    };
-    textarea.addEventListener('input', sync);
-    textarea.addEventListener('change', sync);
-    textarea.addEventListener('blur', sync);
-    textarea.addEventListener('prompt-enhance-applied', sync);
-    textarea.dataset.historyImageActionPromptBound = '1';
-  }
-
-  function mountHistoryImageActionPromptEnhancer(textarea) {
-    if (!(textarea instanceof HTMLTextAreaElement)) return;
-    bindHistoryImageActionPrompt(textarea);
-    const api = window.PromptEnhancer;
-    if (!api || typeof api.mount !== 'function') return;
-    api.mount(textarea);
-    const wrapper = textarea.parentElement;
-    if (wrapper && wrapper.classList && wrapper.classList.contains('prompt-enhance-wrap')) {
-      wrapper.classList.add('history-prompt-enhance-wrap');
-    }
-  }
-
-  function getWorkbenchImageActionLabel(mode) {
-    return mode === 'outpaint' ? '扩图' : '续图';
-  }
-
-  function buildWorkbenchImageActionPrompt(mode, promptValue, entry) {
-    const raw = String(promptValue || '').trim();
-    if (raw) return raw;
-    const seedPrompt = String(entry && entry.prompt ? entry.prompt : '').trim();
-    if (mode === 'outpaint') {
-      return seedPrompt
-        ? `在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容：${seedPrompt}`
-        : '在保持主体和风格一致的前提下，向画面四周自然扩展更多场景内容。';
-    }
-    return seedPrompt
-      ? `延续当前画面内容和风格，自然生成后续画面：${seedPrompt}`
-      : '延续当前画面内容和风格，自然生成后续画面。';
-  }
-
   function buildImaginePublicUrl(parentPostId) {
     return `https://imagine-public.x.ai/imagine-public/images/${parentPostId}.jpg`;
+  }
+
+  async function fetchParentPostInfo(authHeader, parentPostId) {
+    const pid = String(parentPostId || '').trim();
+    if (!pid) return null;
+    const response = await fetch(`/v1/public/imagine/parent-post?parent_post_id=${encodeURIComponent(pid)}`, {
+      headers: {
+        Authorization: authHeader,
+      },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error((data && (data.detail || data.message)) || `查询 parentPostId 失败 (${response.status})`);
+    }
+    return data;
   }
 
   function normalizeHttpSourceUrl(value) {
@@ -195,10 +146,10 @@
     const candidates = [
       hit && hit.current_source_image_url,
       hit && hit.currentSourceImageUrl,
-      hit && hit.image_url,
-      hit && hit.imageUrl,
       hit && hit.source_image_url,
       hit && hit.sourceImageUrl,
+      hit && hit.image_url,
+      hit && hit.imageUrl,
       fallbackValue,
     ];
     for (const candidate of candidates) {
@@ -268,10 +219,10 @@
     };
   }
 
-  function applyParentPostFromText(text, options = {}) {
+  async function applyParentPostFromText(text, options = {}) {
     const silent = Boolean(options.silent);
     const addToReferences = Boolean(options.addToReferences);
-    const hit = resolveParentMemoryByText(text);
+    let hit = resolveParentMemoryByText(text);
     if (!hit || !hit.parentPostId) {
       if (!silent) {
         toast('未识别到有效 parentPostId', 'warning');
@@ -279,6 +230,33 @@
       return false;
     }
     const parentPostId = String(hit.parentPostId || '').trim();
+    let authHeader = '';
+    try {
+      authHeader = await ensurePublicAuth();
+    } catch (e) {
+      if (!silent) {
+        toast(String(e.message || e), 'error');
+      }
+      return false;
+    }
+    try {
+      const remoteHit = await fetchParentPostInfo(authHeader, parentPostId);
+      if (remoteHit && remoteHit.parent_post_id) {
+        hit = {
+          ...hit,
+          parentPostId,
+          current_source_image_url: remoteHit.source_image_url,
+          source_image_url: remoteHit.source_image_url,
+          sourceImageUrl: remoteHit.source_image_url,
+          imageUrl: remoteHit.thumbnail_image_url || remoteHit.media_url || hit.imageUrl,
+          image_url: remoteHit.thumbnail_image_url || remoteHit.media_url || hit.imageUrl,
+        };
+      }
+    } catch (e) {
+      if (!silent) {
+        toast(String(e.message || e), 'warning');
+      }
+    }
     const sourceImageUrl = pickSourceImageUrl(hit, parentPostId);
     const previewUrl = pickPreviewUrl(hit, parentPostId);
 
@@ -429,6 +407,415 @@
     return `ref_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
   }
 
+  function escapeRegExp(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function getPromptMentionCandidates() {
+    return state.referenceImages.map((item, index) => ({
+      id: item.id,
+      label: String(item.mentionAlias || `Image ${index + 1}`).trim(),
+      token: `@${String(item.mentionAlias || `Image ${index + 1}`).trim()}`,
+      originalId: String(item.originalId || item.parentPostId || '').trim(),
+      imageUrl: String(item.data || '').trim(),
+    }));
+  }
+
+  function updatePromptEditorEmptyState() {
+    if (!editPromptRichInput) return;
+    const hasContent = Array.from(editPromptRichInput.childNodes).some((node) => {
+      if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || '').length > 0;
+      if (node.nodeType === Node.ELEMENT_NODE) return true;
+      return false;
+    });
+    editPromptRichInput.classList.toggle('is-empty', !hasContent);
+  }
+
+  function createMentionChip(candidate) {
+    const chip = document.createElement('span');
+    chip.className = 'prompt-mention-chip react-renderer node-mention inline-flex align-middle';
+    chip.contentEditable = 'false';
+    chip.dataset.mentionToken = candidate.token;
+    chip.dataset.mentionLabel = candidate.label;
+    chip.dataset.originalId = candidate.originalId || '';
+    chip.tabIndex = 0;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'prompt-mention-chip-inner inline-flex items-center';
+    wrapper.dataset.mentionType = 'attachment';
+    wrapper.dataset.nodeViewWrapper = '';
+    wrapper.style.whiteSpace = 'normal';
+
+    if (candidate.imageUrl) {
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'prompt-mention-chip-thumb-wrap';
+
+      const thumb = document.createElement('img');
+      thumb.className = 'prompt-mention-chip-thumb';
+      thumb.src = candidate.imageUrl;
+      thumb.alt = '';
+      thumbWrap.appendChild(thumb);
+      wrapper.appendChild(thumbWrap);
+    }
+
+    const label = document.createElement('span');
+    label.className = 'prompt-mention-chip-label';
+    label.textContent = candidate.token;
+    wrapper.appendChild(label);
+    chip.appendChild(wrapper);
+    return chip;
+  }
+
+  function clearActivePromptChip() {
+    if (!editPromptRichInput) return;
+    editPromptRichInput.querySelectorAll('.prompt-mention-chip.is-active').forEach((node) => {
+      node.classList.remove('is-active');
+    });
+  }
+
+  function getActivePromptChip() {
+    return editPromptRichInput ? editPromptRichInput.querySelector('.prompt-mention-chip.is-active') : null;
+  }
+
+  function getSelectedPromptChip() {
+    if (!editPromptRichInput || !window.getSelection) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    const startNode = range.startContainer;
+    if (startNode && startNode.nodeType === Node.ELEMENT_NODE && startNode.classList && startNode.classList.contains('prompt-mention-chip')) {
+      return startNode;
+    }
+    const parent = startNode && startNode.parentElement ? startNode.parentElement.closest('.prompt-mention-chip') : null;
+    return parent && editPromptRichInput.contains(parent) ? parent : null;
+  }
+
+  function selectPromptChip(chip) {
+    if (!chip || !editPromptRichInput) return;
+    clearActivePromptChip();
+    chip.classList.add('is-active');
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNode(chip);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editPromptRichInput.focus();
+  }
+
+  function getChipAdjacentToSelection(direction = 'backward') {
+    if (!editPromptRichInput || !window.getSelection) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    const startNode = range.startContainer;
+    const offset = range.startOffset;
+
+    if (range.collapsed) {
+      if (startNode.nodeType === Node.TEXT_NODE) {
+        const textLength = String(startNode.textContent || '').length;
+        if (direction === 'backward' && offset !== 0) {
+          return null;
+        }
+        if (direction === 'forward' && offset !== textLength) {
+          return null;
+        }
+        const sibling = direction === 'backward' ? startNode.previousSibling : startNode.nextSibling;
+        if (sibling && sibling.nodeType === Node.ELEMENT_NODE && sibling.classList && sibling.classList.contains('prompt-mention-chip')) {
+          return sibling;
+        }
+      } else if (startNode.nodeType === Node.ELEMENT_NODE) {
+        const neighbour = direction === 'backward' ? startNode.childNodes[offset - 1] : startNode.childNodes[offset];
+        if (neighbour && neighbour.nodeType === Node.TEXT_NODE) {
+          const neighbourText = String(neighbour.textContent || '');
+          if (neighbourText.length > 0) {
+            return null;
+          }
+        }
+        const index = direction === 'backward' ? offset - 1 : offset;
+        const candidate = startNode.childNodes[index];
+        if (candidate && candidate.nodeType === Node.ELEMENT_NODE && candidate.classList && candidate.classList.contains('prompt-mention-chip')) {
+          return candidate;
+        }
+      }
+    } else if (startNode.nodeType === Node.ELEMENT_NODE && startNode.classList && startNode.classList.contains('prompt-mention-chip')) {
+      return startNode;
+    }
+    return null;
+  }
+
+  function hasEditableTextNearSelection(direction = 'backward') {
+    if (!editPromptRichInput || !window.getSelection) return false;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed) return false;
+    const startNode = range.startContainer;
+    const offset = range.startOffset;
+
+    if (startNode.nodeType === Node.TEXT_NODE) {
+      const text = String(startNode.textContent || '');
+      return direction === 'backward' ? offset > 0 : offset < text.length;
+    }
+
+    if (startNode.nodeType === Node.ELEMENT_NODE) {
+      const neighbour = direction === 'backward' ? startNode.childNodes[offset - 1] : startNode.childNodes[offset];
+      if (!neighbour) return false;
+      if (neighbour.nodeType === Node.TEXT_NODE) {
+        return String(neighbour.textContent || '').length > 0;
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  function serializePromptRichInput() {
+    if (!editPromptRichInput) return '';
+    const parts = [];
+    editPromptRichInput.childNodes.forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        parts.push(node.textContent || '');
+        return;
+      }
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node;
+        if (el.classList && el.classList.contains('prompt-mention-chip')) {
+          parts.push(el.dataset.mentionToken || el.textContent || '');
+        } else {
+          parts.push(el.textContent || '');
+        }
+      }
+    });
+    return parts.join('');
+  }
+
+  function setPromptTextareaValue(value) {
+    if (!editPromptInput) return;
+    if (editPromptInput.value === value) return;
+    isSyncingPromptEditor = true;
+    editPromptInput.value = value;
+    editPromptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    isSyncingPromptEditor = false;
+  }
+
+  function getPromptValue() {
+    return String(editPromptInput ? editPromptInput.value : '').trim();
+  }
+
+  function setCaretAfterNode(node) {
+    if (!editPromptRichInput || !node) return;
+    const range = document.createRange();
+    range.setStartAfter(node);
+    range.collapse(true);
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editPromptRichInput.focus();
+  }
+
+  function hidePromptMentionMenu() {
+    activePromptMentionIndex = -1;
+    if (!editPromptMentionMenu) return;
+    editPromptMentionMenu.classList.add('hidden');
+    editPromptMentionMenu.innerHTML = '';
+    lastPromptMentionContext = null;
+  }
+
+  function resolvePromptMentionContext(range) {
+    if (!editPromptRichInput || !range) return null;
+    if (!editPromptRichInput.contains(range.startContainer)) return null;
+    if (range.startContainer.nodeType !== Node.TEXT_NODE) {
+      return null;
+    }
+    const textNode = range.startContainer;
+    const before = String(textNode.textContent || '').slice(0, range.startOffset);
+    const match = before.match(/@([^\s@]*)$/);
+    if (!match) return null;
+    return {
+      textNode,
+      startOffset: before.length - match[1].length - 1,
+      endOffset: range.startOffset,
+      query: match[1] || '',
+    };
+  }
+
+  function getPromptMentionContext() {
+    if (!editPromptRichInput) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    return resolvePromptMentionContext(range);
+  }
+
+  function insertPromptMentionChip(candidate) {
+    if (!editPromptRichInput) return;
+    const selection = window.getSelection();
+    let range = null;
+    if (selection && selection.rangeCount) {
+      const currentRange = selection.getRangeAt(0);
+      if (editPromptRichInput.contains(currentRange.startContainer)) {
+        range = currentRange.cloneRange();
+      }
+    }
+    if (!range && lastPromptMentionRange) {
+      range = lastPromptMentionRange.cloneRange();
+    }
+    const context = resolvePromptMentionContext(range) || lastPromptMentionContext;
+
+    if (!context) {
+      const chip = createMentionChip(candidate);
+      editPromptRichInput.appendChild(chip);
+      editPromptRichInput.appendChild(document.createTextNode(' '));
+      normalizePromptRichInputTokens(true);
+      hidePromptMentionMenu();
+      return;
+    }
+
+    if (context.textNode) {
+      const raw = String(context.textNode.textContent || '');
+      context.textNode.textContent = `${raw.slice(0, context.startOffset)}${raw.slice(context.endOffset)}`;
+      const workingRange = document.createRange();
+      workingRange.setStart(context.textNode, context.startOffset);
+      workingRange.collapse(true);
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(workingRange);
+      }
+      range = workingRange;
+    }
+
+    const chip = createMentionChip(candidate);
+    range.insertNode(chip);
+    const trailingSpace = document.createTextNode(' ');
+    chip.after(trailingSpace);
+    setCaretAfterNode(trailingSpace);
+    syncPromptTextareaFromRichInput();
+    hidePromptMentionMenu();
+  }
+
+  function renderPromptMentionMenu() {
+    if (!editPromptMentionMenu || !editPromptRichInput) return;
+    const context = getPromptMentionContext();
+    if (!context) {
+      hidePromptMentionMenu();
+      return;
+    }
+    const query = String(context.query || '').trim().toLowerCase();
+    lastPromptMentionContext = context;
+    lastPromptMentionRange = window.getSelection() && window.getSelection().rangeCount
+      ? window.getSelection().getRangeAt(0).cloneRange()
+      : lastPromptMentionRange;
+    const candidates = getPromptMentionCandidates().filter((item) => {
+      return !query || item.label.toLowerCase().includes(query) || item.token.toLowerCase().includes(query);
+    });
+    if (!candidates.length) {
+      hidePromptMentionMenu();
+      return;
+    }
+    if (activePromptMentionIndex < 0 || activePromptMentionIndex >= candidates.length) {
+      activePromptMentionIndex = 0;
+    }
+    editPromptMentionMenu.innerHTML = '';
+    candidates.forEach((candidate, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'prompt-mention-item';
+      if (index === activePromptMentionIndex) {
+        button.classList.add('is-active');
+      }
+      button.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        insertPromptMentionChip(candidate);
+      });
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        insertPromptMentionChip(candidate);
+      });
+
+      if (candidate.imageUrl) {
+        const thumb = document.createElement('img');
+        thumb.className = 'prompt-mention-thumb';
+        thumb.src = candidate.imageUrl;
+        thumb.alt = candidate.label;
+        button.appendChild(thumb);
+      }
+
+      const label = document.createElement('span');
+      label.className = 'prompt-mention-label';
+      label.textContent = candidate.label;
+      button.appendChild(label);
+      editPromptMentionMenu.appendChild(button);
+    });
+    editPromptMentionMenu.classList.remove('hidden');
+  }
+
+  function syncPromptTextareaFromRichInput() {
+    if (!editPromptRichInput) return;
+    const value = serializePromptRichInput();
+    setPromptTextareaValue(value);
+    clearActivePromptChip();
+    updatePromptEditorEmptyState();
+  }
+
+  function normalizePromptRichInputTokens(moveCaretToEnd = true) {
+    if (!editPromptRichInput) return;
+    const raw = serializePromptRichInput();
+    rebuildPromptRichInputFromText(raw);
+    if (moveCaretToEnd) {
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(editPromptRichInput);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    syncPromptTextareaFromRichInput();
+  }
+
+  function rebuildPromptRichInputFromText(value) {
+    if (!editPromptRichInput) return;
+    const raw = String(value || '');
+    const candidates = getPromptMentionCandidates();
+    const tokenMap = new Map();
+    candidates.forEach((item) => {
+      tokenMap.set(item.token, item);
+      if (item.originalId) {
+        tokenMap.set(`@${item.originalId}`, item);
+      }
+    });
+
+    editPromptRichInput.innerHTML = '';
+    const tokenPattern = /@Image\s+\d+|@[0-9a-fA-F-]{32,36}/g;
+    let lastIndex = 0;
+    let match;
+    while ((match = tokenPattern.exec(raw)) !== null) {
+      const [token] = match;
+      if (match.index > lastIndex) {
+        editPromptRichInput.appendChild(document.createTextNode(raw.slice(lastIndex, match.index)));
+      }
+      const candidate = tokenMap.get(token);
+      if (candidate) {
+        editPromptRichInput.appendChild(createMentionChip(candidate));
+      } else {
+        editPromptRichInput.appendChild(document.createTextNode(token));
+      }
+      lastIndex = match.index + token.length;
+    }
+    if (lastIndex < raw.length) {
+      editPromptRichInput.appendChild(document.createTextNode(raw.slice(lastIndex)));
+    }
+    updatePromptEditorEmptyState();
+  }
+
+  function syncPromptRichInputFromTextarea() {
+    if (!editPromptInput || !editPromptRichInput || isSyncingPromptEditor) return;
+    rebuildPromptRichInputFromText(editPromptInput.value || '');
+  }
+
   function getPrimaryReference() {
     if (!state.referenceImages.length) return null;
     return state.referenceImages[0];
@@ -439,6 +826,16 @@
     state.referenceImages.sort((a, b) => {
       return a.createdAt - b.createdAt;
     });
+    state.referenceImages.forEach((item, index) => {
+      item.mentionAlias = `Image ${index + 1}`;
+      if (!item.originalId) {
+        const originalId = String(item.parentPostId || extractParentPostId(item.sourceImageUrl || item.data || '') || '').trim();
+        if (originalId) {
+          item.originalId = originalId;
+        }
+      }
+    });
+    syncPromptRichInputFromTextarea();
   }
 
   function updateReferenceSummary() {
@@ -452,7 +849,7 @@
     if (!state.referenceImages.length) {
       const empty = document.createElement('div');
       empty.className = 'reference-empty';
-      empty.textContent = '可上传 / 粘贴 / 拖拽参考图（最多 3 张）';
+      empty.textContent = `可上传 / 粘贴 / 拖拽参考图（最多 ${REFERENCE_LIMIT} 张）`;
       referenceStrip.appendChild(empty);
       updateReferenceSummary();
       return;
@@ -472,6 +869,11 @@
       img.alt = item.name || 'reference';
       img.loading = 'lazy';
       card.appendChild(img);
+
+      const badge = document.createElement('span');
+      badge.className = 'reference-index-badge';
+      badge.textContent = item.mentionAlias || 'Image';
+      card.appendChild(badge);
 
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
@@ -639,39 +1041,6 @@
     if (!previewShell) return;
     previewShell.classList.toggle('dragover', Boolean(active));
   }
-  function closePreviewLightbox() {
-    if (!previewLightbox) return;
-    previewLightbox.classList.remove('active');
-    previewLightbox.setAttribute('aria-hidden', 'true');
-    document.body.style.removeProperty('overflow');
-  }
-
-  function buildPreviewDownloadName() {
-    const parentId = String(state.currentParentPostId || '').trim();
-    if (parentId) {
-      return 'imagine-workbench-' + parentId + '.jpg';
-    }
-    return 'imagine-workbench-preview.jpg';
-  }
-
-  function openPreviewLightbox(url) {
-    const safeUrl = String(url || '').trim();
-    if (!safeUrl || !previewLightbox || !previewLightboxImg) return;
-    previewLightboxImg.src = safeUrl;
-    if (previewLightboxDownload) {
-      previewLightboxDownload.href = safeUrl;
-      previewLightboxDownload.setAttribute('download', buildPreviewDownloadName());
-    }
-    if (previewLightboxCaption) {
-      const label = state.currentParentPostId
-        ? '当前画面预览 · ' + shortId(state.currentParentPostId)
-        : '当前画面预览';
-      previewLightboxCaption.textContent = label;
-    }
-    previewLightbox.classList.add('active');
-    previewLightbox.setAttribute('aria-hidden', 'false');
-    document.body.style.overflow = 'hidden';
-  }
 
   function hasFiles(dataTransfer) {
     if (!dataTransfer) return false;
@@ -717,17 +1086,6 @@
     img.loading = 'lazy';
     img.decoding = 'async';
     item.appendChild(img);
-    item.addEventListener('click', () => {
-      openPreviewLightbox(primaryUrl);
-    });
-    item.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      openPreviewLightbox(primaryUrl);
-    });
-    item.tabIndex = 0;
-    item.setAttribute('role', 'button');
-    item.setAttribute('aria-label', '打开当前画面大图预览');
     currentGallery.appendChild(item);
 
     currentGallery.classList.remove('hidden');
@@ -756,6 +1114,10 @@
     if (resetCycleBtn) resetCycleBtn.disabled = state.editing;
     if (clearHistoryBtn) clearHistoryBtn.disabled = state.editing;
     if (editPromptInput) editPromptInput.disabled = state.editing;
+    if (editPromptRichInput) {
+      editPromptRichInput.contentEditable = state.editing ? 'false' : 'true';
+      editPromptRichInput.classList.toggle('is-disabled', state.editing);
+    }
 
     if (state.editing) {
       setStatus('running', '编辑中...');
@@ -775,7 +1137,7 @@
   function setCurrentFromEntry(entry) {
     if (!entry) return;
     state.currentParentPostId = String(entry.parentPostId || '').trim();
-    state.currentSourceImageUrl = pickSourceImageUrl(entry, state.currentParentPostId);
+    state.currentSourceImageUrl = String(entry.sourceImageUrl || '').trim();
     state.currentModeValue = String(entry.mode || '').trim() || 'parent_post';
     if (parentPostInput) {
       parentPostInput.value = state.currentParentPostId;
@@ -865,45 +1227,10 @@
       actions.appendChild(applyBtn);
       actions.appendChild(copyBtn);
 
-      const actionRow = document.createElement('div');
-      actionRow.className = 'history-image-action-row';
-
-      const promptInput = document.createElement('textarea');
-      promptInput.className = 'geist-input history-image-action-prompt';
-      promptInput.rows = 2;
-      promptInput.placeholder = '图片提示词（可选，可增强；续图留空自然延续，扩图留空自动补边）';
-      promptInput.value = getRememberedHistoryImageActionPrompt();
-      mountHistoryImageActionPromptEnhancer(promptInput);
-
-      const actionButtons = document.createElement('div');
-      actionButtons.className = 'history-image-action-buttons';
-
-      const continueBtn = document.createElement('button');
-      continueBtn.type = 'button';
-      continueBtn.className = 'geist-button-outline history-image-continue-btn';
-      continueBtn.textContent = '续图';
-      continueBtn.addEventListener('click', async () => {
-        await runHistoryImageAction(entry, 'continue', promptInput);
-      });
-
-      const outpaintBtn = document.createElement('button');
-      outpaintBtn.type = 'button';
-      outpaintBtn.className = 'geist-button-outline history-image-outpaint-btn';
-      outpaintBtn.textContent = '扩图';
-      outpaintBtn.addEventListener('click', async () => {
-        await runHistoryImageAction(entry, 'outpaint', promptInput);
-      });
-
-      actionButtons.appendChild(continueBtn);
-      actionButtons.appendChild(outpaintBtn);
-      actionRow.appendChild(promptInput);
-      actionRow.appendChild(actionButtons);
-
       main.appendChild(line1);
       main.appendChild(line2);
       main.appendChild(prompt);
       main.appendChild(actions);
-      main.appendChild(actionRow);
 
       item.appendChild(thumb);
       item.appendChild(main);
@@ -1054,46 +1381,23 @@
     return authHeader;
   }
 
-  function buildWorkbenchEditBody(prompt, options = {}) {
-    const body = { prompt };
-    const references = (Array.isArray(options.references) ? options.references : [])
-      .slice(0, REFERENCE_LIMIT)
-      .map((item) => String(item || '').trim())
-      .filter(Boolean);
-    const useReferenceMergeMode = references.length >= 2;
-    if (references.length) {
-      body.image_references = references;
-      const firstRef = references[0];
-      if (firstRef.startsWith('data:image/')) {
-        body.image_base64 = firstRef;
-      } else {
-        body.image_url = firstRef;
+  async function runEdit() {
+    if (state.editing) {
+      if (workbenchEditAbortController) {
+        workbenchEditAbortController.abort();
       }
+      return;
     }
 
-    const parentPostId = String(options.parentPostId || '').trim();
-    const sourceImageUrl = pickSourceImageUrl(
-      { sourceImageUrl: options.sourceImageUrl },
-      parentPostId,
-      options.sourceImageUrl
-    );
-    if (parentPostId && !useReferenceMergeMode) {
-      body.parent_post_id = parentPostId;
-      if (sourceImageUrl) {
-        body.source_image_url = sourceImageUrl;
-      }
-    } else if (!references.length) {
-      return null;
-    }
-
-    return body;
-  }
-
-  async function performWorkbenchEdit(options = {}) {
-    const prompt = String(options.prompt || '').trim();
+    const prompt = getPromptValue();
     if (!prompt) {
       toast('请输入编辑提示词', 'warning');
-      return false;
+      return;
+    }
+
+    if (!state.currentParentPostId && !state.referenceImages.length) {
+      toast('请先添加参考图', 'warning');
+      return;
     }
 
     let authHeader = '';
@@ -1104,17 +1408,61 @@
       if (String(e.message || '').includes('登录')) {
         window.location.href = '/login';
       }
-      return false;
+      return;
     }
 
-    const body = buildWorkbenchEditBody(prompt, {
-      references: options.references,
-      parentPostId: options.parentPostId,
-      sourceImageUrl: options.sourceImageUrl,
-    });
-    if (!body) {
+    const body = {
+      prompt,
+    };
+
+    const references = state.referenceImages
+      .slice(0, REFERENCE_LIMIT)
+      .map((item) => String(item.data || '').trim())
+      .filter(Boolean);
+    const referenceItems = state.referenceImages
+      .slice(0, REFERENCE_LIMIT)
+      .map((item, index) => {
+        const imageUrl = String(item.data || '').trim();
+        const sourceImageUrl = String(item.sourceImageUrl || imageUrl || '').trim();
+        const parentPostId = String(item.parentPostId || '').trim();
+        const originalId = String(item.originalId || parentPostId || extractParentPostId(sourceImageUrl || imageUrl) || '').trim();
+        return {
+          image_url: imageUrl,
+          source_image_url: sourceImageUrl,
+          parent_post_id: parentPostId,
+          original_id: originalId,
+          mention_alias: item.mentionAlias || `Image ${index + 1}`,
+        };
+      })
+      .filter((item) => item.image_url || item.source_image_url || item.parent_post_id);
+    if (references.length) {
+      body.image_references = references;
+      body.reference_items = referenceItems;
+      const firstRef = references[0];
+      if (firstRef.startsWith('data:image/')) {
+        body.image_base64 = firstRef;
+      } else {
+        body.image_url = firstRef;
+      }
+    }
+
+    if (state.currentParentPostId) {
+      body.parent_post_id = state.currentParentPostId;
+      if (state.currentSourceImageUrl) {
+        body.source_image_url = state.currentSourceImageUrl;
+      }
+      if (!body.reference_items || !body.reference_items.length) {
+        body.reference_items = [{
+          image_url: String(state.currentSourceImageUrl || '').trim(),
+          source_image_url: String(state.currentSourceImageUrl || '').trim(),
+          parent_post_id: state.currentParentPostId,
+          original_id: state.currentParentPostId,
+          mention_alias: 'Image 1',
+        }];
+      }
+    } else if (!references.length) {
       toast('请先添加参考图', 'warning');
-      return false;
+      return;
     }
 
     setEditing(true);
@@ -1146,16 +1494,15 @@
         throw new Error('返回结果缺少图片 URL');
       }
 
-      const fallbackParentPostId = String(options.parentPostId || state.currentParentPostId || '').trim();
+      const previousParentPostId = state.currentParentPostId;
       const generatedParent = String(
         payload.current_parent_post_id
         || payload.generated_parent_post_id
         || payload.input_parent_post_id
         || extractParentPostId(imageUrl)
       ).trim();
-      const resolvedParentPostId = generatedParent || fallbackParentPostId;
+      const resolvedParentPostId = generatedParent || previousParentPostId;
 
-      const fallbackSourceImageUrl = String(options.sourceImageUrl || state.currentSourceImageUrl || '').trim();
       const sourceImageUrl = pickSourceImageUrl(
         {
           current_source_image_url: payload.current_source_image_url,
@@ -1163,16 +1510,15 @@
           imageUrl,
         },
         resolvedParentPostId,
-        fallbackSourceImageUrl
+        state.currentSourceImageUrl
       );
 
-      const mode = String(options.mode || payload.mode || (resolvedParentPostId ? 'parent_post' : 'upload')).trim() || 'parent_post';
+      const mode = String(payload.mode || (state.currentParentPostId ? 'parent_post' : 'upload')).trim();
       const elapsedMs = Number(payload.elapsed_ms || 0);
-      const historyPrompt = String(options.historyPrompt || prompt).trim() || prompt;
 
       state.currentParentPostId = resolvedParentPostId;
       state.currentSourceImageUrl = sourceImageUrl;
-      state.currentModeValue = mode;
+      state.currentModeValue = mode || 'parent_post';
       if (parentPostInput) {
         parentPostInput.value = state.currentParentPostId || '';
       }
@@ -1188,20 +1534,12 @@
           round: state.editRound,
           roundIndex: index + 1,
           roundTotal: imageUrls.length,
-          prompt: historyPrompt,
-          mode,
+          prompt,
+          mode: state.currentModeValue,
           imageUrl: url,
           imageUrls,
           parentPostId: perParentPostId,
-          sourceImageUrl: pickSourceImageUrl(
-            {
-              current_source_image_url: payload.current_source_image_url,
-              source_image_url: payload.source_image_url,
-              imageUrl: url,
-            },
-            perParentPostId,
-            sourceImageUrl
-          ),
+          sourceImageUrl: String(url || sourceImageUrl || '').trim(),
           elapsedMs: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : 0,
           createdAt,
         };
@@ -1213,14 +1551,13 @@
           parentPostId: entry.parentPostId || resolvedParentPostId,
           sourceImageUrl: entry.sourceImageUrl || sourceImageUrl,
           imageUrl: entry.imageUrl || imageUrl,
-          origin: options.origin || 'workbench_edit',
+          origin: 'workbench_edit',
         });
       });
 
       finishEditProgress(true, '编辑完成 100%');
-      setStatus('done', options.successStatus || `编辑完成 · round #${state.editRound}（${imageUrls.length} 张）`);
-      toast(options.successToast || '编辑成功，已更新当前画面', 'success');
-      return true;
+      setStatus('done', `编辑完成 · round #${state.editRound}（${imageUrls.length} 张）`);
+      toast('编辑成功，已更新当前画面', 'success');
     } catch (e) {
       if (e && e.name === 'AbortError') {
         finishEditProgress(false, '已中止');
@@ -1231,77 +1568,13 @@
         setStatus('error', '编辑失败');
         toast(String(e.message || e), 'error');
       }
-      return false;
     } finally {
       workbenchEditAbortController = null;
       setEditing(false);
     }
   }
 
-  async function runHistoryImageAction(entry, mode, promptInput) {
-    if (state.editing) {
-      toast('当前有任务执行中，请稍候', 'warning');
-      return;
-    }
-    const parentPostId = String(entry && entry.parentPostId ? entry.parentPostId : '').trim();
-    if (!parentPostId) {
-      toast('当前记录没有 parentPostId，无法继续处理', 'warning');
-      return;
-    }
-    const promptRaw = promptInput ? String(promptInput.value || '') : '';
-    const finalPrompt = buildWorkbenchImageActionPrompt(mode, promptRaw, entry);
-    const label = getWorkbenchImageActionLabel(mode);
-    rememberHistoryImageActionPrompt(promptRaw);
-    await performWorkbenchEdit({
-      prompt: finalPrompt,
-      historyPrompt: String(promptRaw || finalPrompt).trim(),
-      mode,
-      parentPostId,
-      sourceImageUrl: String(entry.sourceImageUrl || entry.imageUrl || '').trim(),
-      origin: `workbench_${mode}`,
-      successStatus: `${label}完成 · round #${state.editRound + 1}`,
-      successToast: `${label}成功，已更新当前画面`,
-    });
-  }
-
-  async function runEdit() {
-    if (state.editing) {
-      if (workbenchEditAbortController) {
-        workbenchEditAbortController.abort();
-      }
-      return;
-    }
-
-    const prompt = String(editPromptInput ? editPromptInput.value : '').trim();
-    if (!prompt) {
-      toast('请输入编辑提示词', 'warning');
-      return;
-    }
-
-    if (!state.currentParentPostId && !state.referenceImages.length) {
-      toast('请先添加参考图', 'warning');
-      return;
-    }
-
-    const references = state.referenceImages
-      .slice(0, REFERENCE_LIMIT)
-      .map((item) => String(item.data || '').trim())
-      .filter(Boolean);
-    const useReferenceMergeMode = references.length >= 2;
-
-    await performWorkbenchEdit({
-      prompt,
-      historyPrompt: prompt,
-      mode: useReferenceMergeMode ? 'upload' : (state.currentParentPostId ? 'parent_post' : 'upload'),
-      parentPostId: useReferenceMergeMode ? '' : state.currentParentPostId,
-      sourceImageUrl: useReferenceMergeMode ? '' : state.currentSourceImageUrl,
-      references,
-      origin: 'workbench_edit',
-    });
-  }
-
   function bindEvents() {
-
     if (selectSeedBtn && seedImageInput) {
       selectSeedBtn.addEventListener('click', () => {
         seedImageInput.click();
@@ -1329,22 +1602,22 @@
     }
 
     if (applyParentBtn) {
-      applyParentBtn.addEventListener('click', () => {
-        applyParentPostFromText(parentPostInput ? parentPostInput.value : '', { addToReferences: true });
+      applyParentBtn.addEventListener('click', async () => {
+        await applyParentPostFromText(parentPostInput ? parentPostInput.value : '', { addToReferences: true });
       });
     }
 
     if (parentPostInput) {
-      parentPostInput.addEventListener('keydown', (event) => {
+      parentPostInput.addEventListener('keydown', async (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          applyParentPostFromText(parentPostInput.value, { addToReferences: true });
+          await applyParentPostFromText(parentPostInput.value, { addToReferences: true });
         }
       });
-      parentPostInput.addEventListener('input', () => {
+      parentPostInput.addEventListener('input', async () => {
         const raw = parentPostInput.value.trim();
         if (!raw) return;
-        applyParentPostFromText(raw, { silent: true });
+        await applyParentPostFromText(raw, { silent: true });
       });
       parentPostInput.addEventListener('paste', (event) => {
         const text = String(event.clipboardData ? event.clipboardData.getData('text') || '' : '').trim();
@@ -1355,7 +1628,121 @@
       });
     }
 
+    if (editPromptRichInput) {
+      editPromptRichInput.addEventListener('mousedown', (event) => {
+        const chip = event.target instanceof Element ? event.target.closest('.prompt-mention-chip') : null;
+        if (!chip) return;
+        event.preventDefault();
+        selectPromptChip(chip);
+        hidePromptMentionMenu();
+      });
+      editPromptRichInput.addEventListener('beforeinput', (event) => {
+        if (event.inputType !== 'deleteContentBackward' && event.inputType !== 'deleteContentForward') return;
+        const selectedChip = getSelectedPromptChip();
+        if (selectedChip) {
+          event.preventDefault();
+          selectedChip.remove();
+          syncPromptTextareaFromRichInput();
+          return;
+        }
+        const direction = event.inputType === 'deleteContentBackward' ? 'backward' : 'forward';
+        if (hasEditableTextNearSelection(direction)) {
+          return;
+        }
+        const adjacentChip = getChipAdjacentToSelection(direction);
+        if (adjacentChip) {
+          event.preventDefault();
+          adjacentChip.remove();
+          syncPromptTextareaFromRichInput();
+        }
+      });
+      editPromptRichInput.addEventListener('input', () => {
+        syncPromptTextareaFromRichInput();
+        renderPromptMentionMenu();
+      });
+      editPromptRichInput.addEventListener('click', (event) => {
+        const chip = event.target instanceof Element ? event.target.closest('.prompt-mention-chip') : null;
+        if (chip) {
+          selectPromptChip(chip);
+          hidePromptMentionMenu();
+          return;
+        }
+        clearActivePromptChip();
+        renderPromptMentionMenu();
+      });
+      editPromptRichInput.addEventListener('blur', () => {
+        normalizePromptRichInputTokens(false);
+        window.setTimeout(() => hidePromptMentionMenu(), 120);
+      });
+      editPromptRichInput.addEventListener('keydown', (event) => {
+        const menuOpen = editPromptMentionMenu && !editPromptMentionMenu.classList.contains('hidden');
+        if (menuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault();
+          const total = editPromptMentionMenu.querySelectorAll('.prompt-mention-item').length;
+          if (total > 0) {
+            activePromptMentionIndex = event.key === 'ArrowDown'
+              ? (activePromptMentionIndex + 1 + total) % total
+              : (activePromptMentionIndex - 1 + total) % total;
+            renderPromptMentionMenu();
+          }
+          return;
+        }
+        if (menuOpen && event.key === 'Enter') {
+          const active = editPromptMentionMenu.querySelector('.prompt-mention-item.is-active .prompt-mention-label');
+          if (active) {
+            event.preventDefault();
+            const candidate = getPromptMentionCandidates().find((item) => item.label === active.textContent);
+            if (candidate) insertPromptMentionChip(candidate);
+            return;
+          }
+        }
+        if (menuOpen && event.key === 'Escape') {
+          event.preventDefault();
+          hidePromptMentionMenu();
+          return;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+          event.preventDefault();
+          runEdit();
+          return;
+        }
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+          const selectedChip = getSelectedPromptChip();
+          if (selectedChip) {
+            event.preventDefault();
+            selectedChip.remove();
+            syncPromptTextareaFromRichInput();
+            return;
+          }
+        }
+        if (event.key === 'Backspace' && hasEditableTextNearSelection('backward')) {
+          return;
+        }
+        if (event.key === 'Delete' && hasEditableTextNearSelection('forward')) {
+          return;
+        }
+        if ((event.key === 'Backspace' || event.key === 'Delete') && window.getSelection) {
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount) {
+            const range = selection.getRangeAt(0);
+            const node = event.key === 'Backspace'
+              ? (range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.previousSibling : range.startContainer.childNodes[range.startOffset - 1])
+              : (range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.nextSibling : range.startContainer.childNodes[range.startOffset]);
+            if (node && node.nodeType === Node.ELEMENT_NODE && node.classList && node.classList.contains('prompt-mention-chip')) {
+              event.preventDefault();
+              node.remove();
+              syncPromptTextareaFromRichInput();
+              return;
+            }
+          }
+        }
+      });
+    }
+
     if (editPromptInput) {
+      editPromptInput.addEventListener('input', () => {
+        syncPromptRichInputFromTextarea();
+      });
       editPromptInput.addEventListener('keydown', (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
           event.preventDefault();
@@ -1396,7 +1783,7 @@
       const text = dataTransfer ? String(dataTransfer.getData('text') || '').trim() : '';
       if (!text) return;
       const target = event.target;
-      const isTypingInPrompt = target === editPromptInput;
+      const isTypingInPrompt = target === editPromptInput || target === editPromptRichInput || (editPromptRichInput && editPromptRichInput.contains(target));
       const isTypingInParentInput = target === parentPostInput;
       if (isTypingInPrompt) return;
       if (!isTypingInParentInput && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
@@ -1406,6 +1793,19 @@
       if (ok) {
         event.preventDefault();
       }
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!editPromptMentionMenu || editPromptMentionMenu.classList.contains('hidden')) return;
+      if (editPromptMentionMenu.contains(event.target)) return;
+      if (editPromptRichInput && editPromptRichInput.contains(event.target)) return;
+      hidePromptMentionMenu();
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!editPromptRichInput) return;
+      if (editPromptRichInput.contains(event.target)) return;
+      clearActivePromptChip();
     });
 
     if (previewShell) {
@@ -1469,24 +1869,6 @@
       dragCounter = 0;
     });
   }
-  if (previewLightbox) {
-    previewLightbox.addEventListener('click', (event) => {
-      if (event.target !== previewLightbox) return;
-      closePreviewLightbox();
-    });
-  }
-
-  if (previewLightboxClose) {
-    previewLightboxClose.addEventListener('click', () => {
-      closePreviewLightbox();
-    });
-  }
-
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    if (!previewLightbox || !previewLightbox.classList.contains('active')) return;
-    closePreviewLightbox();
-  });
 
   function mountInlineSubmitButton() {
     if (!editPromptInput || !submitEditBtn) return false;
@@ -1512,6 +1894,7 @@
   function init() {
     ensureInlineSubmitButton();
     bindEvents();
+    syncPromptRichInputFromTextarea();
     renderReferenceStrip();
     renderHistory();
     resetCycle(false);

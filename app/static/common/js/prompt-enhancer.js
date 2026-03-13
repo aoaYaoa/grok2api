@@ -357,6 +357,67 @@
     }));
   }
 
+  function extractMentionTokens(text) {
+    const raw = String(text || '');
+    const tokens = raw.match(/@Image\s+\d+|@[0-9a-fA-F-]{32,36}/g) || [];
+    const ordered = [];
+    const seen = new Set();
+    tokens.forEach((token) => {
+      const key = String(token || '').trim();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      ordered.push(key);
+    });
+    return ordered;
+  }
+
+  function encodePromptMentions(text) {
+    const raw = String(text || '');
+    const mentions = extractMentionTokens(raw);
+    if (!mentions.length) {
+      return {
+        text: raw,
+        tokens: [],
+        placeholders: []
+      };
+    }
+    let encoded = raw;
+    const placeholders = [];
+    mentions.forEach((token, index) => {
+      const placeholder = `[[IMAGE_TAG_${index + 1}]]`;
+      placeholders.push(placeholder);
+      encoded = encoded.replaceAll(token, placeholder);
+    });
+    return {
+      text: encoded,
+      tokens: mentions,
+      placeholders
+    };
+  }
+
+  function restorePromptMentions(text, mentionState) {
+    const raw = String(text || '');
+    const tokens = Array.isArray(mentionState && mentionState.tokens) ? mentionState.tokens : [];
+    const placeholders = Array.isArray(mentionState && mentionState.placeholders) ? mentionState.placeholders : [];
+    if (!tokens.length || !placeholders.length) {
+      return raw;
+    }
+
+    let restored = raw;
+    placeholders.forEach((placeholder, index) => {
+      const token = tokens[index] || '';
+      if (!placeholder || !token) return;
+      restored = restored.replaceAll(placeholder, token);
+    });
+
+    const existingMentions = extractMentionTokens(restored);
+    const missing = tokens.filter((token) => !existingMentions.includes(token));
+    if (missing.length) {
+      restored = `${missing.join(' ')} ${restored}`.trim();
+    }
+    return restored;
+  }
+
   function updateToggleButtonText(toggleBtn, mode) {
     toggleBtn.textContent = mode === 'en' ? 'CN' : 'EN';
   }
@@ -538,6 +599,7 @@
       toast('请输入提示词', 'warning');
       return;
     }
+    const mentionState = encodePromptMentions(raw);
     if (typeof window.ensurePublicKey !== 'function' || typeof window.buildAuthHeaders !== 'function') {
       toast('公共鉴权脚本未加载', 'error');
       return;
@@ -556,16 +618,23 @@
     });
     setEnhanceRunning(textarea, enhanceBtn, toggleBtn, true, actionWrap);
     try {
-      const enhanced = await callEnhanceApi(raw, controller.signal, authHeader, requestId);
+      const enhanced = await callEnhanceApi(mentionState.text, controller.signal, authHeader, requestId);
       const parsed = parseEnhancedPrompt(enhanced);
-      const hasDualLanguage = Boolean(parsed.en && parsed.zh);
+      const restoredParsed = {
+        head: restorePromptMentions(parsed.head, mentionState),
+        en: restorePromptMentions(parsed.en, mentionState),
+        zh: restorePromptMentions(parsed.zh, mentionState),
+        tail: restorePromptMentions(parsed.tail, mentionState),
+        raw: restorePromptMentions(parsed.raw, mentionState),
+      };
+      const hasDualLanguage = Boolean(restoredParsed.en && restoredParsed.zh);
       const mode = ((enhanceStateMap.get(textarea) || {}).mode || 'zh');
       enhanceStateMap.set(textarea, {
-        head: parsed.head,
-        en: parsed.en,
-        zh: parsed.zh,
-        tail: parsed.tail,
-        raw: parsed.raw,
+        head: restoredParsed.head,
+        en: restoredParsed.en,
+        zh: restoredParsed.zh,
+        tail: restoredParsed.tail,
+        raw: restoredParsed.raw,
         mode,
       });
 
@@ -575,7 +644,7 @@
         applyEnhancedByMode(textarea, toggleBtn, applyMode);
       } else {
         setToggleButtonVisible(toggleBtn, false);
-        applyPromptToTextarea(textarea, parsed.raw);
+        applyPromptToTextarea(textarea, restoredParsed.raw);
       }
       setEnhanceButtonMode(enhanceBtn, 'clear');
       syncActionGroupState(enhanceBtn, toggleBtn, actionWrap);

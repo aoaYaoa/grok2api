@@ -47,12 +47,12 @@
                   <div class="panel-title">当前画面</div>
                   <div class="upload-row">
                     <button id="selectImageFileBtn" class="geist-button-outline" type="button">添加参考图</button>
-                    <span id="imageFileName" class="file-name">已添加 0/3 张</span>
+                    <span id="imageFileName" class="file-name">已添加 0/7 张</span>
                   </div>
                   <input id="imageUrlInput" class="geist-input hidden" placeholder="https://... 或 data:image/...">
                   <input id="imageFileInput" class="ref-file-input" type="file" accept="image/*" multiple>
                   <div id="referenceStrip" class="reference-strip">
-                    <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 3 张）</div>
+                    <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 7 张）</div>
                   </div>
                   <div class="parent-quick-row">
                     <label class="field-label" for="parentPostInput">粘贴 parentPostId（全局记忆）</label>
@@ -78,8 +78,12 @@
                   </div>
                   <div class="field video-prompt-field">
                     <label class="field-label" for="promptInput">视频提示词</label>
-                    <textarea id="promptInput" class="geist-input video-textarea"
-                      placeholder="例如：街头霓虹雨夜，慢镜头，胶片质感"></textarea>
+                    <div class="video-prompt-wrap">
+                      <div id="promptRichInput" class="prompt-rich-input" contenteditable="true" data-placeholder="例如：@Image 1 站在中间，@Image 2 从左侧走入"></div>
+                      <div id="referenceMentionMenu" class="reference-mention-menu hidden"></div>
+                      <textarea id="promptInput" class="geist-input video-textarea prompt-textarea-proxy" data-prompt-enhancer="off" aria-hidden="true" tabindex="-1"
+                        placeholder="例如：@Image 1 站在中间，@Image 2 从左侧走入"></textarea>
+                    </div>
                   </div>
                 </div>
               </div>

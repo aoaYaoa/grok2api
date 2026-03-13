@@ -25,6 +25,8 @@
   const spliceBtn = document.getElementById('spliceBtn');
 
   const promptInput = document.getElementById('promptInput');
+  const promptRichInput = document.getElementById('promptRichInput');
+  const referenceMentionMenu = document.getElementById('referenceMentionMenu');
   const imageUrlInput = document.getElementById('imageUrlInput');
   const parentPostInput = document.getElementById('parentPostInput');
   const applyParentBtn = document.getElementById('applyParentBtn');
@@ -67,10 +69,41 @@
   let isRunning = false;
   let hasRunError = false;
   let startAt = 0;
-  const REFERENCE_LIMIT = 3;
+  const REFERENCE_LIMIT = 7;
   let referenceImages = [];
   let currentModeValue = 'upload';
   let selectedReferenceId = '';
+  let activeMentionIndex = -1;
+  let isSyncingPromptEditor = false;
+  let lastMentionRange = null;
+  let lastMentionContext = null;
+
+  function getReferenceMentionLabel(index) {
+    return `Image ${index + 1}`;
+  }
+
+  function enrichReferenceItem(item, index) {
+    const normalized = {
+      id: item.id || makeReferenceId('ref'),
+      previewUrl: String(item.previewUrl || item.url || item.sourceUrl || '').trim(),
+      sourceUrl: String(item.sourceUrl || item.url || item.previewUrl || '').trim(),
+      url: String(item.url || item.previewUrl || item.sourceUrl || '').trim(),
+      parentPostId: String(item.parentPostId || '').trim(),
+      name: String(item.name || '').trim(),
+      mentionLabel: String(item.mentionLabel || '').trim()
+    };
+    if (!normalized.mentionLabel) {
+      normalized.mentionLabel = getReferenceMentionLabel(index);
+    }
+    return normalized;
+  }
+
+  function refreshReferenceMentionLabels() {
+    referenceImages = referenceImages.map((item, index) => ({
+      ...item,
+      mentionLabel: getReferenceMentionLabel(index)
+    }));
+  }
   let elapsedTimer = null;
   let lastProgress = 0;
   let previewCount = 0;
@@ -424,17 +457,20 @@
 
   function renderReferenceStrip() {
     if (!referenceStrip) return;
+    refreshReferenceMentionLabels();
+    syncPromptRichInputFromTextarea();
     referenceStrip.innerHTML = '';
     if (!referenceImages.length) {
       const empty = document.createElement('div');
       empty.className = 'reference-empty';
-      empty.textContent = '可上传 / 粘贴 / 拖拽参考图（最多 3 张）';
+      empty.textContent = `可上传 / 粘贴 / 拖拽参考图（最多 ${REFERENCE_LIMIT} 张）`;
       referenceStrip.appendChild(empty);
       updateReferenceMeta();
       return;
     }
 
     referenceImages.forEach((item) => {
+      const index = referenceImages.findIndex((ref) => ref.id === item.id);
       const card = document.createElement('div');
       card.className = 'reference-item';
       card.dataset.id = item.id;
@@ -463,6 +499,10 @@
 
       card.appendChild(img);
       card.appendChild(removeBtn);
+      const badge = document.createElement('div');
+      badge.className = 'reference-badge';
+      badge.textContent = item.mentionLabel || getReferenceMentionLabel(Math.max(0, index));
+      card.appendChild(badge);
       referenceStrip.appendChild(card);
     });
 
@@ -544,14 +584,7 @@
     referenceImages = (Array.isArray(items) ? items : [])
       .filter((item) => item && (item.previewUrl || item.sourceUrl || item.url))
       .slice(0, REFERENCE_LIMIT)
-      .map((item) => ({
-        id: item.id || makeReferenceId('ref'),
-        previewUrl: String(item.previewUrl || item.url || item.sourceUrl || '').trim(),
-        sourceUrl: String(item.sourceUrl || item.url || item.previewUrl || '').trim(),
-        url: String(item.url || item.previewUrl || item.sourceUrl || '').trim(),
-        parentPostId: String(item.parentPostId || '').trim(),
-        name: String(item.name || '').trim(),
-      }));
+      .map((item, index) => enrichReferenceItem(item, index));
     currentModeValue = mode;
     const primary = referenceImages[0] || null;
     selectedReferenceId = primary ? primary.id : '';
@@ -563,6 +596,404 @@
     }
     renderReferenceStrip();
     setReferencePreviewItems(referenceImages);
+    syncPromptRichInputFromTextarea();
+  }
+
+  function hideReferenceMentionMenu() {
+    activeMentionIndex = -1;
+    if (!referenceMentionMenu) return;
+    referenceMentionMenu.classList.add('hidden');
+    referenceMentionMenu.innerHTML = '';
+    lastMentionContext = null;
+  }
+
+  function getPromptMentionCandidates() {
+    return referenceImages.map((item, index) => ({
+      id: item.id,
+      label: String(item.mentionLabel || getReferenceMentionLabel(index)).trim(),
+      token: `@${String(item.mentionLabel || getReferenceMentionLabel(index)).trim()}`,
+      originalId: String(item.parentPostId || '').trim(),
+      imageUrl: String(item.previewUrl || item.sourceUrl || item.url || '').trim()
+    }));
+  }
+
+  function updatePromptEditorEmptyState() {
+    if (!promptRichInput) return;
+    const hasContent = Array.from(promptRichInput.childNodes).some((node) => {
+      if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || '').length > 0;
+      if (node.nodeType === Node.ELEMENT_NODE) return true;
+      return false;
+    });
+    promptRichInput.classList.toggle('is-empty', !hasContent);
+  }
+
+  function createMentionChip(candidate) {
+    const chip = document.createElement('span');
+    chip.className = 'prompt-mention-chip react-renderer node-mention inline-flex align-middle';
+    chip.contentEditable = 'false';
+    chip.dataset.mentionToken = candidate.token;
+    chip.dataset.mentionLabel = candidate.label;
+    chip.dataset.originalId = candidate.originalId || '';
+    chip.tabIndex = 0;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'prompt-mention-chip-inner inline-flex items-center';
+    wrapper.dataset.mentionType = 'attachment';
+    wrapper.dataset.nodeViewWrapper = '';
+    wrapper.style.whiteSpace = 'normal';
+
+    if (candidate.imageUrl) {
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'prompt-mention-chip-thumb-wrap';
+
+      const thumb = document.createElement('img');
+      thumb.className = 'prompt-mention-chip-thumb';
+      thumb.src = candidate.imageUrl;
+      thumb.alt = '';
+      thumbWrap.appendChild(thumb);
+      wrapper.appendChild(thumbWrap);
+    }
+
+    const label = document.createElement('span');
+    label.className = 'prompt-mention-chip-label';
+    label.textContent = candidate.token;
+    wrapper.appendChild(label);
+    chip.appendChild(wrapper);
+    return chip;
+  }
+
+  function clearActivePromptChip() {
+    if (!promptRichInput) return;
+    promptRichInput.querySelectorAll('.prompt-mention-chip.is-active').forEach((node) => {
+      node.classList.remove('is-active');
+    });
+  }
+
+  function getSelectedPromptChip() {
+    if (!promptRichInput || !window.getSelection) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    const startNode = range.startContainer;
+    if (startNode && startNode.nodeType === Node.ELEMENT_NODE && startNode.classList && startNode.classList.contains('prompt-mention-chip')) {
+      return startNode;
+    }
+    const parent = startNode && startNode.parentElement ? startNode.parentElement.closest('.prompt-mention-chip') : null;
+    return parent && promptRichInput.contains(parent) ? parent : null;
+  }
+
+  function selectPromptChip(chip) {
+    if (!chip || !promptRichInput) return;
+    clearActivePromptChip();
+    chip.classList.add('is-active');
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNode(chip);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    promptRichInput.focus();
+  }
+
+  function getChipAdjacentToSelection(direction = 'backward') {
+    if (!promptRichInput || !window.getSelection) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    const startNode = range.startContainer;
+    const offset = range.startOffset;
+
+    if (range.collapsed) {
+      if (startNode.nodeType === Node.TEXT_NODE) {
+        const textLength = String(startNode.textContent || '').length;
+        if (direction === 'backward' && offset !== 0) {
+          return null;
+        }
+        if (direction === 'forward' && offset !== textLength) {
+          return null;
+        }
+        const sibling = direction === 'backward' ? startNode.previousSibling : startNode.nextSibling;
+        if (sibling && sibling.nodeType === Node.ELEMENT_NODE && sibling.classList && sibling.classList.contains('prompt-mention-chip')) {
+          return sibling;
+        }
+      } else if (startNode.nodeType === Node.ELEMENT_NODE) {
+        const neighbour = direction === 'backward' ? startNode.childNodes[offset - 1] : startNode.childNodes[offset];
+        if (neighbour && neighbour.nodeType === Node.TEXT_NODE) {
+          const neighbourText = String(neighbour.textContent || '');
+          if (neighbourText.length > 0) {
+            return null;
+          }
+        }
+        const index = direction === 'backward' ? offset - 1 : offset;
+        const candidate = startNode.childNodes[index];
+        if (candidate && candidate.nodeType === Node.ELEMENT_NODE && candidate.classList && candidate.classList.contains('prompt-mention-chip')) {
+          return candidate;
+        }
+      }
+    } else if (startNode.nodeType === Node.ELEMENT_NODE && startNode.classList && startNode.classList.contains('prompt-mention-chip')) {
+      return startNode;
+    }
+    return null;
+  }
+
+  function hasEditableTextNearSelection(direction = 'backward') {
+    if (!promptRichInput || !window.getSelection) return false;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed) return false;
+    const startNode = range.startContainer;
+    const offset = range.startOffset;
+
+    if (startNode.nodeType === Node.TEXT_NODE) {
+      const text = String(startNode.textContent || '');
+      return direction === 'backward' ? offset > 0 : offset < text.length;
+    }
+
+    if (startNode.nodeType === Node.ELEMENT_NODE) {
+      const neighbour = direction === 'backward' ? startNode.childNodes[offset - 1] : startNode.childNodes[offset];
+      if (!neighbour) return false;
+      if (neighbour.nodeType === Node.TEXT_NODE) {
+        return String(neighbour.textContent || '').length > 0;
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  function serializePromptRichInput() {
+    if (!promptRichInput) return '';
+    const parts = [];
+    promptRichInput.childNodes.forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        parts.push(node.textContent || '');
+        return;
+      }
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node;
+        if (el.classList && el.classList.contains('prompt-mention-chip')) {
+          parts.push(el.dataset.mentionToken || el.textContent || '');
+        } else {
+          parts.push(el.textContent || '');
+        }
+      }
+    });
+    return parts.join('');
+  }
+
+  function setPromptTextareaValue(value) {
+    if (!promptInput) return;
+    if (promptInput.value === value) return;
+    isSyncingPromptEditor = true;
+    promptInput.value = value;
+    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    isSyncingPromptEditor = false;
+  }
+
+  function resolvePromptMentionContext(range) {
+    if (!promptRichInput || !range) return null;
+    if (!promptRichInput.contains(range.startContainer)) return null;
+    if (range.startContainer.nodeType !== Node.TEXT_NODE) return null;
+    const textNode = range.startContainer;
+    const before = String(textNode.textContent || '').slice(0, range.startOffset);
+    const match = before.match(/@([^\s@]*)$/);
+    if (!match) return null;
+    return {
+      textNode,
+      startOffset: before.length - match[1].length - 1,
+      endOffset: range.startOffset,
+      query: match[1] || ''
+    };
+  }
+
+  function getMentionContext() {
+    if (!promptRichInput) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    return resolvePromptMentionContext(selection.getRangeAt(0));
+  }
+
+  function setCaretAfterNode(node) {
+    if (!promptRichInput || !node) return;
+    const range = document.createRange();
+    range.setStartAfter(node);
+    range.collapse(true);
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    promptRichInput.focus();
+  }
+
+  function syncPromptTextareaFromRichInput() {
+    const value = serializePromptRichInput();
+    setPromptTextareaValue(value);
+    clearActivePromptChip();
+    updatePromptEditorEmptyState();
+  }
+
+  function rebuildPromptRichInputFromText(value) {
+    if (!promptRichInput) return;
+    const raw = String(value || '');
+    const tokenMap = new Map();
+    getPromptMentionCandidates().forEach((item) => {
+      tokenMap.set(item.token, item);
+      if (item.originalId) {
+        tokenMap.set(`@${item.originalId}`, item);
+      }
+    });
+
+    promptRichInput.innerHTML = '';
+    const tokenPattern = /@Image\s+\d+|@[0-9a-fA-F-]{32,36}/g;
+    let lastIndex = 0;
+    let match;
+    while ((match = tokenPattern.exec(raw)) !== null) {
+      const [token] = match;
+      if (match.index > lastIndex) {
+        promptRichInput.appendChild(document.createTextNode(raw.slice(lastIndex, match.index)));
+      }
+      const candidate = tokenMap.get(token);
+      if (candidate) {
+        promptRichInput.appendChild(createMentionChip(candidate));
+      } else {
+        promptRichInput.appendChild(document.createTextNode(token));
+      }
+      lastIndex = match.index + token.length;
+    }
+    if (lastIndex < raw.length) {
+      promptRichInput.appendChild(document.createTextNode(raw.slice(lastIndex)));
+    }
+    updatePromptEditorEmptyState();
+  }
+
+  function syncPromptRichInputFromTextarea() {
+    if (!promptInput || !promptRichInput || isSyncingPromptEditor) return;
+    rebuildPromptRichInputFromText(promptInput.value || '');
+  }
+
+  function normalizePromptRichInputTokens(moveCaretToEnd = true) {
+    if (!promptRichInput) return;
+    rebuildPromptRichInputFromText(serializePromptRichInput());
+    if (moveCaretToEnd) {
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(promptRichInput);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    syncPromptTextareaFromRichInput();
+  }
+
+  function insertMentionLabel(labelOrCandidate) {
+    if (!promptRichInput) return;
+    const candidate = typeof labelOrCandidate === 'string'
+      ? getPromptMentionCandidates().find((item) => item.label === labelOrCandidate)
+      : labelOrCandidate;
+    if (!candidate) return;
+
+    const selection = window.getSelection();
+    let range = null;
+    if (selection && selection.rangeCount) {
+      const currentRange = selection.getRangeAt(0);
+      if (promptRichInput.contains(currentRange.startContainer)) {
+        range = currentRange.cloneRange();
+      }
+    }
+    if (!range && lastMentionRange) {
+      range = lastMentionRange.cloneRange();
+    }
+    const context = resolvePromptMentionContext(range) || lastMentionContext;
+    if (!context) {
+      const chip = createMentionChip(candidate);
+      promptRichInput.appendChild(chip);
+      promptRichInput.appendChild(document.createTextNode(' '));
+      normalizePromptRichInputTokens(true);
+      hideReferenceMentionMenu();
+      return;
+    }
+
+    if (context.textNode) {
+      const raw = String(context.textNode.textContent || '');
+      context.textNode.textContent = `${raw.slice(0, context.startOffset)}${raw.slice(context.endOffset)}`;
+      const workingRange = document.createRange();
+      workingRange.setStart(context.textNode, context.startOffset);
+      workingRange.collapse(true);
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(workingRange);
+      }
+      range = workingRange;
+    }
+
+    const chip = createMentionChip(candidate);
+    range.insertNode(chip);
+    const trailingSpace = document.createTextNode(' ');
+    chip.after(trailingSpace);
+    setCaretAfterNode(trailingSpace);
+    syncPromptTextareaFromRichInput();
+    hideReferenceMentionMenu();
+  }
+
+  function renderReferenceMentionMenu() {
+    if (!referenceMentionMenu || !promptRichInput) return;
+    const ctx = getMentionContext();
+    if (!ctx || !referenceImages.length) {
+      hideReferenceMentionMenu();
+      return;
+    }
+    const query = String(ctx.query || '').trim().toLowerCase();
+    lastMentionContext = ctx;
+    lastMentionRange = window.getSelection() && window.getSelection().rangeCount
+      ? window.getSelection().getRangeAt(0).cloneRange()
+      : lastMentionRange;
+    const candidates = getPromptMentionCandidates().filter((item) => {
+      return !query || item.label.toLowerCase().includes(query) || item.token.toLowerCase().includes(query);
+    });
+    if (!candidates.length) {
+      hideReferenceMentionMenu();
+      return;
+    }
+    if (activeMentionIndex < 0 || activeMentionIndex >= candidates.length) {
+      activeMentionIndex = 0;
+    }
+
+    referenceMentionMenu.innerHTML = '';
+    candidates.forEach((item, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'reference-mention-item';
+      if (index === activeMentionIndex) {
+        button.classList.add('is-active');
+      }
+      button.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        insertMentionLabel(item);
+      });
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        insertMentionLabel(item);
+      });
+
+      if (item.imageUrl) {
+        const thumb = document.createElement('img');
+        thumb.className = 'reference-mention-thumb';
+        thumb.src = item.imageUrl;
+        thumb.alt = item.label;
+        button.appendChild(thumb);
+      }
+
+      const label = document.createElement('div');
+      label.className = 'reference-mention-label';
+      label.textContent = item.label;
+      button.appendChild(label);
+
+      referenceMentionMenu.appendChild(button);
+    });
+    referenceMentionMenu.classList.remove('hidden');
   }
 
   function applyParentPostReference(text, options = {}) {
@@ -902,7 +1333,8 @@
         sourceUrl: dataUrl,
         url: dataUrl,
         parentPostId: '',
-        name: file.name || sourceLabel || '已选择图片'
+        name: file.name || sourceLabel || '已选择图片',
+        mentionLabel: getReferenceMentionLabel(referenceImages.length)
       });
       added += 1;
     }
@@ -955,10 +1387,10 @@
     const prompt = promptInput ? promptInput.value.trim() : '';
     const rawUrl = imageUrlInput ? imageUrlInput.value.trim() : '';
     const rawParent = parentPostInput ? parentPostInput.value.trim() : '';
-    let primaryRef = referenceImages[0] || null;
-    if (!primaryRef && (rawParent || rawUrl)) {
+    let refs = Array.isArray(referenceImages) ? referenceImages.slice() : [];
+    if (!refs.length && (rawParent || rawUrl)) {
       const resolvedRef = resolveReferenceByText(rawParent || rawUrl);
-      primaryRef = {
+      const manualRef = {
         id: makeReferenceId('manual'),
         previewUrl: resolvedRef.url || resolvedRef.sourceUrl || rawUrl,
         sourceUrl: resolvedRef.sourceUrl || rawUrl,
@@ -966,10 +1398,21 @@
         parentPostId: rawParent || resolvedRef.parentPostId || '',
         name: 'manual'
       };
-      setReferenceItems([primaryRef], primaryRef.parentPostId ? 'parent_post' : 'upload');
+      refs = [manualRef];
+      setReferenceItems(refs, manualRef.parentPostId ? 'parent_post' : 'upload');
     }
-    const parentPostId = primaryRef ? String(primaryRef.parentPostId || '').trim() : '';
-    const imageUrl = primaryRef ? String(primaryRef.sourceUrl || primaryRef.url || '').trim() : '';
+
+    const referenceItems = refs.map((item, index) => ({
+      parent_post_id: String(item && item.parentPostId ? item.parentPostId : '').trim(),
+      image_url: String(item && (item.sourceUrl || item.url) ? (item.sourceUrl || item.url) : '').trim(),
+      source_image_url: String(item && item.sourceUrl ? item.sourceUrl : '').trim(),
+      mention_alias: String(item && item.mentionLabel ? item.mentionLabel : getReferenceMentionLabel(index)).trim()
+    })).filter((item) => item.parent_post_id || item.image_url || item.source_image_url);
+
+    const primaryRef = referenceItems[0] || null;
+    const parentPostId = primaryRef ? String(primaryRef.parent_post_id || '').trim() : '';
+    const imageUrl = primaryRef ? String(primaryRef.image_url || primaryRef.source_image_url || '').trim() : '';
+    const sourceImageUrl = primaryRef ? String(primaryRef.source_image_url || primaryRef.image_url || '').trim() : '';
 
     const res = await fetch('/v1/public/video/start', {
       method: 'POST',
@@ -981,7 +1424,8 @@
         prompt,
         image_url: parentPostId ? null : (imageUrl || null),
         parent_post_id: parentPostId || null,
-        source_image_url: parentPostId ? (resolvedRef.sourceUrl || imageUrl || null) : null,
+        source_image_url: parentPostId ? (sourceImageUrl || null) : null,
+        reference_items: referenceItems,
         reasoning_effort: DEFAULT_REASONING_EFFORT,
         aspect_ratio: ratioSelect ? ratioSelect.value : '3:2',
         video_length: lengthSelect ? parseInt(lengthSelect.value, 10) : 6,
@@ -2631,14 +3075,106 @@
     setRefDragActive(false);
   });
 
-  if (promptInput) {
-    promptInput.addEventListener('keydown', (event) => {
+  if (promptRichInput) {
+    promptRichInput.addEventListener('input', () => {
+      syncPromptTextareaFromRichInput();
+      renderReferenceMentionMenu();
+    });
+    promptRichInput.addEventListener('click', (event) => {
+      const chip = event.target instanceof Element ? event.target.closest('.prompt-mention-chip') : null;
+      if (chip) {
+        event.preventDefault();
+        selectPromptChip(chip);
+        hideReferenceMentionMenu();
+        return;
+      }
+      clearActivePromptChip();
+      renderReferenceMentionMenu();
+    });
+    promptRichInput.addEventListener('focus', () => {
+      renderReferenceMentionMenu();
+    });
+    promptRichInput.addEventListener('blur', () => {
+      window.setTimeout(() => hideReferenceMentionMenu(), 120);
+    });
+    promptRichInput.addEventListener('keydown', (event) => {
+      const hasOpenMentionMenu = referenceMentionMenu && !referenceMentionMenu.classList.contains('hidden');
+      if (hasOpenMentionMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        const total = referenceMentionMenu.querySelectorAll('.reference-mention-item').length;
+        if (total > 0) {
+          event.preventDefault();
+          if (event.key === 'ArrowDown') {
+            activeMentionIndex = (activeMentionIndex + 1 + total) % total;
+          } else {
+            activeMentionIndex = (activeMentionIndex - 1 + total) % total;
+          }
+          renderReferenceMentionMenu();
+          return;
+        }
+      }
+      if (hasOpenMentionMenu && event.key === 'Enter') {
+        const active = referenceMentionMenu.querySelector('.reference-mention-item.is-active .reference-mention-label');
+        if (active) {
+          event.preventDefault();
+          const candidate = getPromptMentionCandidates().find((item) => item.label === (active.textContent || ''));
+          if (candidate) {
+            insertMentionLabel(candidate);
+          }
+          return;
+        }
+      }
+      if (hasOpenMentionMenu && event.key === 'Escape') {
+        hideReferenceMentionMenu();
+        return;
+      }
+      const selectedChip = getSelectedPromptChip();
+      if ((event.key === 'Backspace' || event.key === 'Delete') && selectedChip) {
+        event.preventDefault();
+        selectedChip.remove();
+        syncPromptTextareaFromRichInput();
+        return;
+      }
+      if (event.key === 'Backspace' && hasEditableTextNearSelection('backward')) {
+        return;
+      }
+      if (event.key === 'Delete' && hasEditableTextNearSelection('forward')) {
+        return;
+      }
+      if (event.key === 'Backspace' || event.key === 'Delete') {
+        const direction = event.key === 'Backspace' ? 'backward' : 'forward';
+        const adjacentChip = getChipAdjacentToSelection(direction);
+        if (adjacentChip) {
+          event.preventDefault();
+          if (adjacentChip.classList.contains('is-active')) {
+            adjacentChip.remove();
+            syncPromptTextareaFromRichInput();
+          } else {
+            selectPromptChip(adjacentChip);
+          }
+          return;
+        }
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const adjacentChip = getChipAdjacentToSelection(event.key === 'ArrowLeft' ? 'backward' : 'forward');
+        if (adjacentChip) {
+          event.preventDefault();
+          selectPromptChip(adjacentChip);
+          return;
+        }
+      }
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
         startConnection();
       }
     });
   }
+
+  document.addEventListener('click', (event) => {
+    if (!referenceMentionMenu || referenceMentionMenu.classList.contains('hidden')) return;
+    if (promptRichInput && promptRichInput.contains(event.target)) return;
+    if (referenceMentionMenu.contains(event.target)) return;
+    hideReferenceMentionMenu();
+  });
 
   [ratioSelect, lengthSelect, resolutionSelect, presetSelect, concurrentSelect]
     .filter(Boolean)
@@ -2651,6 +3187,7 @@
   refreshAllDeleteZoneTracks();
   syncTimelineAvailability();
   setSpliceButtonState('idle');
+  syncPromptRichInputFromTextarea();
 
   if (spliceBtn) {
     spliceBtn.addEventListener('click', () => {

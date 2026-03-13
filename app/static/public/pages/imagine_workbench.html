@@ -16,10 +16,10 @@
   <script src="/static/vendor/tailwind/tailwindcss-cdn.js"></script>
   <link href="/static/vendor/geist/geist-sans.css" rel="stylesheet">
   <link href="/static/vendor/geist/geist-mono.css" rel="stylesheet">
-  <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
-  <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=0.1.0"></script>
+  <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
-  <link href="/static/public/css/imagine_workbench.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <link href="/static/public/css/imagine_workbench.css?v=0.2.0" rel="stylesheet">
 </head>
 
 <body class="public-page min-h-screen flex flex-col" style="background-color: var(--bg);">
@@ -32,7 +32,7 @@
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">图片编辑工作台</h2>
           <p class="text-[var(--accents-4)] mt-1 text-sm">
-            支持上传/粘贴/拖拽最多 3 张参考图进行编辑；编辑后沿用上一次输出的 parentPostId 继续链路。
+            支持上传/粘贴/拖拽最多 5 张参考图进行编辑；编辑后沿用上一次输出的 parentPostId 继续链路。
           </p>
         </div>
         <div id="editStatusText" class="status-chip">未开始</div>
@@ -47,11 +47,11 @@
           <div class="upload-row">
             <input id="seedImageInput" class="hidden" type="file" accept="image/*" multiple>
             <button id="selectSeedBtn" type="button" class="geist-button-outline">添加参考图</button>
-            <span id="seedFileName" class="file-name">已添加 0/3 张</span>
+            <span id="seedFileName" class="file-name">已添加 0/5 张</span>
           </div>
 
           <div id="referenceStrip" class="reference-strip">
-            <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 3 张）</div>
+            <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 5 张）</div>
           </div>
 
           <div class="parent-quick-row">
@@ -81,7 +81,11 @@
 
           <div class="field">
             <label class="field-label" for="editPromptInput">编辑提示词</label>
-            <textarea id="editPromptInput" class="geist-input form-textarea" placeholder="例如：保留人物姿态，把背景改为夜晚街景"></textarea>
+            <div class="prompt-editor-shell">
+              <div id="editPromptRichInput" class="prompt-rich-input" contenteditable="true" data-placeholder="例如：@Image 1 在左侧，@Image 2 在右侧，两人合照"></div>
+              <div id="editPromptMentionMenu" class="prompt-mention-menu hidden"></div>
+              <textarea id="editPromptInput" class="geist-input form-textarea prompt-textarea-proxy" data-prompt-enhancer="off" aria-hidden="true" tabindex="-1" placeholder="例如：@Image 1 在左侧，@Image 2 在右侧，两人合照"></textarea>
+            </div>
           </div>
 
           <div class="action-row">
@@ -125,30 +129,17 @@
     </button>
   </div>
 
-  <div id="previewLightbox" class="preview-lightbox" aria-hidden="true">
-    <div class="preview-lightbox-dialog" role="dialog" aria-modal="true" aria-label="当前画面预览">
-      <div class="preview-lightbox-actions">
-        <a id="previewLightboxDownload" class="preview-lightbox-download" href="#" download>下载</a>
-        <button id="previewLightboxClose" class="preview-lightbox-close" type="button" aria-label="关闭预览">关闭</button>
-      </div>
-      <div class="preview-lightbox-stage">
-        <img id="previewLightboxImg" src="" alt="当前画面预览">
-      </div>
-      <div id="previewLightboxCaption" class="preview-lightbox-caption">当前画面预览</div>
-    </div>
-  </div>
-
   <div id="app-footer"></div>
 
-  <script src="/static/common/js/admin-auth.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/parentpost-memory.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/public-header.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/footer.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/mobile-fab.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/admin-auth.js?v=0.3.0"></script>
+  <script src="/static/common/js/parentpost-memory.js?v=0.1.0"></script>
+  <script src="/static/common/js/public-header.js?v=0.3.3"></script>
+  <script src="/static/common/js/footer.js?v=0.3.0"></script>
+  <script src="/static/common/js/mobile-fab.js?v=0.1.1"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/common/js/prompt-enhancer.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/pwa.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/public/js/imagine_workbench.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
+  <script src="/static/common/js/pwa.js?v=0.1.1"></script>
+  <script src="/static/public/js/imagine_workbench.js?v=0.2.0"></script>
 </body>
 
 </html>

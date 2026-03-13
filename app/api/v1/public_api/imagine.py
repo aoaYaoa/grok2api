@@ -269,8 +269,8 @@ def _normalize_image_references(image_references: Optional[List[str]]) -> List[s
             continue
         cleaned.append(item)
 
-    if len(cleaned) > 3:
-        raise HTTPException(status_code=400, detail="image_references supports at most 3 images")
+    if len(cleaned) > 5:
+        raise HTTPException(status_code=400, detail="image_references supports at most 5 images")
 
     normalized: List[str] = []
     for item in cleaned:
@@ -280,6 +280,33 @@ def _normalize_image_references(image_references: Optional[List[str]]) -> List[s
             normalized.append(_normalize_image_input(image_base64="", image_url=item))
 
     return normalized
+
+
+def _normalize_reference_items(reference_items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    items = reference_items or []
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="reference_items must be a list")
+    cleaned: List[Dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        image_url = str(item.get("image_url") or item.get("data") or "").strip()
+        source_image_url = str(item.get("source_image_url") or "").strip()
+        parent_post_id = str(item.get("parent_post_id") or "").strip()
+        mention_alias = str(item.get("mention_alias") or "").strip()
+        if not image_url and not source_image_url and not parent_post_id:
+            continue
+        cleaned.append(
+            {
+                "image_url": image_url,
+                "source_image_url": source_image_url,
+                "parent_post_id": parent_post_id,
+                "mention_alias": mention_alias,
+            }
+        )
+    if len(cleaned) > 5:
+        raise HTTPException(status_code=400, detail="reference_items supports at most 5 images")
+    return cleaned
 
 
 async def _clean_sessions(now: float) -> None:
@@ -1073,6 +1100,7 @@ class ImagineWorkbenchEditRequest(BaseModel):
     image_base64: Optional[str] = None
     image_url: Optional[str] = None
     image_references: Optional[List[str]] = None
+    reference_items: Optional[List[Dict[str, Any]]] = None
     stream: Optional[bool] = False
 
 
@@ -1115,28 +1143,83 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
             detail="No available tokens. Please try again later.",
         )
 
+    reference_items = _normalize_reference_items(data.reference_items)
+
+    if use_parent_mode:
+        source_image_url = await _canonicalize_parent_source_image_url(
+            token, parent_post_id, str(data.source_image_url or "").strip()
+        )
+    else:
+        source_image_url = str(data.source_image_url or "").strip()
+
     async def _run_once(progress_cb=None):
         started_at = time.time()
         edit_service = ImageEditService()
-        source_image_url = (data.source_image_url or "").strip()
+        current_source_image_url_input = source_image_url
 
-        if use_parent_mode:
-            if source_image_url and not (
-                source_image_url.startswith("http://")
-                or source_image_url.startswith("https://")
+        effective_reference_items = list(reference_items)
+        if use_parent_mode and not effective_reference_items:
+            effective_reference_items.append(
+                {
+                    "parent_post_id": parent_post_id,
+                    "source_image_url": current_source_image_url_input,
+                    "image_url": current_source_image_url_input,
+                    "mention_alias": "Image 1",
+                }
+            )
+
+        image_inputs = _normalize_image_references(data.image_references)
+        if image_inputs and not effective_reference_items:
+            effective_reference_items = [
+                {
+                    "image_url": image_ref,
+                    "source_image_url": image_ref,
+                    "mention_alias": f"Image {index + 1}",
+                }
+                for index, image_ref in enumerate(image_inputs)
+            ]
+
+        if effective_reference_items:
+            for item in effective_reference_items:
+                ref_parent = _extract_parent_post_id_from_url(str(item.get("parent_post_id") or ""))
+                if ref_parent and not str(item.get("source_image_url") or "").strip():
+                    item["parent_post_id"] = ref_parent
+                    item["source_image_url"] = await _canonicalize_parent_source_image_url(
+                        token,
+                        ref_parent,
+                        str(item.get("image_url") or "").strip(),
+                    )
+                    if not str(item.get("image_url") or "").strip():
+                        item["image_url"] = item["source_image_url"]
+
+            result = await edit_service.edit_with_reference_items(
+                token_mgr=token_mgr,
+                token=token,
+                model_info=model_info,
+                prompt=prompt,
+                reference_items=effective_reference_items,
+                root_parent_post_id=parent_post_id if use_parent_mode else "",
+                response_format="url",
+                stream=False,
+                return_all_images=True,
+                progress_cb=progress_cb,
+            )
+            mode = "parent_post" if use_parent_mode else "upload"
+        elif use_parent_mode:
+            if current_source_image_url_input and not (
+                current_source_image_url_input.startswith("http://")
+                or current_source_image_url_input.startswith("https://")
             ):
                 raise HTTPException(
                     status_code=400, detail="source_image_url must be http(s) URL"
                 )
-            if not source_image_url:
-                source_image_url = _build_imagine_public_url(parent_post_id)
             result = await edit_service.edit_with_parent_post(
                 token_mgr=token_mgr,
                 token=token,
                 model_info=model_info,
                 prompt=prompt,
                 parent_post_id=parent_post_id,
-                source_image_url=source_image_url,
+                source_image_url=current_source_image_url_input,
                 response_format="url",
                 stream=False,
                 return_all_images=True,
@@ -1144,19 +1227,16 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
             )
             mode = "parent_post"
         else:
-            image_inputs = _normalize_image_references(data.image_references)
-            if not image_inputs:
-                image_input = _normalize_image_input(
-                    image_base64=str(data.image_base64 or ""),
-                    image_url=str(data.image_url or ""),
-                )
-                image_inputs = [image_input]
+            image_input = _normalize_image_input(
+                image_base64=str(data.image_base64 or ""),
+                image_url=str(data.image_url or ""),
+            )
             result = await edit_service.edit(
                 token_mgr=token_mgr,
                 token=token,
                 model_info=model_info,
                 prompt=prompt,
-                images=image_inputs,
+                images=[image_input],
                 n=1,
                 response_format="url",
                 stream=False,
