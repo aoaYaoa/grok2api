@@ -17,9 +17,9 @@
   <script src="/static/vendor/tailwind/tailwindcss-cdn.js"></script>
   <link href="/static/vendor/geist/geist-sans.css" rel="stylesheet">
   <link href="/static/vendor/geist/geist-mono.css" rel="stylesheet">
-  <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
-  <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
-  <link href="/static/public/css/video.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=0.1.0"></script>
+  <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
+  <link href="/static/public/css/video.css?v=0.4.16" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
 </head>
 
@@ -41,102 +41,48 @@
       <div class="video-main-grid">
         <div class="video-main-left">
           <div class="video-card">
-            <div class="card-title">生成设置</div>
-            <div class="settings-grid">
-              <div class="settings-block prompt-block">
-                <label class="field-label" for="promptInput">提示词</label>
-                <textarea id="promptInput" class="geist-input video-textarea"
-                  placeholder="例如：街头霓虹雨夜，慢镜头，胶片质感"></textarea>
-              </div>
-              <div id="refDropZone" class="settings-block ref-block">
-                <label class="field-label" for="imageUrlInput">参考图</label>
-                <div class="ref-controls">
-                  <input id="imageUrlInput" class="geist-input" placeholder="https://... 或 data:image/...">
+            <div class="video-workbench-shell">
+              <div class="video-workbench-left">
+                <div id="refDropZone" class="video-workbench-panel">
+                  <div class="panel-title">当前画面</div>
+                  <div class="upload-row">
+                    <button id="selectImageFileBtn" class="geist-button-outline" type="button">添加参考图</button>
+                    <span id="imageFileName" class="file-name">已添加 0/3 张</span>
+                  </div>
+                  <input id="imageUrlInput" class="geist-input hidden" placeholder="https://... 或 data:image/...">
+                  <input id="imageFileInput" class="ref-file-input" type="file" accept="image/*" multiple>
+                  <div id="referenceStrip" class="reference-strip">
+                    <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 3 张）</div>
+                  </div>
+                  <div class="parent-quick-row">
+                    <label class="field-label" for="parentPostInput">粘贴 parentPostId（全局记忆）</label>
+                    <div class="parent-quick-input-wrap">
+                      <input id="parentPostInput" class="geist-input" placeholder="粘贴 parentPostId 或包含它的 URL">
+                      <button id="applyParentBtn" class="geist-button-outline text-xs px-3" type="button">使用</button>
+                    </div>
+                  </div>
+                  <div id="referencePreview" class="preview-shell">
+                    <div id="currentGallery" class="current-gallery hidden"></div>
+                    <div id="previewEmpty" class="preview-empty">请先添加参考图</div>
+                    <div id="dropHint" class="drop-hint">支持拖拽图片到此处，或按 Ctrl+V 粘贴图片</div>
+                  </div>
+                  <div class="meta-grid ref-meta-grid">
+                    <div class="meta-item">
+                      <div class="meta-label">当前 parentPostId</div>
+                      <div id="currentParentId" class="meta-value">-</div>
+                    </div>
+                    <div class="meta-item">
+                      <div class="meta-label">当前模式</div>
+                      <div id="currentMode" class="meta-value">upload</div>
+                    </div>
+                  </div>
+                  <div class="field video-prompt-field">
+                    <label class="field-label" for="promptInput">视频提示词</label>
+                    <textarea id="promptInput" class="geist-input video-textarea"
+                      placeholder="例如：街头霓虹雨夜，慢镜头，胶片质感"></textarea>
+                  </div>
                 </div>
-                <div class="ref-meta">
-                  <span id="imageFileName" class="ref-name">未选择文件</span>
-                  <span class="ref-drop-hint">支持拖拽/粘贴图片</span>
-                </div>
-                <div class="ref-parent-row">
-                  <input id="parentPostInput" class="geist-input" placeholder="粘贴 parentPostId（全局记忆）">
-                  <button id="applyParentBtn" class="geist-button-outline text-xs px-3" type="button">使用ID</button>
-                </div>
-                <div id="referencePreview" class="ref-preview hidden">
-                  <img id="referencePreviewImg" class="ref-preview-image" alt="参考图预览">
-                  <div id="referencePreviewMeta" class="ref-preview-meta"></div>
-                </div>
               </div>
-              <div class="settings-block ratio-block">
-                <label class="field-label" for="ratioSelect">画面比例</label>
-                <select id="ratioSelect" class="geist-input">
-                  <option value="3:2" selected>3:2 横构图</option>
-                  <option value="2:3">2:3 竖构图</option>
-                  <option value="16:9">16:9 宽屏</option>
-                  <option value="9:16">9:16 竖屏</option>
-                  <option value="1:1">1:1 方形</option>
-                </select>
-              </div>
-              <div class="settings-block length-block">
-                <label class="field-label" for="lengthSelect">视频时长</label>
-                <select id="lengthSelect" class="geist-input">
-                  <option value="6" selected>6 秒</option>
-                  <option value="10">10 秒</option>
-                  <option value="15">15 秒</option>
-                  <option value="20">20 秒</option>
-                  <option value="25">25 秒</option>
-                  <option value="30">30 秒</option>
-                </select>
-              </div>
-              <div class="settings-block resolution-block">
-                <label class="field-label" for="resolutionSelect">分辨率</label>
-                <select id="resolutionSelect" class="geist-input">
-                  <option value="480p" selected>480p</option>
-                  <option value="720p">720p</option>
-                </select>
-              </div>
-              <div class="settings-block preset-block">
-                <label class="field-label" for="presetSelect">风格预设</label>
-                <select id="presetSelect" class="geist-input">
-                  <option value="normal" selected>Normal</option>
-                  <option value="fun">Fun</option>
-                  <option value="spicy">Spicy</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </div>
-              <div class="settings-block concurrent-block">
-                <label class="field-label" for="concurrentSelect">并发视频数</label>
-                <select id="concurrentSelect" class="geist-input">
-                  <option value="1" selected>1 路</option>
-                  <option value="2">2 路</option>
-                  <option value="3">3 路</option>
-                  <option value="4">4 路</option>
-                </select>
-              </div>
-              <div class="settings-block upload-block">
-                <label class="field-label">&nbsp;</label>
-                <button id="selectImageFileBtn" class="geist-button-outline text-xs px-3" type="button">上传</button>
-                <input id="imageFileInput" class="ref-file-input" type="file" accept="image/*">
-              </div>
-              <div class="settings-block clear-block">
-                <label class="field-label">&nbsp;</label>
-                <button id="clearImageFileBtn" class="geist-button-outline text-xs px-3" type="button">清除</button>
-              </div>
-            </div>
-            <div class="settings-actions">
-              <button id="startBtn" class="geist-button gap-2">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                  stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-                开始生成
-              </button>
-              <button id="stopBtn" class="geist-button-outline gap-2 hidden">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                  stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="5" y="5" width="14" height="14" />
-                </svg>
-                停止
-              </button>
             </div>
           </div>
           <div id="editPanel" class="video-card edit-panel">
@@ -165,10 +111,6 @@
                 <video id="editVideo" controls preload="metadata" playsinline webkit-playsinline></video>
               </div>
               <div class="edit-slider-wrap">
-                <div class="timeline-caption">
-                  <span class="timeline-caption-title">延长起点 <strong id="editTimeInline" class="timeline-caption-time">00:00.000</strong></span>
-                  <span class="timeline-caption-hint">拖动到要继续生成的位置，接口会按当前刻度发起延长</span>
-                </div>
                 <input id="editTimeline" class="timeline-delete-zone" data-delete-side="right" type="range" min="0"
                   max="100000" step="1" value="0">
                 <div class="progress-meta">
@@ -248,6 +190,75 @@
             </div>
           </div>
 
+          <div class="video-card video-settings-card">
+            <div class="card-title">生成参数</div>
+            <div class="video-settings-grid">
+              <div class="settings-block">
+                <label class="field-label" for="ratioSelect">画面比例</label>
+                <select id="ratioSelect" class="geist-input">
+                  <option value="3:2" selected>3:2 横构图</option>
+                  <option value="2:3">2:3 竖构图</option>
+                  <option value="16:9">16:9 宽屏</option>
+                  <option value="9:16">9:16 竖屏</option>
+                  <option value="1:1">1:1 方形</option>
+                </select>
+              </div>
+              <div class="settings-block">
+                <label class="field-label" for="lengthSelect">视频时长</label>
+                <select id="lengthSelect" class="geist-input">
+                  <option value="6" selected>6 秒</option>
+                  <option value="10">10 秒</option>
+                  <option value="15">15 秒</option>
+                </select>
+              </div>
+              <div class="settings-block">
+                <label class="field-label" for="resolutionSelect">分辨率</label>
+                <select id="resolutionSelect" class="geist-input">
+                  <option value="480p" selected>480p</option>
+                  <option value="720p">720p</option>
+                </select>
+              </div>
+              <div class="settings-block">
+                <label class="field-label" for="presetSelect">风格预设</label>
+                <select id="presetSelect" class="geist-input">
+                  <option value="normal" selected>Normal</option>
+                  <option value="fun">Fun</option>
+                  <option value="spicy">Spicy</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <div class="settings-block">
+                <label class="field-label" for="concurrentSelect">并发视频数</label>
+                <select id="concurrentSelect" class="geist-input">
+                  <option value="1" selected>1 路</option>
+                  <option value="2">2 路</option>
+                  <option value="3">3 路</option>
+                  <option value="4">4 路</option>
+                </select>
+              </div>
+              <div class="settings-block">
+                <label class="field-label">&nbsp;</label>
+                <button id="clearImageFileBtn" class="geist-button-outline video-side-btn" type="button">清除参考图</button>
+              </div>
+            </div>
+            <div class="settings-actions settings-actions-side">
+              <button id="startBtn" class="geist-button gap-2">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                开始生成
+              </button>
+              <button id="stopBtn" class="geist-button-outline gap-2 hidden">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="5" y="5" width="14" height="14" />
+                </svg>
+                停止
+              </button>
+            </div>
+          </div>
+
           <aside class="video-card history-panel">
             <div class="panel-head">
               <div class="card-title">历史视频</div>
@@ -275,16 +286,24 @@
     </div>
   </main>
 
+  <div id="referenceLightbox" class="reference-lightbox hidden" aria-hidden="true">
+    <button id="closeReferenceLightboxBtn" class="reference-lightbox-close" type="button" aria-label="关闭预览">×</button>
+    <div class="reference-lightbox-backdrop"></div>
+    <div class="reference-lightbox-dialog">
+      <img id="referenceLightboxImg" class="reference-lightbox-image" alt="参考图放大预览">
+    </div>
+  </div>
+
   <div id="app-footer"></div>
 
-  <script src="/static/common/js/admin-auth.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/parentpost-memory.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/public-header.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/footer.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/admin-auth.js?v=0.3.0"></script>
+  <script src="/static/common/js/parentpost-memory.js?v=0.1.0"></script>
+  <script src="/static/common/js/public-header.js?v=0.3.3"></script>
+  <script src="/static/common/js/footer.js?v=0.3.0"></script>
   <script src="/static/common/js/toast.js"></script>
-  <script src="/static/common/js/prompt-enhancer.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/common/js/pwa.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/public/js/video.js?v=__ASSET_VERSION__"></script>
+  <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
+  <script src="/static/common/js/pwa.js?v=0.1.1"></script>
+  <script src="/static/public/js/video.js?v=0.6.0"></script>
 </body>
 
 </html>

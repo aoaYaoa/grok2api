@@ -50,9 +50,15 @@
   const videoEmpty = document.getElementById('videoEmpty');
   const videoStage = document.getElementById('videoStage');
   const referencePreview = document.getElementById('referencePreview');
-  const referencePreviewImg = document.getElementById('referencePreviewImg');
-  const referencePreviewMeta = document.getElementById('referencePreviewMeta');
+  const referenceStrip = document.getElementById('referenceStrip');
+  const currentGallery = document.getElementById('currentGallery');
+  const previewEmpty = document.getElementById('previewEmpty');
+  const currentParentId = document.getElementById('currentParentId');
+  const currentMode = document.getElementById('currentMode');
   const refDropZone = document.getElementById('refDropZone');
+  const referenceLightbox = document.getElementById('referenceLightbox');
+  const referenceLightboxImg = document.getElementById('referenceLightboxImg');
+  const closeReferenceLightboxBtn = document.getElementById('closeReferenceLightboxBtn');
   const historyCount = document.getElementById('historyCount');
   const editPreviewWrap = editVideo ? editVideo.closest('.edit-preview-wrap') : null;
 
@@ -61,7 +67,10 @@
   let isRunning = false;
   let hasRunError = false;
   let startAt = 0;
-  let fileDataUrl = '';
+  const REFERENCE_LIMIT = 3;
+  let referenceImages = [];
+  let currentModeValue = 'upload';
+  let selectedReferenceId = '';
   let elapsedTimer = null;
   let lastProgress = 0;
   let previewCount = 0;
@@ -393,6 +402,169 @@
     return { url: finalUrl, sourceUrl: sourceUrl || finalUrl, parentPostId };
   }
 
+  function makeReferenceId(prefix = 'ref') {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function updateReferenceSummary() {
+    if (!imageFileName) return;
+    imageFileName.textContent = `已添加 ${referenceImages.length}/${REFERENCE_LIMIT} 张`;
+  }
+
+  function updateReferenceMeta() {
+    const primary = referenceImages[0] || null;
+    if (currentParentId) {
+      currentParentId.textContent = primary && primary.parentPostId ? primary.parentPostId : '-';
+    }
+    if (currentMode) {
+      currentMode.textContent = currentModeValue || 'upload';
+    }
+    updateReferenceSummary();
+  }
+
+  function renderReferenceStrip() {
+    if (!referenceStrip) return;
+    referenceStrip.innerHTML = '';
+    if (!referenceImages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'reference-empty';
+      empty.textContent = '可上传 / 粘贴 / 拖拽参考图（最多 3 张）';
+      referenceStrip.appendChild(empty);
+      updateReferenceMeta();
+      return;
+    }
+
+    referenceImages.forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'reference-item';
+      card.dataset.id = item.id;
+      if (item.id === selectedReferenceId) {
+        card.classList.add('is-active');
+      }
+      card.title = item.parentPostId ? `parentPostId: ${item.parentPostId}` : '点击切换预览';
+
+      const img = document.createElement('img');
+      img.src = item.previewUrl || item.sourceUrl || item.url || '';
+      img.alt = item.parentPostId ? `parentPostId: ${item.parentPostId}` : '参考图';
+      img.addEventListener('click', () => {
+        selectedReferenceId = item.id;
+        renderReferenceStrip();
+        setReferencePreviewItems(referenceImages);
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'reference-remove';
+      removeBtn.textContent = '×';
+      removeBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        removeReferenceItem(item.id);
+      });
+
+      card.appendChild(img);
+      card.appendChild(removeBtn);
+      referenceStrip.appendChild(card);
+    });
+
+    if (referenceImages.length < REFERENCE_LIMIT && imageFileInput) {
+      const addSlot = document.createElement('button');
+      addSlot.type = 'button';
+      addSlot.className = 'reference-add-slot';
+      addSlot.textContent = '+';
+      addSlot.title = '继续添加';
+      addSlot.addEventListener('click', () => imageFileInput.click());
+      referenceStrip.appendChild(addSlot);
+    }
+    updateReferenceMeta();
+  }
+
+  function clearReferencePreview() {
+    if (currentGallery) {
+      currentGallery.innerHTML = '';
+      currentGallery.classList.add('hidden');
+      currentGallery.dataset.count = '0';
+    }
+    if (previewEmpty) {
+      previewEmpty.classList.remove('hidden');
+    }
+  }
+
+  function setReferencePreviewItems(items) {
+    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    if (!currentGallery || !referencePreview) return;
+    if (!list.length) {
+      selectedReferenceId = '';
+      clearReferencePreview();
+      return;
+    }
+    const selected = list.find((item) => item.id === selectedReferenceId) || list[0];
+    selectedReferenceId = selected.id;
+    currentGallery.innerHTML = '';
+    currentGallery.dataset.count = '1';
+    currentGallery.classList.remove('hidden');
+    if (previewEmpty) {
+      previewEmpty.classList.add('hidden');
+    }
+    const box = document.createElement('div');
+    box.className = 'current-gallery-item current-gallery-item-single';
+    const img = document.createElement('img');
+    img.src = selected.previewUrl || selected.sourceUrl || selected.url || '';
+    img.alt = selected.parentPostId ? `parentPostId: ${selected.parentPostId}` : '参考图预览';
+    box.appendChild(img);
+    currentGallery.appendChild(box);
+  }
+
+  function removeReferenceItem(id) {
+    const before = referenceImages.length;
+    referenceImages = referenceImages.filter((item) => item.id !== id);
+    if (referenceImages.length === before) return;
+    if (!referenceImages.length) {
+      currentModeValue = 'upload';
+      selectedReferenceId = '';
+      if (imageUrlInput) imageUrlInput.value = '';
+      if (parentPostInput) parentPostInput.value = '';
+    } else {
+      const primary = referenceImages[0];
+      if (!referenceImages.some((item) => item.id === selectedReferenceId)) {
+        selectedReferenceId = primary.id;
+      }
+      if (imageUrlInput) {
+        imageUrlInput.value = primary.sourceUrl || primary.url || '';
+      }
+      if (parentPostInput) {
+        parentPostInput.value = primary.parentPostId || '';
+      }
+      currentModeValue = primary.parentPostId ? 'parent_post' : 'upload';
+    }
+    renderReferenceStrip();
+    setReferencePreviewItems(referenceImages);
+  }
+
+  function setReferenceItems(items, mode = 'upload') {
+    referenceImages = (Array.isArray(items) ? items : [])
+      .filter((item) => item && (item.previewUrl || item.sourceUrl || item.url))
+      .slice(0, REFERENCE_LIMIT)
+      .map((item) => ({
+        id: item.id || makeReferenceId('ref'),
+        previewUrl: String(item.previewUrl || item.url || item.sourceUrl || '').trim(),
+        sourceUrl: String(item.sourceUrl || item.url || item.previewUrl || '').trim(),
+        url: String(item.url || item.previewUrl || item.sourceUrl || '').trim(),
+        parentPostId: String(item.parentPostId || '').trim(),
+        name: String(item.name || '').trim(),
+      }));
+    currentModeValue = mode;
+    const primary = referenceImages[0] || null;
+    selectedReferenceId = primary ? primary.id : '';
+    if (imageUrlInput) {
+      imageUrlInput.value = primary ? (primary.sourceUrl || primary.url || '') : '';
+    }
+    if (parentPostInput) {
+      parentPostInput.value = primary ? (primary.parentPostId || '') : '';
+    }
+    renderReferenceStrip();
+    setReferencePreviewItems(referenceImages);
+  }
+
   function applyParentPostReference(text, options = {}) {
     const silent = Boolean(options.silent);
     const resolved = resolveReferenceByText(text);
@@ -409,86 +581,18 @@
       }
       return false;
     }
-    if (imageUrlInput) {
-      imageUrlInput.value = finalSourceUrl || finalPreviewUrl || '';
-    }
-    if (parentPostInput) {
-      parentPostInput.value = finalParentId;
-    }
-
-    // 仅清空本地图片变量，不调用全局 clearFileSelection 避免清空自身输入框
-    fileDataUrl = '';
-    if (imageFileInput) {
-      imageFileInput.value = '';
-    }
-    if (imageFileName) {
-      imageFileName.textContent = '未选择文件';
-    }
-
-    setReferencePreview(finalPreviewUrl, finalParentId);
+    setReferenceItems([{
+      id: makeReferenceId('parent'),
+      previewUrl: finalPreviewUrl,
+      sourceUrl: finalSourceUrl || finalPreviewUrl,
+      url: finalPreviewUrl,
+      parentPostId: finalParentId,
+      name: finalParentId || 'parentPostId'
+    }], 'parent_post');
     if (!silent) {
       toast('已使用 parentPostId 填充参考图', 'success');
     }
     return true;
-  }
-
-  function clearReferencePreview() {
-    if (!referencePreview) return;
-    referencePreview.classList.add('hidden');
-    if (referencePreviewImg) {
-      referencePreviewImg.removeAttribute('src');
-    }
-    if (referencePreviewMeta) {
-      referencePreviewMeta.textContent = '';
-    }
-  }
-
-  function buildReferencePreviewMeta(url, parentPostId) {
-    const raw = String(url || '').trim();
-    if (parentPostId) {
-      return `parentPostId: ${parentPostId}`;
-    }
-    if (!raw) return '';
-    if (raw.startsWith('data:image/')) {
-      return '本地图片（Base64 已隐藏）';
-    }
-    return raw;
-  }
-
-  function setReferencePreview(url, parentPostId) {
-    const safeUrl = String(url || '').trim();
-    if (!safeUrl || !referencePreview || !referencePreviewImg) {
-      clearReferencePreview();
-      return;
-    }
-    referencePreview.classList.remove('hidden');
-    referencePreviewImg.src = safeUrl;
-    referencePreviewImg.alt = parentPostId ? `parentPostId: ${parentPostId}` : '参考图预览';
-    referencePreviewImg.onerror = () => {
-      if (!parentPostId) return;
-      const api = getParentMemoryApi();
-      const memoryHit = api && typeof api.getByParentPostId === 'function'
-        ? api.getByParentPostId(parentPostId)
-        : null;
-      const candidates = [
-        memoryHit && memoryHit.imageUrl,
-        memoryHit && memoryHit.sourceImageUrl,
-        api && typeof api.buildImaginePublicUrl === 'function'
-          ? String(api.buildImaginePublicUrl(parentPostId) || '').trim()
-          : `https://imagine-public.x.ai/imagine-public/images/${parentPostId}.jpg`,
-      ].map((it) => String(it || '').trim()).filter(Boolean);
-      for (const next of candidates) {
-        if (next === safeUrl || referencePreviewImg.src === next) {
-          continue;
-        }
-        referencePreviewImg.src = next;
-        return;
-      }
-      referencePreviewImg.onerror = null;
-    };
-    if (referencePreviewMeta) {
-      referencePreviewMeta.textContent = buildReferencePreviewMeta(safeUrl, parentPostId);
-    }
   }
 
   function setStatus(state, text) {
@@ -715,12 +819,8 @@
   }
 
   function clearFileSelection() {
-    fileDataUrl = '';
     if (imageFileInput) {
       imageFileInput.value = '';
-    }
-    if (imageFileName) {
-      imageFileName.textContent = '未选择文件';
     }
     if (imageUrlInput) {
       imageUrlInput.value = '';
@@ -728,6 +828,9 @@
     if (parentPostInput) {
       parentPostInput.value = '';
     }
+    referenceImages = [];
+    currentModeValue = 'upload';
+    renderReferenceStrip();
     clearReferencePreview();
   }
 
@@ -748,27 +851,25 @@
     return Array.from(types).includes('Files');
   }
 
-  function pickImageFileFromDataTransfer(dataTransfer) {
-    if (!dataTransfer) return null;
+  function pickImageFilesFromDataTransfer(dataTransfer) {
+    if (!dataTransfer) return [];
+    const files = [];
+    const pushIfImage = (file) => {
+      if (!file) return;
+      if (!String(file.type || '').startsWith('image/')) return;
+      files.push(file);
+    };
     if (dataTransfer.files && dataTransfer.files.length) {
-      for (const file of dataTransfer.files) {
-        if (file && String(file.type || '').startsWith('image/')) {
-          return file;
-        }
-      }
+      Array.from(dataTransfer.files).forEach(pushIfImage);
     }
-    if (dataTransfer.items && dataTransfer.items.length) {
-      for (const item of dataTransfer.items) {
-        if (!item) continue;
-        if (item.kind === 'file') {
-          const file = item.getAsFile ? item.getAsFile() : null;
-          if (file && String(file.type || '').startsWith('image/')) {
-            return file;
-          }
-        }
-      }
+    if (!files.length && dataTransfer.items && dataTransfer.items.length) {
+      Array.from(dataTransfer.items).forEach((item) => {
+        if (!item || item.kind !== 'file') return;
+        const file = item.getAsFile ? item.getAsFile() : null;
+        pushIfImage(file);
+      });
     }
-    return null;
+    return files;
   }
 
   function setRefDragActive(active) {
@@ -776,34 +877,51 @@
     refDropZone.classList.toggle('dragover', Boolean(active));
   }
 
-  async function applyReferenceImageFile(file, sourceLabel) {
-    if (!file) return;
-    const mimeType = String(file.type || '');
-    if (mimeType && !mimeType.startsWith('image/')) {
-      toast('仅支持图片文件', 'warning');
-      return;
+  async function applyReferenceImageFiles(files, sourceLabel) {
+    const targets = Array.isArray(files) ? files.filter(Boolean) : [];
+    if (!targets.length) return 0;
+    const slotsLeft = Math.max(0, REFERENCE_LIMIT - referenceImages.length);
+    if (slotsLeft <= 0) {
+      toast(`最多支持 ${REFERENCE_LIMIT} 张参考图`, 'warning');
+      return 0;
     }
-    const dataUrl = await readFileAsDataUrl(file);
-    if (!dataUrl.startsWith('data:image/')) {
-      throw new Error('图片格式不受支持');
+    const accepted = targets.slice(0, slotsLeft);
+    let added = 0;
+    for (const file of accepted) {
+      const mimeType = String(file.type || '');
+      if (mimeType && !mimeType.startsWith('image/')) {
+        continue;
+      }
+      const dataUrl = await readFileAsDataUrl(file);
+      if (!dataUrl.startsWith('data:image/')) {
+        continue;
+      }
+      referenceImages.push({
+        id: makeReferenceId('upload'),
+        previewUrl: dataUrl,
+        sourceUrl: dataUrl,
+        url: dataUrl,
+        parentPostId: '',
+        name: file.name || sourceLabel || '已选择图片'
+      });
+      added += 1;
     }
-    fileDataUrl = dataUrl;
     if (imageUrlInput) {
       imageUrlInput.value = '';
     }
     if (parentPostInput) {
       parentPostInput.value = '';
     }
-    if (imageFileInput) {
-      imageFileInput.value = '';
+    currentModeValue = 'upload';
+    renderReferenceStrip();
+    setReferencePreviewItems(referenceImages);
+    if (sourceLabel && added > 0) {
+      toast(`${sourceLabel}已载入 ${added} 张`, 'success');
     }
-    if (imageFileName) {
-      imageFileName.textContent = file.name || sourceLabel || '已选择图片';
+    if (targets.length > accepted.length) {
+      toast(`最多支持 ${REFERENCE_LIMIT} 张参考图，已忽略超出部分`, 'warning');
     }
-    setReferencePreview(fileDataUrl, '');
-    if (sourceLabel) {
-      toast(`${sourceLabel}已载入`, 'success');
-    }
+    return added;
   }
 
   function normalizeAuthHeader(authHeader) {
@@ -837,26 +955,22 @@
     const prompt = promptInput ? promptInput.value.trim() : '';
     const rawUrl = imageUrlInput ? imageUrlInput.value.trim() : '';
     const rawParent = parentPostInput ? parentPostInput.value.trim() : '';
-    if (fileDataUrl && rawUrl) {
-      toast('参考图只能选择其一：URL/Base64 或 本地上传', 'error');
-      throw new Error('invalid_reference');
+    let primaryRef = referenceImages[0] || null;
+    if (!primaryRef && (rawParent || rawUrl)) {
+      const resolvedRef = resolveReferenceByText(rawParent || rawUrl);
+      primaryRef = {
+        id: makeReferenceId('manual'),
+        previewUrl: resolvedRef.url || resolvedRef.sourceUrl || rawUrl,
+        sourceUrl: resolvedRef.sourceUrl || rawUrl,
+        url: resolvedRef.url || resolvedRef.sourceUrl || rawUrl,
+        parentPostId: rawParent || resolvedRef.parentPostId || '',
+        name: 'manual'
+      };
+      setReferenceItems([primaryRef], primaryRef.parentPostId ? 'parent_post' : 'upload');
     }
-    let resolvedRef = { url: '', sourceUrl: '', parentPostId: '' };
-    if (!fileDataUrl) {
-      resolvedRef = resolveReferenceByText(rawParent || rawUrl);
-    }
-    const parentPostId = fileDataUrl ? '' : (rawParent || resolvedRef.parentPostId || '').trim();
-    const imageUrl = fileDataUrl ? fileDataUrl : (parentPostId ? (rawUrl || resolvedRef.sourceUrl || '') : (rawUrl || resolvedRef.url || ''));
+    const parentPostId = primaryRef ? String(primaryRef.parentPostId || '').trim() : '';
+    const imageUrl = primaryRef ? String(primaryRef.sourceUrl || primaryRef.url || '').trim() : '';
 
-    if (!fileDataUrl && (resolvedRef.parentPostId || parentPostId)) {
-      if (imageUrlInput && !imageUrlInput.value.trim() && (resolvedRef.sourceUrl || resolvedRef.url)) {
-        imageUrlInput.value = resolvedRef.sourceUrl || resolvedRef.url;
-      }
-      if (parentPostInput && !parentPostInput.value.trim() && (resolvedRef.parentPostId || parentPostId)) {
-        parentPostInput.value = resolvedRef.parentPostId || parentPostId;
-      }
-      setReferencePreview(resolvedRef.url || resolvedRef.sourceUrl || imageUrl, resolvedRef.parentPostId || parentPostId);
-    }
     const res = await fetch('/v1/public/video/start', {
       method: 'POST',
       headers: {
@@ -2315,15 +2429,14 @@
 
   if (imageFileInput) {
     imageFileInput.addEventListener('change', async () => {
-      const file = imageFileInput.files && imageFileInput.files[0];
-      if (!file) {
+      const files = imageFileInput.files ? Array.from(imageFileInput.files) : [];
+      if (!files.length) {
         clearFileSelection();
         return;
       }
       try {
-        await applyReferenceImageFile(file, '上传图片');
+        await applyReferenceImageFiles(files, '上传图片');
       } catch (e) {
-        fileDataUrl = '';
         toast(String(e && e.message ? e.message : '文件读取失败'), 'error');
         clearReferencePreview();
       }
@@ -2358,7 +2471,7 @@
     parentPostInput.addEventListener('input', () => {
       const raw = parentPostInput.value.trim();
       if (!raw) {
-        if (!fileDataUrl) {
+        if (!referenceImages.length) {
           clearReferencePreview();
         }
         return;
@@ -2369,6 +2482,7 @@
       const text = String(event.clipboardData ? event.clipboardData.getData('text') || '' : '').trim();
       if (!text) return;
       event.preventDefault();
+      event.stopPropagation();
       parentPostInput.value = text;
       applyParentPostReference(text, { silent: true });
     });
@@ -2381,7 +2495,7 @@
         if (parentPostInput) {
           parentPostInput.value = '';
         }
-        if (!fileDataUrl) {
+        if (!referenceImages.length) {
           clearReferencePreview();
         }
         return;
@@ -2397,17 +2511,20 @@
       if (resolved.parentPostId && parentPostInput) {
         parentPostInput.value = resolved.parentPostId;
       }
-      if (raw && fileDataUrl) {
-        fileDataUrl = '';
-        if (imageFileInput) imageFileInput.value = '';
-        if (imageFileName) imageFileName.textContent = '未选择文件';
-      }
-      setReferencePreview(resolved.url || resolved.sourceUrl || raw, resolved.parentPostId || '');
+      setReferenceItems([{
+        id: makeReferenceId('url'),
+        previewUrl: resolved.url || resolved.sourceUrl || raw,
+        sourceUrl: resolved.sourceUrl || raw,
+        url: resolved.url || resolved.sourceUrl || raw,
+        parentPostId: resolved.parentPostId || '',
+        name: 'url'
+      }], resolved.parentPostId ? 'parent_post' : 'upload');
     });
     imageUrlInput.addEventListener('paste', (event) => {
       const text = String(event.clipboardData ? event.clipboardData.getData('text') || '' : '').trim();
       if (!text) return;
       event.preventDefault();
+      event.stopPropagation();
       imageUrlInput.value = text;
       const applied = applyParentPostReference(text, { silent: true });
       if (!applied) {
@@ -2415,12 +2532,14 @@
         if (resolved.parentPostId && parentPostInput) {
           parentPostInput.value = resolved.parentPostId;
         }
-        if (fileDataUrl) {
-          fileDataUrl = '';
-          if (imageFileInput) imageFileInput.value = '';
-          if (imageFileName) imageFileName.textContent = '未选择文件';
-        }
-        setReferencePreview(resolved.url || resolved.sourceUrl || text, resolved.parentPostId || '');
+        setReferenceItems([{
+          id: makeReferenceId('url'),
+          previewUrl: resolved.url || resolved.sourceUrl || text,
+          sourceUrl: resolved.sourceUrl || text,
+          url: resolved.url || resolved.sourceUrl || text,
+          parentPostId: resolved.parentPostId || '',
+          name: 'url'
+        }], resolved.parentPostId ? 'parent_post' : 'upload');
       }
     });
   }
@@ -2428,11 +2547,11 @@
   document.addEventListener('paste', async (event) => {
     const dataTransfer = event.clipboardData;
     if (!dataTransfer) return;
-    const imageFile = pickImageFileFromDataTransfer(dataTransfer);
-    if (imageFile) {
+    const imageFiles = pickImageFilesFromDataTransfer(dataTransfer);
+    if (imageFiles.length) {
       event.preventDefault();
       try {
-        await applyReferenceImageFile(imageFile, '粘贴图片');
+        await applyReferenceImageFiles(imageFiles, '粘贴图片');
       } catch (e) {
         toast(String(e && e.message ? e.message : '图片读取失败'), 'error');
       }
@@ -2441,8 +2560,11 @@
     const text = String(dataTransfer.getData('text') || '').trim();
     if (!text) return;
     const target = event.target;
-    const allowTarget = target === parentPostInput || target === imageUrlInput || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement);
-    if (!allowTarget || target === promptInput) {
+    const isTypingInPrompt = target === promptInput;
+    const isTypingInParentInput = target === parentPostInput;
+    const isTypingInImageUrlInput = target === imageUrlInput;
+    if (isTypingInPrompt) return;
+    if (!isTypingInParentInput && !isTypingInImageUrlInput && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable)) {
       return;
     }
     const applied = applyParentPostReference(text, { silent: true });
@@ -2481,13 +2603,13 @@
       event.preventDefault();
       refDragCounter = 0;
       setRefDragActive(false);
-      const file = pickImageFileFromDataTransfer(event.dataTransfer);
-      if (!file) {
+      const files = pickImageFilesFromDataTransfer(event.dataTransfer);
+      if (!files.length) {
         toast('未检测到可用图片文件', 'warning');
         return;
       }
       try {
-        await applyReferenceImageFile(file, '拖拽图片');
+        await applyReferenceImageFiles(files, '拖拽图片');
       } catch (e) {
         toast(String(e && e.message ? e.message : '图片读取失败'), 'error');
       }
@@ -2541,11 +2663,20 @@
   }
   if (imageUrlInput && imageUrlInput.value.trim()) {
     const resolved = resolveReferenceByText(imageUrlInput.value.trim());
-    setReferencePreview(resolved.url || resolved.sourceUrl || imageUrlInput.value.trim(), resolved.parentPostId || '');
+    setReferenceItems([{
+      id: makeReferenceId('init'),
+      previewUrl: resolved.url || resolved.sourceUrl || imageUrlInput.value.trim(),
+      sourceUrl: resolved.sourceUrl || imageUrlInput.value.trim(),
+      url: resolved.url || resolved.sourceUrl || imageUrlInput.value.trim(),
+      parentPostId: resolved.parentPostId || '',
+      name: 'init'
+    }], resolved.parentPostId ? 'parent_post' : 'upload');
     if (resolved.parentPostId && parentPostInput && !parentPostInput.value.trim()) {
       parentPostInput.value = resolved.parentPostId;
     }
   } else {
+    renderReferenceStrip();
     clearReferencePreview();
   }
+
 })();

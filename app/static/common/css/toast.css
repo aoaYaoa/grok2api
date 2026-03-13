@@ -95,3 +95,23 @@ html[data-theme='dark'] .toast-error .toast-icon {
     transform: translateY(10px) scale(0.95);
   }
 }
+html[data-theme='dark'] .toast {
+  background: #131a24;
+  border-color: #334155;
+  color: #e6edf3;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme='dark'] .toast-content {
+  color: #e6edf3;
+}
+
+html[data-theme='dark'] .toast-success .toast-icon {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+}
+
+html[data-theme='dark'] .toast-error .toast-icon {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+}
