@@ -1055,3 +1055,107 @@ html[data-theme='dark'] .history-prompt {
     max-height: 170px;
   }
 }
+
+/* ─── Workbench 移动端底部 Sticky 操作栏 ─── */
+.wb-sticky-bar {
+  display: none; /* 桌面端不显示 */
+}
+
+@media (max-width: 900px) {
+  /* 防止内容被 sticky bar 遮挡 */
+  body {
+    padding-bottom: 72px;
+  }
+
+  /* -- Sticky Bar 本体 -- */
+  .wb-sticky-bar {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 200;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--workbench-surface, #fff);
+    border-top: 1px solid var(--workbench-border, #e6e8ec);
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.07);
+  }
+
+  html[data-theme='dark'] .wb-sticky-bar {
+    background: #111821;
+    border-top-color: #2b3440;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.35);
+  }
+
+  /* -- Bar 内部：左图标区 + 右主按钮 -- */
+  .wb-sticky-bar-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 56px;
+    padding: 0 12px;
+  }
+
+  /* -- 左图标组 -- */
+  .wb-icon-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  /* -- 单个图标按钮 -- */
+  .wb-icon-btn {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    border: 1px solid var(--workbench-border, #e6e8ec);
+    background: transparent;
+    color: var(--workbench-muted, #6b7280);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .wb-icon-btn:active {
+    background: #f3f4f6;
+  }
+
+  html[data-theme='dark'] .wb-icon-btn {
+    border-color: #2b3440;
+    color: #8fa3bc;
+  }
+
+  html[data-theme='dark'] .wb-icon-btn:active {
+    background: #1a2130;
+  }
+
+  /* 危险操作（清空历史）提示色 */
+  .wb-icon-btn--danger:active {
+    color: #dc2626;
+    border-color: #fca5a5;
+    background: #fef2f2;
+  }
+
+  /* -- 右侧执行编辑主按钮 -- */
+  .wb-submit-btn {
+    flex: 1;
+    height: 40px;
+    font-size: 14px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border-radius: 8px;
+    min-width: 0;
+  }
+
+  .wb-submit-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}

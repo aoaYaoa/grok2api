@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
   const seedImageInput = document.getElementById('seedImageInput');
   const selectSeedBtn = document.getElementById('selectSeedBtn');
   const seedFileName = document.getElementById('seedFileName');
@@ -2238,6 +2238,47 @@
     setTimeout(() => ensureInlineSubmitButton(attempt + 1), 50);
   }
 
+  // ─── 移动端底部 Sticky 操作栏事件绑定 ────────────────────────────────────
+  function initStickyBar() {
+    const wbBar        = document.getElementById('wbStickyBar');
+    if (!wbBar) return;
+
+    const wbSubmit     = document.getElementById('wbSubmitBtn');
+    const wbAddRef     = document.getElementById('wbAddRefBtn');
+    const wbUseId      = document.getElementById('wbUseIdBtn');
+    const wbReset      = document.getElementById('wbResetBtn');
+    const wbClearHist  = document.getElementById('wbClearHistoryBtn');
+
+    // 图标按钮代理原始按钮 click
+    if (wbAddRef && selectSeedBtn) {
+      wbAddRef.addEventListener('click', () => selectSeedBtn.click());
+    }
+    if (wbUseId && applyParentBtn) {
+      wbUseId.addEventListener('click', () => applyParentBtn.click());
+    }
+    if (wbReset && resetCycleBtn) {
+      wbReset.addEventListener('click', () => resetCycleBtn.click());
+    }
+    if (wbClearHist && clearHistoryBtn) {
+      wbClearHist.addEventListener('click', () => clearHistoryBtn.click());
+    }
+
+    // 执行编辑：代理 + 同步 disabled 状态
+    if (wbSubmit && submitEditBtn) {
+      wbSubmit.addEventListener('click', () => {
+        if (!submitEditBtn.disabled) submitEditBtn.click();
+      });
+
+      // 初始化状态
+      wbSubmit.disabled = submitEditBtn.disabled;
+
+      // 实时同步 disabled
+      new MutationObserver(() => {
+        wbSubmit.disabled = submitEditBtn.disabled;
+      }).observe(submitEditBtn, { attributes: true, attributeFilter: ['disabled'] });
+    }
+  }
+
   function init() {
     ensureInlineSubmitButton();
     bindEvents();
@@ -2246,6 +2287,7 @@
     renderHistory();
     resetCycle(false);
     updateMeta();
+    initStickyBar(); // 初始化移动端 Sticky Bar
   }
 
   init();
