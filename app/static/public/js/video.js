@@ -1278,39 +1278,6 @@
     });
   }
 
-  function inferImageMimeFromName(name) {
-    const lower = String(name || '').trim().toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.bmp')) return 'image/bmp';
-    if (lower.endsWith('.svg')) return 'image/svg+xml';
-    if (lower.endsWith('.avif')) return 'image/avif';
-    if (lower.endsWith('.heic')) return 'image/heic';
-    if (lower.endsWith('.heif')) return 'image/heif';
-    if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'image/tiff';
-    if (lower.endsWith('.ico')) return 'image/x-icon';
-    return '';
-  }
-
-  function normalizeImageFile(file, fallbackMime = '') {
-    if (!(file instanceof Blob)) return null;
-    const detectedMime = String(file.type || fallbackMime || inferImageMimeFromName(file.name) || '').trim();
-    if (!detectedMime.startsWith('image/')) return null;
-    if (String(file.type || '').trim()) {
-      return file;
-    }
-    const safeName = String(file.name || '').trim() || `clipboard.${detectedMime.split('/')[1] || 'png'}`;
-    try {
-      return new File([file], safeName, { type: detectedMime });
-    } catch (e) {
-      const blob = file.slice(0, file.size, detectedMime);
-      blob.name = safeName;
-      return blob;
-    }
-  }
-
   function hasFiles(dataTransfer) {
     if (!dataTransfer) return false;
     if (dataTransfer.files && dataTransfer.files.length > 0) return true;
@@ -1322,19 +1289,19 @@
   function pickImageFilesFromDataTransfer(dataTransfer) {
     if (!dataTransfer) return [];
     const files = [];
-    const pushIfImage = (file, fallbackMime = '') => {
-      const normalized = normalizeImageFile(file, fallbackMime);
-      if (!normalized) return;
-      files.push(normalized);
+    const pushIfImage = (file) => {
+      if (!file) return;
+      if (!String(file.type || '').startsWith('image/')) return;
+      files.push(file);
     };
     if (dataTransfer.files && dataTransfer.files.length) {
-      Array.from(dataTransfer.files).forEach((file) => pushIfImage(file));
+      Array.from(dataTransfer.files).forEach(pushIfImage);
     }
-    if (dataTransfer.items && dataTransfer.items.length) {
+    if (!files.length && dataTransfer.items && dataTransfer.items.length) {
       Array.from(dataTransfer.items).forEach((item) => {
         if (!item || item.kind !== 'file') return;
         const file = item.getAsFile ? item.getAsFile() : null;
-        pushIfImage(file, String(item.type || '').trim());
+        pushIfImage(file);
       });
     }
     return files;
@@ -1356,9 +1323,11 @@
     const accepted = targets.slice(0, slotsLeft);
     let added = 0;
     for (const file of accepted) {
-      const normalizedFile = normalizeImageFile(file);
-      if (!normalizedFile) continue;
-      const dataUrl = await readFileAsDataUrl(normalizedFile);
+      const mimeType = String(file.type || '');
+      if (mimeType && !mimeType.startsWith('image/')) {
+        continue;
+      }
+      const dataUrl = await readFileAsDataUrl(file);
       if (!dataUrl.startsWith('data:image/')) {
         continue;
       }
@@ -1368,7 +1337,7 @@
         sourceUrl: dataUrl,
         url: dataUrl,
         parentPostId: '',
-        name: normalizedFile.name || sourceLabel || '已选择图片',
+        name: file.name || sourceLabel || '已选择图片',
         mentionLabel: getReferenceMentionLabel(referenceImages.length)
       });
       added += 1;
