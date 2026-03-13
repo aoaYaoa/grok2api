@@ -612,6 +612,13 @@ def validate_request(request: ChatCompletionRequest):
     # video 验证
     if model_info and model_info.is_video:
         config = request.video_config or VideoConfig()
+        _, image_urls = _extract_prompt_images(request.messages)
+        if len(image_urls) > 7:
+            raise ValidationException(
+                message="Too many image_url references for video. Maximum is 7.",
+                param="messages",
+                code="invalid_image_count",
+            )
         effective_stream = (
             request.stream if request.stream is not None else get_config("app.stream")
         )

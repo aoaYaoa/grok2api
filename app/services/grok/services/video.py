@@ -1940,6 +1940,17 @@ class VideoService:
 
         if preferred_token.startswith("sso="):
             preferred_token = preferred_token[4:]
+        if image_attachments and not reference_items:
+            reference_items = [
+                {
+                    "parent_post_id": "",
+                    "image_url": str(image_url or "").strip(),
+                    "source_image_url": str(image_url or "").strip(),
+                    "mention_alias": f"Image {index}",
+                }
+                for index, image_url in enumerate(image_attachments, start=1)
+                if str(image_url or "").strip()
+            ]
         used_tokens: set[str] = set()
 
         for attempt in range(max_token_retries):
