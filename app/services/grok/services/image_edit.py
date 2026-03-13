@@ -10,6 +10,7 @@ from typing import AsyncGenerator, AsyncIterable, List, Union, Any, Callable
 from urllib.parse import urlparse
 
 import orjson
+from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 
 from app.core.config import get_config
@@ -32,6 +33,7 @@ from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.services.chat import GrokChatService
 from app.services.grok.services.video import VideoService
 from app.services.grok.utils.stream import wrap_stream_with_usage
+from app.services.reverse.media_post import MediaPostReverse
 from app.services.token import EffortType
 
 
@@ -39,6 +41,62 @@ from app.services.token import EffortType
 class ImageEditResult:
     stream: bool
     data: Union[AsyncGenerator[str, None], List[str]]
+    token_used: str = ""
+
+
+def _extract_image_post_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for pattern in (
+        r"/generated/([0-9a-fA-F-]{32,36})(?:/|$)",
+        r"/users/[^/]+/([0-9a-fA-F-]{32,36})(?:/content|/|$)",
+        r"/imagine-public/(?:share-images|images)/([0-9a-fA-F-]{32,36})(?:\.[a-z]+|/|$)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    matches = re.findall(r"([0-9a-fA-F-]{32,36})", text)
+    return matches[-1] if matches else ""
+
+async def _try_log_image_share_link(
+    token: str,
+    post_id: str,
+    *,
+    local_url: str = "",
+) -> None:
+    token_text = str(token or "").strip()
+    post_text = str(post_id or "").strip()
+    if not token_text or not post_text:
+        return
+    try:
+        logger.info(f"Image create-link attempt: post_id={post_text}")
+        async with AsyncSession() as session:
+            metadata = await MediaPostReverse.capture_metadata(
+                session,
+                token_text,
+                post_text,
+                media_type="image",
+                local_url=local_url,
+            )
+        share_link = str(metadata.get("share_link") or "").strip()
+        metadata_path = str(metadata.get("metadata_path") or "").strip()
+        if share_link:
+            logger.info(
+                "Image create-link success: "
+                f"post_id={post_text}, share_link={share_link}, metadata_path={metadata_path or '-'}"
+            )
+        else:
+            logger.info(
+                "Image create-link completed without shareLink: "
+                f"post_id={post_text}, metadata_path={metadata_path or '-'}"
+            )
+    except Exception as e:
+        details = getattr(e, "details", None)
+        logger.warning(
+            "Image create-link failed: "
+            f"post_id={post_text}, error={e}, details={details}"
+        )
 
 
 def _is_upload_rejected_error(exc: Exception) -> bool:
@@ -755,6 +813,8 @@ class ImageEditService:
                 request_url = raw_source
                 mention_id = original_id
                 attachment_id = ""
+                resolved_url = ""
+                resolved_id = ""
                 should_upload_for_attachment = _needs_image_edit_reference_upload(
                     item, raw_source
                 )

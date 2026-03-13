@@ -722,7 +722,6 @@ def _normalize_assets_url(value: str) -> str:
         return f"https://assets.grok.com{raw}"
     return f"https://assets.grok.com/{raw}"
 
-
 def _log_final_video_payload(
     *,
     message: str,
@@ -1256,7 +1255,10 @@ class VideoService:
                 source_url = await self._resolve_reference_source_url(token, item)
                 if not source_url:
                     raise ValidationException(f"第 {index + 1} 张参考图缺少可用来源")
-                file_id, file_uri = await upload_service.upload_file(source_url, token)
+                uploaded_file_id, file_uri = await upload_service.upload_file(
+                    source_url, token
+                )
+                file_id = str(uploaded_file_id or "").strip()
                 asset_url = _normalize_assets_url(file_uri)
                 uploaded.append(
                     {

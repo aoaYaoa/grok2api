@@ -1131,6 +1131,9 @@
     const title = document.createElement('div');
     title.className = 'video-item-title';
     title.textContent = `视频 ${previewCount}`;
+    
+    const prompt = document.createElement('div');
+    prompt.className = 'video-item-prompt hidden';
 
     const actions = document.createElement('div');
     actions.className = 'video-item-actions';
@@ -1174,6 +1177,7 @@
     link.className = 'video-item-link';
 
     item.appendChild(header);
+    item.appendChild(prompt);
     item.appendChild(body);
     item.appendChild(link);
     videoStage.appendChild(item);
@@ -1409,7 +1413,8 @@
       mention_alias: String(item && item.mentionLabel ? item.mentionLabel : getReferenceMentionLabel(index)).trim()
     })).filter((item) => item.parent_post_id || item.image_url || item.source_image_url);
 
-    const primaryRef = referenceItems[0] || null;
+    const hasReferenceItems = referenceItems.length > 0;
+    const primaryRef = hasReferenceItems ? null : (referenceItems[0] || null);
     const parentPostId = primaryRef ? String(primaryRef.parent_post_id || '').trim() : '';
     const imageUrl = primaryRef ? String(primaryRef.image_url || primaryRef.source_image_url || '').trim() : '';
     const sourceImageUrl = primaryRef ? String(primaryRef.source_image_url || primaryRef.image_url || '').trim() : '';
@@ -1422,9 +1427,9 @@
       },
       body: JSON.stringify({
         prompt,
-        image_url: parentPostId ? null : (imageUrl || null),
-        parent_post_id: parentPostId || null,
-        source_image_url: parentPostId ? (sourceImageUrl || null) : null,
+        image_url: hasReferenceItems ? null : (parentPostId ? null : (imageUrl || null)),
+        parent_post_id: hasReferenceItems ? null : (parentPostId || null),
+        source_image_url: hasReferenceItems ? null : (parentPostId ? (sourceImageUrl || null) : null),
         reference_items: referenceItems,
         reasoning_effort: DEFAULT_REASONING_EFFORT,
         aspect_ratio: ratioSelect ? ratioSelect.value : '3:2',
@@ -1556,6 +1561,21 @@
     const body = item.querySelector('.video-item-body');
     if (!body) return;
     body.innerHTML = `<div class="video-item-placeholder">${String(text || '')}</div>`;
+  }
+
+  function setPreviewPrompt(item, text) {
+    if (!item) return;
+    const promptEl = item.querySelector('.video-item-prompt');
+    const promptText = String(text || '').trim();
+    item.dataset.prompt = promptText;
+    if (!promptEl) return;
+    if (promptText) {
+      promptEl.textContent = promptText;
+      promptEl.classList.remove('hidden');
+      return;
+    }
+    promptEl.textContent = '';
+    promptEl.classList.add('hidden');
   }
 
   function getSelectedVideoItem() {
@@ -1998,6 +2018,7 @@
     updateMeta();
     resetOutput(true);
     setStatus('connecting', '连接中');
+    const promptText = promptInput ? String(promptInput.value || '').trim() : '';
 
     let taskIds = [];
     try {
@@ -2021,6 +2042,7 @@
     for (const taskId of taskIds) {
       const previewItem = initPreviewSlot();
       setPreviewTitle(previewItem, buildHistoryTitle('generated', previewItem && previewItem.dataset ? previewItem.dataset.index : previewCount));
+      setPreviewPrompt(previewItem, promptText);
       taskStates.set(taskId, {
         taskId,
         source: null,
@@ -2335,6 +2357,7 @@
       for (const tid of taskIds) {
         const placeholder = initPreviewSlot();
         setPreviewTitle(placeholder, buildHistoryTitle('splice', serial));
+        setPreviewPrompt(placeholder, prompt);
         if (placeholder) placeholder.dataset.taskId = tid;
         spliceRun.placeholders.set(tid, placeholder);
       }
