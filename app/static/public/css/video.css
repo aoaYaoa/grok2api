@@ -18,18 +18,47 @@ body {
 
 /* 移动端强制约束 */
 @media (max-width: 768px) {
+  /* 主体内容底部留出 sticky bar 的高度 */
+  body {
+    padding-bottom: 72px;
+  }
+
   .video-main-grid {
     display: flex;
     flex-direction: column;
     width: 100%;
     min-width: 0;
+    gap: 16px;
   }
 
-  .video-main-left,
-  .video-main-right {
+  /* video-main-right 整体提前（运行状态 + 参数一览紧跟标题） */
+  .video-main-left {
+    order: 1;
     width: 100%;
     min-width: 0;
     max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .video-main-right {
+    order: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* video-main-right 内部：生成参数先，运行状态次，历史最后 */
+  .video-settings-card {
+    order: -1;
+  }
+
+  .history-panel {
+    order: 1;
   }
 
   .video-card {
@@ -46,7 +75,206 @@ body {
     min-width: 0 !important;
     overflow-x: hidden;
   }
+
+  /* 生成参数：2 列横向网格，减少纵向高度 */
+  .video-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  /* 再次确保原始按钮在移动端彻底隐藏 */
+  .settings-actions-side {
+    display: none !important;
+  }
+
+  .splice-action-row {
+    display: none !important;
+  }
 }
+
+/* ─── 移动端底部 Sticky 操作栏 ─── */
+.mobile-action-bar {
+  display: none; /* 桌面端始终隐藏 */
+}
+
+/* 遮罩：全局放置，默认不可见 */
+.mobile-settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(0, 0, 0, 0.52);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+}
+
+@media (max-width: 768px) {
+  /* ── Sticky Bar 本体 ── */
+  .mobile-action-bar {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 200;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--video-surface);
+    border-top: 1px solid var(--video-outline);
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+  }
+
+  html[data-theme='dark'] .mobile-action-bar {
+    background: #131a24;
+    border-top-color: #2b3440;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.35);
+  }
+
+  /* ── Bar 内部：左齿轮 + 右操作区 ── */
+  .mobile-action-bar-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 56px;
+    padding: 0 12px;
+  }
+
+  /* 齿轮按钮 */
+  .mobile-settings-btn {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--video-outline);
+    background: transparent;
+    color: var(--video-ink);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  .mobile-settings-btn:active {
+    background: var(--video-muted);
+  }
+
+  /* 齿轮激活态（sheet 打开时） */
+  body.mobile-settings-open .mobile-settings-btn {
+    background: var(--video-muted);
+    border-color: var(--accents-4);
+  }
+
+  html[data-theme='dark'] .mobile-settings-btn {
+    border-color: #2b3440;
+    color: #e6edf3;
+  }
+
+  html[data-theme='dark'] body.mobile-settings-open .mobile-settings-btn {
+    background: #1b2432;
+  }
+
+  /* 右侧操作区容器（滑动切换区） */
+  .mobile-action-ops {
+    flex: 1;
+    position: relative;
+    height: 44px;
+    min-width: 0;
+    overflow: hidden;
+    border-radius: 8px;
+  }
+
+  /* 两个插槽：绝对定位叠放，transform 滑动切换 */
+  .mobile-action-slot {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transform: translateX(100%);
+    transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+  }
+
+  .mobile-action-slot--active {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+
+  /* 操作按钮 */
+  .mobile-action-btn {
+    flex: 1;
+    height: 44px;
+    font-size: 14px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    min-width: 0;
+  }
+
+  /* 停止按钮不撑满 */
+  #mobileStopBtn {
+    flex: 0 0 auto;
+    padding: 0 16px;
+  }
+
+  /* ── 遮罩激活态 ── */
+  .mobile-settings-overlay {
+    display: block;
+  }
+
+  body.mobile-settings-open .mobile-settings-overlay {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* ──
+   video-settings-card 作为 Bottom Sheet 的样式
+   ★ 通过 JS 将节点移到 <body> 直接子元素，避免祖先层叠上下文干扰 fixed 定位
+   选择器用 body > .video-settings-card 确保高特异性、精准命中
+── */
+body > .video-settings-card {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 56px;   /* sticky bar 高度 */
+  top: auto;
+  z-index: 310;
+  margin: 0;
+  border-radius: 16px 16px 0 0;
+  transform: translateY(calc(100% + 56px));
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  max-height: 72vh;
+  overflow-y: auto;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+  pointer-events: none;
+  box-shadow: 0 -4px 32px rgba(0, 0, 0, 0.18);
+}
+
+body.mobile-settings-open > .video-settings-card {
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+html[data-theme='dark'] body > .video-settings-card {
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.55);
+}
+
+/* sheet 标题行样式 */
+body > .video-settings-card > .card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--video-outline);
+  font-size: 14px;
+}
+
 
 .video-header-row {
   display: flex;
@@ -220,6 +448,13 @@ body {
   .history-panel .video-stage {
     max-height: none;
     overflow: visible;
+  }
+
+  /* 820px ~ 769px 区间：grid 单列，right 保持 flex column 内部排列 */
+  .video-main-right {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
   }
 }
 

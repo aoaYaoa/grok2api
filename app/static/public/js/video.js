@@ -3245,4 +3245,152 @@
     clearReferencePreview();
   }
 
+  // ─── 移动端底部 Sticky 操作栏逻辑 ───────────────────────────────────────
+  (function initMobileActionBar() {
+    const bar = document.getElementById('mobileActionBar');
+    if (!bar) return;
+
+    const slotGenerate    = document.getElementById('mobileBarGenerate');
+    const slotSplice      = document.getElementById('mobileBarSplice');
+    const mobileStart     = document.getElementById('mobileStartBtn');
+    const mobileStop      = document.getElementById('mobileStopBtn');
+    const mobileSplice    = document.getElementById('mobileSpliceBtn');
+    const settingsBtn     = document.getElementById('mobileSettingsBtn');
+    const settingsOverlay = document.getElementById('mobileSettingsOverlay');
+    // settings-card：作为 bottom sheet 使用
+    const settingsCard = document.querySelector('.video-settings-card');
+    let scOriginalParent = null;
+    let scOriginalNextSibling = null;
+
+    function isMobile() {
+      return window.matchMedia('(max-width: 768px)').matches;
+    }
+
+    // ── 将 settings-card 移到 body 直接子，避免祖先层叠上下文干扰 position:fixed ──
+    function moveCardToBody() {
+      if (!settingsCard || settingsCard.parentElement === document.body) return;
+      scOriginalParent = settingsCard.parentElement;
+      scOriginalNextSibling = settingsCard.nextElementSibling;
+      document.body.appendChild(settingsCard);
+    }
+
+    function moveCardBack() {
+      if (!settingsCard || settingsCard.parentElement !== document.body) return;
+      if (scOriginalParent) {
+        scOriginalNextSibling
+          ? scOriginalParent.insertBefore(settingsCard, scOriginalNextSibling)
+          : scOriginalParent.appendChild(settingsCard);
+      }
+    }
+
+    // ── 齿轮：生成参数 Bottom Sheet 开关 ──
+    function openSettingsSheet() {
+      document.body.classList.add('mobile-settings-open');
+      if (settingsBtn) settingsBtn.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeSettingsSheet() {
+      document.body.classList.remove('mobile-settings-open');
+      if (settingsBtn) settingsBtn.setAttribute('aria-expanded', 'false');
+    }
+
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => {
+        document.body.classList.contains('mobile-settings-open')
+          ? closeSettingsSheet()
+          : openSettingsSheet();
+      });
+    }
+
+    // 点击遮罩关闭
+    if (settingsOverlay) {
+      settingsOverlay.addEventListener('click', closeSettingsSheet);
+    }
+
+    // Esc 键关闭
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('mobile-settings-open')) {
+        closeSettingsSheet();
+      }
+    });
+
+    // resize：移动端时把节点移到 body，桌面端时关闭 sheet 并移回原位
+    window.addEventListener('resize', () => {
+      if (isMobile()) {
+        moveCardToBody();
+      } else {
+        closeSettingsSheet();
+        moveCardBack();
+      }
+    });
+
+    // ── 按钮代理：点击 sticky bar 按钮 = 点击原始按钮 ──
+    if (mobileStart) {
+      mobileStart.addEventListener('click', () => {
+        if (startBtn && !startBtn.disabled) startBtn.click();
+      });
+    }
+    if (mobileStop) {
+      mobileStop.addEventListener('click', () => {
+        if (stopBtn && !stopBtn.disabled) stopBtn.click();
+      });
+    }
+    if (mobileSplice) {
+      mobileSplice.addEventListener('click', () => {
+        if (spliceBtn && !spliceBtn.disabled) spliceBtn.click();
+      });
+    }
+
+    // ── 同步生成按钮状态（running / idle）到 sticky bar ──
+    function syncGenerateSlotState() {
+      if (!slotGenerate || !mobileStart || !mobileStop) return;
+      const running = stopBtn && !stopBtn.classList.contains('hidden');
+      mobileStop.classList.toggle('hidden', !running);
+      mobileStart.classList.toggle('hidden', running);
+      slotGenerate.classList.toggle('is-running', running);
+      if (mobileStart) mobileStart.disabled = Boolean(startBtn && startBtn.disabled);
+    }
+
+    if (startBtn || stopBtn) {
+      const syncObserver = new MutationObserver(syncGenerateSlotState);
+      [startBtn, stopBtn].filter(Boolean).forEach((el) => {
+        syncObserver.observe(el, { attributes: true, attributeFilter: ['class', 'disabled'] });
+      });
+    }
+
+    // ── IntersectionObserver：监听 #editPanel 可见性，切换操作插槽 ──
+    const targetPanel = document.getElementById('editPanel');
+    if (targetPanel && 'IntersectionObserver' in window) {
+      let spliceVisible = false;
+      const io = new IntersectionObserver(
+        (entries) => {
+          if (!isMobile()) return;
+          entries.forEach((entry) => { spliceVisible = entry.isIntersecting; });
+          if (slotGenerate) slotGenerate.classList.toggle('mobile-action-slot--active', !spliceVisible);
+          if (slotSplice)   slotSplice.classList.toggle('mobile-action-slot--active', spliceVisible);
+        },
+        { threshold: 0.15 }
+      );
+      io.observe(targetPanel);
+    }
+
+    // ── 延长视频 sticky 按钮文本 & 状态同步 ──
+    function syncSpliceBtnState() {
+      if (!mobileSplice || !spliceBtn) return;
+      mobileSplice.disabled = spliceBtn.disabled;
+      const span = spliceBtn.querySelector('span');
+      const mSpan = mobileSplice.querySelector('span');
+      if (span && mSpan) mSpan.textContent = span.textContent;
+    }
+    if (spliceBtn) {
+      new MutationObserver(syncSpliceBtnState)
+        .observe(spliceBtn, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+    }
+
+    // 初始化状态
+    if (isMobile()) moveCardToBody(); // 移到 body 直接子，确保 position:fixed 相对视口
+    syncGenerateSlotState();
+    syncSpliceBtnState();
+  })();
+
 })();
