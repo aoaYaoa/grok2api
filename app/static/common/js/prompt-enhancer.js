@@ -409,12 +409,6 @@
       if (!placeholder || !token) return;
       restored = restored.replaceAll(placeholder, token);
     });
-
-    const existingMentions = extractMentionTokens(restored);
-    const missing = tokens.filter((token) => !existingMentions.includes(token));
-    if (missing.length) {
-      restored = `${missing.join(' ')} ${restored}`.trim();
-    }
     return restored;
   }
 
