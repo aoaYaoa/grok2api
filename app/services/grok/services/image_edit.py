@@ -121,6 +121,32 @@ def _normalize_asset_url(file_uri: str) -> str:
     return f"https://assets.grok.com/{raw}"
 
 
+def _log_final_image_edit_payload(
+    *,
+    prompt_text: str,
+    file_attachments: List[str],
+    model_config_override: dict,
+    tool_overrides: dict,
+    stream: bool,
+) -> None:
+    payload = {
+        "message": str(prompt_text or ""),
+        "fileAttachments": [
+            str(item or "").strip()
+            for item in (file_attachments or [])
+            if str(item or "").strip()
+        ],
+        "toolOverrides": tool_overrides or {},
+        "modelConfigOverride": model_config_override or {},
+        "stream": bool(stream),
+    }
+    try:
+        payload_text = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8")
+    except Exception:
+        payload_text = str(payload)
+    logger.info(f"Image edit upstream payload before send:\n{payload_text}")
+
+
 def _is_assets_content_url(url: str) -> bool:
     raw = str(url or "").strip()
     if not raw:
@@ -899,6 +925,13 @@ class ImageEditService:
                         },
                     }
                 }
+                _log_final_image_edit_payload(
+                    prompt_text=prompt_text,
+                    file_attachments=file_attachments,
+                    model_config_override=model_config_override,
+                    tool_overrides=tool_overrides,
+                    stream=stream,
+                )
                 if stream:
                     response = await GrokChatService().chat(
                         token=current_token,

@@ -723,6 +723,32 @@ def _normalize_assets_url(value: str) -> str:
     return f"https://assets.grok.com/{raw}"
 
 
+def _log_final_video_payload(
+    *,
+    message: str,
+    file_attachments: list[str] | None = None,
+    tool_overrides: dict | None = None,
+    model_config_override: dict | None = None,
+    mode: str | None = None,
+) -> None:
+    payload = {
+        "message": str(message or ""),
+        "fileAttachments": [
+            str(item or "").strip()
+            for item in (file_attachments or [])
+            if str(item or "").strip()
+        ],
+        "toolOverrides": tool_overrides or {},
+        "modelConfigOverride": model_config_override or {},
+        "mode": mode,
+    }
+    try:
+        payload_text = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8")
+    except Exception:
+        payload_text = str(payload)
+    logger.info(f"Video upstream payload before send:\n{payload_text}")
+
+
 def _classify_video_error(exc: Exception) -> tuple[str, str, int]:
     """将底层异常归一化为用户可读错误。"""
     text = str(exc or "").lower()
@@ -1317,6 +1343,13 @@ class VideoService:
                 moderated_hit = False
                 try:
                     async with _get_video_semaphore():
+                        _log_final_video_payload(
+                            message=message,
+                            file_attachments=file_attachments,
+                            tool_overrides={"videoGen": True},
+                            model_config_override=model_config_override,
+                            mode=official_mode,
+                        )
                         stream_response = await AppChatReverse.request(
                             session,
                             token,
@@ -1408,6 +1441,13 @@ class VideoService:
                 moderated_hit = False
                 try:
                     async with _get_video_semaphore():
+                        _log_final_video_payload(
+                            message=message,
+                            file_attachments=[],
+                            tool_overrides={"videoGen": True},
+                            model_config_override=model_config_override,
+                            mode=official_mode,
+                        )
                         stream_response = await AppChatReverse.request(
                             session,
                             token,
@@ -1502,6 +1542,13 @@ class VideoService:
                 moderated_hit = False
                 try:
                     async with _get_video_semaphore():
+                        _log_final_video_payload(
+                            message=message,
+                            file_attachments=[],
+                            tool_overrides={"videoGen": True},
+                            model_config_override=model_config_override,
+                            mode=official_mode,
+                        )
                         stream_response = await AppChatReverse.request(
                             session,
                             token,
@@ -1628,6 +1675,13 @@ class VideoService:
                 moderated_hit = False
                 try:
                     async with _get_video_semaphore():
+                        _log_final_video_payload(
+                            message=message,
+                            file_attachments=[],
+                            tool_overrides={"videoGen": True},
+                            model_config_override=model_config_override,
+                            mode=official_mode,
+                        )
                         stream_response = await AppChatReverse.request(
                             session,
                             token,
@@ -1764,6 +1818,13 @@ class VideoService:
                 moderated_hit = False
                 try:
                     async with _get_video_semaphore():
+                        _log_final_video_payload(
+                            message=message,
+                            file_attachments=file_attachments,
+                            tool_overrides={"videoGen": True},
+                            model_config_override=model_config_override,
+                            mode=mode,
+                        )
                         stream_response = await AppChatReverse.request(
                             session,
                             token,
