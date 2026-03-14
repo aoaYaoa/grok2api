@@ -1209,7 +1209,18 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
                 for index, image_ref in enumerate(image_inputs)
             ]
 
-        if effective_reference_items:
+        # 单图 parent_post 模式直接走 edit_with_parent_post（会通过 create_image_post 转换）
+        single_parent_mode = (
+            use_parent_mode
+            and len(effective_reference_items) == 1
+            and str(effective_reference_items[0].get("parent_post_id") or "").strip()
+            and not any(
+                raw.startswith("data:image/") or raw.startswith("http://127.0.0.1") or raw.startswith("http://localhost")
+                for raw in [str(effective_reference_items[0].get("source_image_url") or "").strip()]
+                if raw
+            )
+        )
+        if effective_reference_items and not single_parent_mode:
             for item in effective_reference_items:
                 ref_parent = _extract_parent_post_id_from_url(str(item.get("parent_post_id") or ""))
                 if ref_parent and not str(item.get("source_image_url") or "").strip():
@@ -1235,7 +1246,7 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
                 progress_cb=progress_cb,
             )
             mode = "parent_post" if use_parent_mode else "upload"
-        elif use_parent_mode:
+        elif use_parent_mode or single_parent_mode:
             if current_source_image_url_input and not (
                 current_source_image_url_input.startswith("http://")
                 or current_source_image_url_input.startswith("https://")
