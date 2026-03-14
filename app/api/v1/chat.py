@@ -37,6 +37,7 @@ class VideoConfig(BaseModel):
     video_length: Optional[int] = Field(6, description="视频时长(秒): 6-30")
     resolution_name: Optional[str] = Field("480p", description="视频分辨率: 480p, 720p")
     preset: Optional[str] = Field("custom", description="风格预设: fun, normal, spicy")
+    single_image_mode: Optional[str] = Field("frame", description="单图模式: frame=作为首帧, reference=作为参考图")
     n: Optional[int] = Field(None, ge=1, le=4, description="生成数量 (1-4，仅非流式)")
     concurrent: Optional[int] = Field(1, ge=1, le=4, description="并发视频数 (1-4，仅非流式)")
 
@@ -666,6 +667,12 @@ def validate_request(request: ChatCompletionRequest):
                 param="video_config.preset",
                 code="invalid_preset",
             )
+        if config.single_image_mode not in ("frame", "reference"):
+            raise ValidationException(
+                message="single_image_mode must be one of ['frame', 'reference']",
+                param="video_config.single_image_mode",
+                code="invalid_single_image_mode",
+            )
         resolved_video_n = None
         if config.n is not None:
             resolved_video_n = config.n
@@ -906,6 +913,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                     video_length=v_conf.video_length,
                     resolution=v_conf.resolution_name,
                     preset=v_conf.preset,
+                    single_image_mode=v_conf.single_image_mode or "frame",
                 )
             else:
                 messages_dump = [msg.model_dump() for msg in request.messages]
@@ -920,6 +928,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                         video_length=v_conf.video_length,
                         resolution=v_conf.resolution_name,
                         preset=v_conf.preset,
+                        single_image_mode=v_conf.single_image_mode or "frame",
                     )
                     if not isinstance(single, dict):
                         raise ValidationException(
