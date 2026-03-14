@@ -78,6 +78,7 @@ body {
   bottom: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  z-index: 1;
 }
 
 .font-mono {
