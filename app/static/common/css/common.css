@@ -71,14 +71,7 @@ body {
 }
 
 .admin-main-scroll {
-  position: fixed;
-  top: 56px;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  z-index: 1;
+  padding-top: 16px;
 }
 
 .font-mono {
