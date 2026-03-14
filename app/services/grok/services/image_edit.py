@@ -1130,6 +1130,7 @@ class ImageEditService:
             "chat_connected": False,
             "image_count": 0,
             "last_event": "",
+            "stream_errors": [],
         }
 
         async def tracked_progress_cb(event: str, payload: dict):
@@ -1142,6 +1143,10 @@ class ImageEditService:
                 except Exception:
                     count = 0
                 collect_state["image_count"] = max(collect_state["image_count"], count)
+            elif event == "stream_errors":
+                errors = (payload or {}).get("errors")
+                if isinstance(errors, list):
+                    collect_state["stream_errors"] = errors
             if progress_cb:
                 result = progress_cb(event, payload)
                 if asyncio.iscoroutine(result):
@@ -1176,6 +1181,7 @@ class ImageEditService:
                 "image_count": 0,
                 "last_event": collect_state["last_event"],
                 "reference_count": reference_count,
+                "stream_errors": collect_state["stream_errors"],
             }
             message = (
                 "Image edit upstream connected but returned no image URLs"
@@ -1387,6 +1393,30 @@ class ImageCollectProcessor(BaseProcessor):
         images = []
         idle_timeout = get_config("image.stream_timeout")
         chat_connected_emitted = False
+        stream_errors: list[Any] = []
+
+        async def _emit_stream_errors(new_errors: list[Any]) -> None:
+            if not new_errors or not self.progress_cb:
+                return
+            payload = {"count": len(new_errors), "errors": new_errors}
+            result = self.progress_cb("stream_errors", payload)
+            if asyncio.iscoroutine(result):
+                await result
+
+        def _append_stream_errors(value: Any) -> list[Any]:
+            if not value:
+                return []
+            added: list[Any] = []
+            if isinstance(value, list):
+                candidates = value
+            else:
+                candidates = [value]
+            for item in candidates:
+                if item in stream_errors:
+                    continue
+                stream_errors.append(item)
+                added.append(item)
+            return added
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):
@@ -1407,7 +1437,14 @@ class ImageCollectProcessor(BaseProcessor):
                         "模型连接成功，正在生成图片",
                     )
 
+                added = _append_stream_errors(resp.get("streamErrors"))
+                if added:
+                    await _emit_stream_errors(stream_errors)
+
                 if mr := resp.get("modelResponse"):
+                    added = _append_stream_errors(mr.get("streamErrors"))
+                    if added:
+                        await _emit_stream_errors(stream_errors)
                     if urls := _collect_images(mr):
                         for url in urls:
                             if self.response_format == "url":

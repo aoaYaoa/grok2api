@@ -56,6 +56,13 @@ class FakeProcessor:
     async def process(self, response):
         if self.progress_cb:
             await self.progress_cb('chat_connected', {'progress': 60, 'message': '模型连接成功，正在生成图片'})
+            await self.progress_cb(
+                'stream_errors',
+                {
+                    'count': 1,
+                    'errors': [{'message': 'internalError', 'severity': 'error'}],
+                },
+            )
         return []
 
 
@@ -80,6 +87,10 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.details.get('error'), 'empty_result')
         self.assertEqual(ctx.exception.details.get('chat_connected'), True)
         self.assertEqual(ctx.exception.details.get('image_count'), 0)
+        self.assertEqual(
+            ctx.exception.details.get('stream_errors'),
+            [{'message': 'internalError', 'severity': 'error'}],
+        )
 
 
 if __name__ == '__main__':
