@@ -1372,3 +1372,71 @@ html[data-theme='dark'] .nsfw-settings-sheet {
   background: #111821;
   color: #e2e8f0;
 }
+
+/* ============================
+   NSFW Sticky Bar 布局优化补丁
+   ============================ */
+@media (max-width: 900px) {
+  /* 减少垂直跳跃感，统一行高 */
+  .nsfw-sticky-row {
+    padding: 6px 0;
+    gap: 8px;
+    min-height: 48px;
+  }
+
+  /* 第一行：图标组撑满中间，主按钮自然靠右 */
+  .nsfw-sticky-row--image {
+    align-items: center;
+  }
+
+  .nsfw-sticky-row--image .nsfw-icon-group {
+    flex: 1;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  /* 图标按钮统一化为 38px */
+  .nsfw-icon-btn {
+    width: 38px;
+    height: 38px;
+  }
+
+  /* 主按钮高度统一 */
+  .nsfw-main-btn {
+    height: 38px;
+    min-width: 90px;
+    padding: 0 16px;
+    font-size: 13.5px;
+  }
+
+  /* 分隔线对齐 */
+  .nsfw-icon-divider {
+    height: 20px;
+    margin: 0 2px;
+  }
+
+  /* 第二行：文字标签加宽并截断 */
+  .nsfw-selected-label {
+    flex: 1;
+    font-size: 11.5px;
+    padding-right: 6px;
+  }
+
+  .nsfw-video-actions {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  /* 行分隔线加强 */
+  .nsfw-sticky-row-sep {
+    margin: 2px -4px;
+    opacity: 0.4;
+  }
+
+  /* 整体 bar 缩小冗余 padding */
+  .nsfw-sticky-bar {
+    padding: 6px 14px;
+    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    gap: 0;
+  }
+}
