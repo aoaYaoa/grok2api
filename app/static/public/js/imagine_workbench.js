@@ -26,6 +26,11 @@
   const previewLightbox = document.getElementById('previewLightbox');
   const previewLightboxImg = document.getElementById('previewLightboxImg');
   const previewLightboxDownload = document.getElementById('previewLightboxDownload');
+  const stepwiseMergeBtn = document.getElementById('stepwiseMergeBtn');
+  const stepwiseMergeModal = document.getElementById('stepwiseMergeModal');
+  const stepwiseMergeGrid = document.getElementById('stepwiseMergeGrid');
+  const stepwiseMergeConfirm = document.getElementById('stepwiseMergeConfirm');
+  const stepwiseMergeCancel = document.getElementById('stepwiseMergeCancel');
   const REFERENCE_LIMIT = 5;
   const WORKBENCH_IMAGE_ACTION_PROMPT_KEY = 'workbench_image_action_prompt_draft';
 
@@ -39,6 +44,14 @@
     currentModeValue: 'upload',
     history: [],
     editRound: 0,
+  };
+  const stepwiseMergeState = {
+    active: false,
+    pendingRefs: [],
+    selectedIds: new Set(),
+    currentStep: 0,
+    totalSteps: 0,
+    lastResultUrl: '',
   };
   let workbenchEditAbortController = null;
   let editProgressTimer = null;
@@ -113,6 +126,93 @@
     if (!previewLightbox) return;
     previewLightbox.classList.remove('active');
     previewLightbox.setAttribute('aria-hidden', 'true');
+  }
+
+  function updateStepwiseMergeEntryVisibility() {
+    if (!stepwiseMergeBtn) return;
+    const visible = state.referenceImages.length >= 3;
+    stepwiseMergeBtn.classList.toggle('hidden', !visible);
+    stepwiseMergeBtn.disabled = !visible;
+    stepwiseMergeBtn.setAttribute('aria-disabled', visible ? 'false' : 'true');
+  }
+
+  function openStepwiseMergeModal() {
+    if (!stepwiseMergeModal || !stepwiseMergeGrid) return;
+    if (state.referenceImages.length < 3) {
+      toast('至少需要 3 张参考图才能分步合成', 'warning');
+      return;
+    }
+    stepwiseMergeState.active = true;
+    stepwiseMergeState.pendingRefs = state.referenceImages.map((item) => ({ ...item }));
+    stepwiseMergeState.selectedIds = new Set();
+    renderStepwiseMergeGrid();
+    stepwiseMergeModal.classList.remove('hidden');
+    stepwiseMergeModal.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeStepwiseMergeModal() {
+    if (!stepwiseMergeModal) return;
+    stepwiseMergeState.active = false;
+    stepwiseMergeState.selectedIds = new Set();
+    stepwiseMergeModal.classList.add('hidden');
+    stepwiseMergeModal.setAttribute('aria-hidden', 'true');
+  }
+
+  function updateStepwiseMergeConfirm() {
+    if (!stepwiseMergeConfirm) return;
+    stepwiseMergeConfirm.disabled = stepwiseMergeState.selectedIds.size !== 2;
+  }
+
+  function renderStepwiseMergeGrid() {
+    if (!stepwiseMergeGrid) return;
+    stepwiseMergeGrid.innerHTML = '';
+    stepwiseMergeState.pendingRefs.forEach((item) => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'stepwise-merge-card';
+      if (stepwiseMergeState.selectedIds.has(item.id)) {
+        card.classList.add('is-selected');
+      }
+      card.dataset.id = item.id;
+      card.addEventListener('click', () => {
+        toggleStepwiseSelection(item.id);
+      });
+
+      const img = document.createElement('img');
+      img.src = item.data;
+      img.alt = item.mentionAlias || item.name || 'reference';
+      img.loading = 'lazy';
+      card.appendChild(img);
+
+      const label = document.createElement('span');
+      label.className = 'stepwise-merge-card-label';
+      label.textContent = item.mentionAlias || item.name || 'Image';
+      card.appendChild(label);
+
+      stepwiseMergeGrid.appendChild(card);
+    });
+    updateStepwiseMergeConfirm();
+  }
+
+  function toggleStepwiseSelection(id) {
+    if (!id) return;
+    if (stepwiseMergeState.selectedIds.has(id)) {
+      stepwiseMergeState.selectedIds.delete(id);
+      renderStepwiseMergeGrid();
+      return;
+    }
+    if (stepwiseMergeState.selectedIds.size >= 2) {
+      toast('首步只能选择两张参考图', 'warning');
+      return;
+    }
+    stepwiseMergeState.selectedIds.add(id);
+    renderStepwiseMergeGrid();
+  }
+
+  async function startStepwiseMerge() {
+    if (typeof runStepwiseMerge === 'function') {
+      await runStepwiseMerge();
+    }
   }
 
   function getParentMemoryApi() {
@@ -915,6 +1015,7 @@
       empty.textContent = `可上传 / 粘贴 / 拖拽参考图（最多 ${REFERENCE_LIMIT} 张）`;
       referenceStrip.appendChild(empty);
       updateReferenceSummary();
+      updateStepwiseMergeEntryVisibility();
       return;
     }
 
@@ -973,6 +1074,7 @@
       referenceStrip.appendChild(addSlot);
     }
     updateReferenceSummary();
+    updateStepwiseMergeEntryVisibility();
   }
 
   function previewReference(id) {
@@ -1918,6 +2020,23 @@
         const target = event.target;
         if (target === previewLightbox || (target && target.matches('[data-preview-close]'))) {
           closePreviewLightbox();
+        }
+      });
+    }
+
+    if (stepwiseMergeBtn) {
+      stepwiseMergeBtn.addEventListener('click', openStepwiseMergeModal);
+    }
+    if (stepwiseMergeCancel) {
+      stepwiseMergeCancel.addEventListener('click', closeStepwiseMergeModal);
+    }
+    if (stepwiseMergeConfirm) {
+      stepwiseMergeConfirm.addEventListener('click', startStepwiseMerge);
+    }
+    if (stepwiseMergeModal) {
+      stepwiseMergeModal.addEventListener('click', (event) => {
+        if (event.target === stepwiseMergeModal) {
+          closeStepwiseMergeModal();
         }
       });
     }

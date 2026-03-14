@@ -83,6 +83,11 @@ test('imagine workbench exposes stepwise merge entry point', () => {
   assert.match(workbenchJs, /startStepwiseMerge/);
 });
 
+test('imagine workbench exposes stepwise merge modal state', () => {
+  assert.match(workbenchJs, /stepwiseMergeState/);
+  assert.match(workbenchJs, /openStepwiseMergeModal/);
+});
+
 
 test('workbench preview sizing stays fixed and history enhancer controls are visible', () => {
   assert.match(workbenchCss, /--workbench-preview-height/);
