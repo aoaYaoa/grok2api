@@ -178,6 +178,7 @@ class GrokChatService:
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
         image_generation_count: int | None = None,
+        enable_image_streaming: bool | None = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -207,6 +208,7 @@ class GrokChatService:
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
                         image_generation_count=image_generation_count,
+                        enable_image_streaming=enable_image_streaming,
                     )
                     logger.info(
                         "Chat connected: "

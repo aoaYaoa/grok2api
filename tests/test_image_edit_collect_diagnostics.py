@@ -92,6 +92,25 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             [{'message': 'internalError', 'severity': 'error'}],
         )
 
+    async def test_collect_images_disables_image_streaming(self):
+        service = ImageEditService()
+        model_info = SimpleNamespace(model_id='grok-image-edit-test', grok_model='imagine-image-edit')
+
+        chat_mock = AsyncMock(return_value=object())
+        with patch('app.services.grok.services.image_edit.GrokChatService.chat', chat_mock), \
+             patch('app.services.grok.services.image_edit.ImageCollectProcessor', FakeProcessor):
+            with self.assertRaises(UpstreamException):
+                await service._collect_images(
+                    token='good-token',
+                    prompt='merge two people',
+                    model_info=model_info,
+                    response_format='url',
+                    tool_overrides={'imageGen': True},
+                    model_config_override={'modelMap': {}},
+                )
+
+        self.assertEqual(chat_mock.await_args.kwargs.get('enable_image_streaming'), False)
+
 
 if __name__ == '__main__':
     unittest.main()

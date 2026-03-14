@@ -78,6 +78,7 @@ class AppChatReverse:
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
         image_generation_count: int | None = None,
+        enable_image_streaming: bool | None = None,
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
@@ -127,6 +128,8 @@ class AppChatReverse:
         custom_personality = AppChatReverse._resolve_custom_personality()
         if custom_personality is not None:
             payload["customPersonality"] = custom_personality
+        if enable_image_streaming is not None:
+            payload["enableImageStreaming"] = bool(enable_image_streaming)
         if model_config_override:
             payload["responseMetadata"]["modelConfigOverride"] = model_config_override
 
@@ -147,6 +150,7 @@ class AppChatReverse:
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
         image_generation_count: int | None = None,
+        enable_image_streaming: bool | None = None,
     ) -> Any:
         """Send app chat request to Grok.
         
@@ -185,6 +189,7 @@ class AppChatReverse:
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
                 image_generation_count=image_generation_count,
+                enable_image_streaming=enable_image_streaming,
             )
             logger.info(
                 "AppChat request prepared: "
