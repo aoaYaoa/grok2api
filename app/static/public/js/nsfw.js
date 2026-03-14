@@ -112,6 +112,138 @@
     }
   }
 
+  function ensureVideoRenameDialog() {
+    let overlay = document.getElementById('nsfwVideoRenameDialog');
+    if (overlay) return overlay;
+    const style = document.createElement('style');
+    style.textContent = `
+      .nsfw-rename-dialog-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(15, 23, 42, 0.45);
+        backdrop-filter: blur(8px);
+        z-index: 500;
+      }
+      .nsfw-rename-dialog-overlay.hidden { display: none; }
+      .nsfw-rename-dialog {
+        width: min(420px, calc(100vw - 32px));
+        border-radius: 16px;
+        border: 1px solid var(--border);
+        background: var(--nsfw-surface, var(--bg));
+        color: var(--fg);
+        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+        padding: 18px;
+      }
+      .nsfw-rename-dialog-title {
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .nsfw-rename-dialog-desc {
+        margin-top: 6px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--accents-5);
+      }
+      .nsfw-rename-dialog-input {
+        width: 100%;
+        margin-top: 14px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--accents-1);
+        color: var(--fg);
+        padding: 12px 14px;
+        outline: none;
+      }
+      .nsfw-rename-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      html[data-theme='dark'] .nsfw-rename-dialog {
+        background: #141b25;
+        border-color: #2b3440;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      }
+      html[data-theme='dark'] .nsfw-rename-dialog-input {
+        background: #101722;
+        border-color: #2b3440;
+        color: #f5f7fb;
+      }
+    `;
+    document.head.appendChild(style);
+    overlay = document.createElement('div');
+    overlay.id = 'nsfwVideoRenameDialog';
+    overlay.className = 'nsfw-rename-dialog-overlay hidden';
+    overlay.innerHTML = `
+      <div class="nsfw-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="nsfwVideoRenameDialogTitle">
+        <div id="nsfwVideoRenameDialogTitle" class="nsfw-rename-dialog-title">重命名视频</div>
+        <div class="nsfw-rename-dialog-desc">新的名称会写入本地元数据，并同步到视频选择与缓存管理。</div>
+        <input id="nsfwVideoRenameDialogInput" class="nsfw-rename-dialog-input" type="text" maxlength="120" placeholder="输入视频名称">
+        <div class="nsfw-rename-dialog-actions">
+          <button id="nsfwVideoRenameDialogCancel" type="button" class="geist-button-outline">取消</button>
+          <button id="nsfwVideoRenameDialogClear" type="button" class="geist-button-outline">恢复默认</button>
+          <button id="nsfwVideoRenameDialogOk" type="button" class="geist-button">保存</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function openVideoRenameDialog(initialValue = '') {
+    const overlay = ensureVideoRenameDialog();
+    const input = overlay.querySelector('#nsfwVideoRenameDialogInput');
+    const okBtn = overlay.querySelector('#nsfwVideoRenameDialogOk');
+    const clearBtn = overlay.querySelector('#nsfwVideoRenameDialogClear');
+    const cancelBtn = overlay.querySelector('#nsfwVideoRenameDialogCancel');
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        overlay.classList.add('hidden');
+        overlay.removeEventListener('click', handleOverlayClick);
+        document.removeEventListener('keydown', handleKeydown, true);
+        okBtn.removeEventListener('click', handleOk);
+        clearBtn.removeEventListener('click', handleClear);
+        cancelBtn.removeEventListener('click', handleCancel);
+        resolve(value);
+      };
+      const handleOk = () => finish(String(input.value || '').trim());
+      const handleClear = () => finish('');
+      const handleCancel = () => finish(null);
+      const handleOverlayClick = (event) => {
+        if (event.target === overlay) finish(null);
+      };
+      const handleKeydown = (event) => {
+        if (overlay.classList.contains('hidden')) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(null);
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          handleOk();
+        }
+      };
+      input.value = String(initialValue || '').trim();
+      overlay.classList.remove('hidden');
+      overlay.addEventListener('click', handleOverlayClick);
+      document.addEventListener('keydown', handleKeydown, true);
+      okBtn.addEventListener('click', handleOk);
+      clearBtn.addEventListener('click', handleClear);
+      cancelBtn.addEventListener('click', handleCancel);
+      window.setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 0);
+    });
+  }
+
   function setLightboxKeyboardShift(px) {
     if (!lightbox) return;
     const safe = Math.max(0, Math.round(Number(px) || 0));
@@ -143,6 +275,71 @@
     if (!raw) return '-';
     if (raw.length <= 12) return raw;
     return `${raw.slice(0, 6)}...${raw.slice(-6)}`;
+  }
+
+  function resolveNsfwVideoRenameKey(item) {
+    if (!item) return '';
+    return String(
+      item.dataset.postId
+      || ''
+    ).trim();
+  }
+
+  function extractNsfwVideoPostId(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+    const direct = raw.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g);
+    return direct && direct.length ? direct[direct.length - 1] : '';
+  }
+
+  function getNsfwStoredVideoTitle(item) {
+    if (!item) return '';
+    return String(
+      item.dataset.displayName
+      || ''
+    ).trim();
+  }
+
+  async function setNsfwStoredVideoTitle(item, title) {
+    const postId = resolveNsfwVideoRenameKey(item)
+      || extractNsfwVideoPostId(item.dataset.videoUrl || '')
+      || extractNsfwVideoPostId(item.dataset.taskId || '')
+      || extractNsfwVideoPostId(item.dataset.name || '');
+    if (!postId) {
+      throw new Error('missing_post_id');
+    }
+    const authHeader = await ensurePublicKey();
+    if (authHeader === null) {
+      throw new Error('missing_public_key');
+    }
+    const res = await fetch('/v1/public/video/rename', {
+      method: 'POST',
+      headers: {
+        ...buildAuthHeaders(authHeader),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        post_id: postId,
+        name: String(item.dataset.videoUrl || '').trim(),
+        display_name: String(title || '').trim(),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status !== 'success') {
+      throw new Error(data.detail || 'rename_failed');
+    }
+    item.dataset.postId = postId;
+    item.dataset.displayName = String(data.result?.display_name || '');
+  }
+
+  function applyNsfwVideoCardTitle(item, fallbackTitle = '') {
+    if (!item) return;
+    const titleEl = item.querySelector('.video-item-title');
+    if (!titleEl) return;
+    const baseTitle = String(item.dataset.defaultTitle || fallbackTitle || titleEl.textContent || '').trim() || '任务';
+    item.dataset.defaultTitle = baseTitle;
+    const stored = getNsfwStoredVideoTitle(item);
+    titleEl.textContent = stored || baseTitle;
   }
 
   function formatMs(ms) {
@@ -1624,6 +1821,7 @@
     const item = document.createElement('div');
     item.className = 'video-item';
     item.dataset.taskId = taskId;
+    item.dataset.defaultTitle = `任务 ${index}`;
     item.innerHTML = `
       <div class="video-item-head">
         <div class="video-item-title">${title}</div>
@@ -1637,6 +1835,7 @@
       <div class="video-actions">
         <a class="geist-button-outline text-xs px-3 hidden video-open" target="_blank" rel="noopener">打开</a>
         <button class="geist-button-outline text-xs px-3 video-download" type="button" disabled>下载</button>
+        <button class="geist-button-outline text-xs px-3 video-rename" type="button" disabled>重命名</button>
       </div>
     `;
     const promptEl = item.querySelector('.video-extend-prompt');
@@ -1644,6 +1843,7 @@
       mountVideoExtendPromptEnhancer(promptEl);
     }
     videoResults.appendChild(item);
+    applyNsfwVideoCardTitle(item, `任务 ${index}`);
     return item;
   }
 
@@ -1672,9 +1872,15 @@
     const open = item.querySelector('.video-open');
     const download = item.querySelector('.video-download');
     const extendBtn = item.querySelector('.video-extend-btn');
+    const rename = item.querySelector('.video-rename');
     const safeUrl = String(url || '').trim();
     item.dataset.videoUrl = safeUrl;
-    item.dataset.postId = extractParentPostIdFromText(safeUrl);
+    if (!item.dataset.postId && safeUrl) {
+      const resolvedPostId = extractNsfwVideoPostId(safeUrl);
+      if (resolvedPostId) {
+        item.dataset.postId = resolvedPostId;
+      }
+    }
     if (open) {
       if (safeUrl) {
         open.href = safeUrl;
@@ -1697,6 +1903,10 @@
       syncVideoExtendButtons();
       syncVideoExtendWorkspace();
     }
+    if (rename) {
+      rename.disabled = !url;
+    }
+    applyNsfwVideoCardTitle(item);
   }
 
   function renderVideoHtml(item, html) {
@@ -2224,6 +2434,29 @@
         const promptRaw = promptInput ? String(promptInput.value || '') : '';
         const promptOverride = promptRaw.trim();
         await runVideoExtend(taskId, promptOverride);
+        return;
+      }
+      if (target.classList.contains('video-rename')) {
+        if (target.disabled) return;
+        const currentTitle = String(item.querySelector('.video-item-title')?.textContent || '').trim();
+        const nextTitle = await openVideoRenameDialog(currentTitle);
+        if (nextTitle === null) return;
+        const safeTitle = String(nextTitle || '').trim();
+        try {
+          await setNsfwStoredVideoTitle(item, safeTitle);
+        } catch (error) {
+          console.warn('[NSFW 视频重命名] 保存失败', {
+            error: String(error && error.message ? error.message : error || ''),
+            postId: item.dataset.postId || '',
+            videoUrl: item.dataset.videoUrl || '',
+            taskId: item.dataset.taskId || '',
+            name: item.dataset.name || '',
+          });
+          toast('视频名称保存失败', 'error');
+          return;
+        }
+        applyNsfwVideoCardTitle(item);
+        toast(safeTitle ? '已更新视频名称' : '已恢复默认名称', 'success');
         return;
       }
       if (!target.classList.contains('video-download')) return;

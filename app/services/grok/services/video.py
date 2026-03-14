@@ -748,6 +748,26 @@ def _log_final_video_payload(
     logger.info(f"Video upstream payload before send:\n{payload_text}")
 
 
+def _log_raw_video_stream_event(raw_text: str) -> None:
+    return
+
+
+def _truncate_video_stream_line(raw_text: str, limit: int = 4000) -> str:
+    text = str(raw_text or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...(len={len(text)})"
+
+
+def _log_video_stream_line(*, stage: str, raw_text: str) -> None:
+    return
+
+
+def _log_video_stream_end(*, stage: str, reason: str, extra: str = "") -> None:
+    suffix = f", {extra}" if extra else ""
+    logger.info(f"Video upstream stream ended ({stage}): reason={reason}{suffix}")
+
+
 def _classify_video_error(exc: Exception) -> tuple[str, str, int]:
     """将底层异常归一化为用户可读错误。"""
     text = str(exc or "").lower()

@@ -122,20 +122,24 @@
                   <span id="editDurationText">总时长 -</span>
                 </div>
               </div>
-              <div class="meta-grid edit-meta-grid">
-                <div class="meta-item">
-                  <div class="meta-label">frame_index</div>
-                  <div id="editFrameIndex" class="meta-value">-</div>
-                </div>
+                <div class="meta-grid edit-meta-grid">
+                  <div class="meta-item">
+                    <div class="meta-label">frame_index</div>
+                    <div id="editFrameIndex" class="meta-value">-</div>
+                  </div>
                 <div class="meta-item">
                   <div class="meta-label">timestamp_ms</div>
                   <div id="editTimestampMs" class="meta-value">-</div>
                 </div>
-                <div class="meta-item">
-                  <div class="meta-label">extend_post_id</div>
-                  <div id="editExtendPostId" class="meta-value">-</div>
+                  <div class="meta-item">
+                    <div class="meta-label">extend_post_id</div>
+                    <div id="editExtendPostId" class="meta-value">-</div>
+                  </div>
+                  <div class="meta-item" id="editVideoNameCard" title="双击重命名">
+                    <div class="meta-label">视频名称</div>
+                    <div id="editVideoName" class="meta-value cursor-text" title="双击重命名">-</div>
+                  </div>
                 </div>
-              </div>
               <div class="settings-block prompt-block edit-prompt-block">
                 <label class="field-label" for="editPromptInput">延长提示词</label>
                 <textarea id="editPromptInput" class="geist-input video-textarea"
@@ -366,7 +370,7 @@
   <script src="/static/common/js/toast.js"></script>
   <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
   <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/video.js?v=0.6.4"></script>
+  <script src="/static/public/js/video.js?v=0.6.5"></script>
 </body>
 
 </html>

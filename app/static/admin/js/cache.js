@@ -61,6 +61,139 @@ function setText(el, text) {
   if (el) el.textContent = text;
 }
 
+function ensureVideoRenameDialog() {
+  let overlay = document.getElementById('adminVideoRenameDialog');
+  if (overlay) return overlay;
+  const style = document.createElement('style');
+  style.textContent = `
+    .admin-rename-dialog-overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(8px);
+      z-index: 500;
+    }
+    .admin-rename-dialog-overlay.hidden { display: none; }
+    .admin-rename-dialog {
+      width: min(420px, calc(100vw - 32px));
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--fg);
+      box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+      padding: 18px;
+    }
+    .admin-rename-dialog-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--accents-7);
+    }
+    .admin-rename-dialog-desc {
+      margin-top: 6px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--accents-5);
+    }
+    .admin-rename-dialog-input {
+      width: 100%;
+      margin-top: 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--accents-1);
+      color: var(--fg);
+      padding: 12px 14px;
+      outline: none;
+    }
+    .admin-rename-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    html[data-theme='dark'] .admin-rename-dialog {
+      background: #141b25;
+      border-color: #2b3440;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+    }
+    html[data-theme='dark'] .admin-rename-dialog-input {
+      background: #101722;
+      border-color: #2b3440;
+      color: #f5f7fb;
+    }
+  `;
+  document.head.appendChild(style);
+  overlay = document.createElement('div');
+  overlay.id = 'adminVideoRenameDialog';
+  overlay.className = 'admin-rename-dialog-overlay hidden';
+  overlay.innerHTML = `
+    <div class="admin-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="adminVideoRenameDialogTitle">
+      <div id="adminVideoRenameDialogTitle" class="admin-rename-dialog-title">重命名视频</div>
+      <div class="admin-rename-dialog-desc">新的名称会写入本地元数据，并同步到视频工作台与缓存选择列表。</div>
+      <input id="adminVideoRenameDialogInput" class="admin-rename-dialog-input" type="text" maxlength="120" placeholder="输入视频名称">
+      <div class="admin-rename-dialog-actions">
+        <button id="adminVideoRenameDialogCancel" type="button" class="geist-button-outline">取消</button>
+        <button id="adminVideoRenameDialogClear" type="button" class="geist-button-outline">恢复默认</button>
+        <button id="adminVideoRenameDialogOk" type="button" class="geist-button">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function openVideoRenameDialog(initialValue = '') {
+  const overlay = ensureVideoRenameDialog();
+  const input = overlay.querySelector('#adminVideoRenameDialogInput');
+  const okBtn = overlay.querySelector('#adminVideoRenameDialogOk');
+  const clearBtn = overlay.querySelector('#adminVideoRenameDialogClear');
+  const cancelBtn = overlay.querySelector('#adminVideoRenameDialogCancel');
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      overlay.classList.add('hidden');
+      overlay.removeEventListener('click', handleOverlayClick);
+      document.removeEventListener('keydown', handleKeydown, true);
+      okBtn.removeEventListener('click', handleOk);
+      clearBtn.removeEventListener('click', handleClear);
+      cancelBtn.removeEventListener('click', handleCancel);
+      resolve(value);
+    };
+    const handleOk = () => finish(String(input.value || '').trim());
+    const handleClear = () => finish('');
+    const handleCancel = () => finish(null);
+    const handleOverlayClick = (event) => {
+      if (event.target === overlay) finish(null);
+    };
+    const handleKeydown = (event) => {
+      if (overlay.classList.contains('hidden')) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(null);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        handleOk();
+      }
+    };
+    input.value = String(initialValue || '').trim();
+    overlay.classList.remove('hidden');
+    overlay.addEventListener('click', handleOverlayClick);
+    document.addEventListener('keydown', handleKeydown, true);
+    okBtn.addEventListener('click', handleOk);
+    clearBtn.addEventListener('click', handleClear);
+    cancelBtn.addEventListener('click', handleCancel);
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  });
+}
+
 function resolveOnlineStatus(status) {
   if (status === 'ok') {
     return { text: '连接正常', className: 'text-xs text-green-600 mt-1' };
@@ -81,6 +214,71 @@ function createIconButton(title, svg, onClick) {
   btn.innerHTML = svg;
   btn.addEventListener('click', onClick);
   return btn;
+}
+
+function toggleOriginalFilename(button) {
+  if (!button) return;
+  const expanded = button.getAttribute('aria-expanded') === 'true';
+  const nextExpanded = !expanded;
+  button.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+  const detail = button.parentElement?.querySelector('[data-role="origin-name"]');
+  if (detail) {
+    detail.classList.toggle('hidden', !nextExpanded);
+  }
+}
+
+function resolveVideoRenameKey(item = {}) {
+  return String(item.post_id || item.postId || '').trim();
+}
+
+function getStoredVideoDisplayName(item = {}) {
+  return String(item.display_name || item.displayName || '').trim();
+}
+
+async function setStoredVideoDisplayName(item = {}, title = '') {
+  const postId = resolveVideoRenameKey(item);
+  if (!postId) {
+    throw new Error('missing_post_id');
+  }
+  const res = await fetch('/v1/admin/cache/video/rename', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAuthHeaders(apiKey)
+    },
+    body: JSON.stringify({
+      post_id: postId,
+      share_link: String(item.share_link || item.shareLink || '').trim(),
+      name: String(item.name || '').trim(),
+      display_name: String(title || '').trim()
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.status !== 'success') {
+    throw new Error(data.detail || 'rename_failed');
+  }
+  return data.result || {};
+}
+
+async function renameLocalVideo(item) {
+  const currentTitle = getStoredVideoDisplayName(item) || item.name || '';
+  const nextTitle = await openVideoRenameDialog(currentTitle);
+  if (nextTitle === null) return;
+  const trimmedTitle = nextTitle.trim();
+  if (!trimmedTitle) {
+    const ok = await confirmAction('清空后将恢复显示原文件名，是否继续？', { okText: '恢复默认' });
+    if (!ok) return;
+  }
+  try {
+    const result = await setStoredVideoDisplayName(item, trimmedTitle);
+    item.display_name = String(result.display_name || '');
+  } catch (error) {
+    showToast('重命名保存失败', 'error');
+    return;
+  }
+  cacheListState.video.loaded = true;
+  renderLocalCacheList('video', cacheListState.video.items);
+  showToast(trimmedTitle ? '重命名已保存' : '已恢复默认名称', 'success');
 }
 
 async function init() {
@@ -828,10 +1026,28 @@ function renderLocalCacheList(type, items) {
       img.className = 'cache-preview';
       nameWrap.appendChild(img);
     }
-    const nameText = document.createElement('span');
-    nameText.className = 'font-mono text-xs text-gray-500';
-    nameText.textContent = item.name;
-    nameWrap.appendChild(nameText);
+    const textWrap = document.createElement('div');
+    textWrap.className = 'min-w-0';
+    const displayName = type === 'video' ? (getStoredVideoDisplayName(item) || item.name) : item.name;
+    const nameText = document.createElement(type === 'video' ? 'button' : 'div');
+    nameText.className = 'font-mono text-xs text-gray-500 break-all text-left';
+    nameText.textContent = displayName;
+    nameText.title = item.name;
+    if (type === 'video') {
+      nameText.type = 'button';
+      nameText.classList.add('hover:text-[var(--geist-foreground)]');
+      nameText.setAttribute('aria-expanded', 'false');
+      nameText.addEventListener('click', () => toggleOriginalFilename(nameText));
+    }
+    textWrap.appendChild(nameText);
+    if (type === 'video' && displayName !== item.name) {
+      const originText = document.createElement('div');
+      originText.className = 'text-[11px] text-[var(--accents-4)] break-all mt-1 hidden';
+      originText.setAttribute('data-role', 'origin-name');
+      originText.textContent = `原文件名：${item.name}`;
+      textWrap.appendChild(originText);
+    }
+    nameWrap.appendChild(textWrap);
     tdName.appendChild(nameWrap);
 
     const tdSize = document.createElement('td');
@@ -844,22 +1060,35 @@ function renderLocalCacheList(type, items) {
 
     const tdActions = document.createElement('td');
     tdActions.className = 'text-center';
-    tdActions.innerHTML = `
-      <div class="cache-list-actions">
-        <button class="cache-icon-button" onclick="viewLocalFile('${type}', '${item.name}')" title="查看">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-        </button>
-        <button class="cache-icon-button" onclick="deleteLocalFile('${type}', '${item.name}')" title="删除">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
-      </div>
-    `;
+    const actionsWrap = document.createElement('div');
+    actionsWrap.className = 'cache-list-actions';
+    actionsWrap.appendChild(createIconButton(
+      '查看',
+      `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"></path>
+        <circle cx="12" cy="12" r="3"></circle>
+      </svg>`,
+      () => viewLocalFile(type, item.name)
+    ));
+    if (type === 'video') {
+      actionsWrap.appendChild(createIconButton(
+        '重命名',
+        `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+        </svg>`,
+        () => renameLocalVideo(item)
+      ));
+    }
+    actionsWrap.appendChild(createIconButton(
+      '删除',
+      `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"></polyline>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+      </svg>`,
+      () => deleteLocalFile(type, item.name)
+    ));
+    tdActions.appendChild(actionsWrap);
 
     tr.appendChild(tdCheck);
     tr.appendChild(tdName);

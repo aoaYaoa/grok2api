@@ -440,6 +440,13 @@ class VideoStartRequest(BaseModel):
     stitch_with_extend: Optional[bool] = True
 
 
+class VideoRenameRequest(BaseModel):
+    post_id: Optional[str] = None
+    share_link: Optional[str] = None
+    name: Optional[str] = None
+    display_name: Optional[str] = ""
+
+
 @router.post("/video/start", dependencies=[Depends(verify_public_key)])
 async def public_video_start(data: VideoStartRequest):
     prompt = (data.prompt or "").strip()
@@ -788,6 +795,23 @@ async def public_video_cache_list(page: int = 1, page_size: int = 100):
     cache_service = CacheService()
     result = cache_service.list_files("video", page=page, page_size=page_size)
     return {"status": "success", **result}
+
+
+@router.post("/video/rename", dependencies=[Depends(verify_public_key)])
+async def public_video_rename(data: VideoRenameRequest):
+    cache_service = CacheService()
+    try:
+        result = cache_service.update_video_display_name(
+            post_id=str(data.post_id or "").strip(),
+            share_link=str(data.share_link or "").strip(),
+            name=str(data.name or "").strip(),
+            display_name=str(data.display_name or "").strip(),
+        )
+        return {"status": "success", "result": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 __all__ = ["router"]

@@ -221,6 +221,26 @@ async def delete_local_item(data: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/cache/video/rename", dependencies=[Depends(verify_app_key)])
+async def rename_local_video(data: dict):
+    """更新本地视频元数据中的展示名"""
+    from app.services.grok.utils.cache import CacheService
+
+    try:
+        cache_service = CacheService()
+        result = cache_service.update_video_display_name(
+            post_id=str(data.get("post_id") or "").strip(),
+            share_link=str(data.get("share_link") or "").strip(),
+            name=str(data.get("name") or "").strip(),
+            display_name=str(data.get("display_name") or "").strip(),
+        )
+        return {"status": "success", "result": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/cache/online/clear", dependencies=[Depends(verify_app_key)])
 async def clear_online(data: dict):
     """清理在线缓存"""
@@ -442,4 +462,3 @@ async def load_cache_async(data: dict):
         "task_id": task.id,
         "total": len(selected_tokens),
     }
-

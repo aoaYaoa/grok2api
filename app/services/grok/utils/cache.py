@@ -52,6 +52,19 @@ class CacheService:
             metadata_by_post_id[post_id] = payload
         return metadata_by_post_id
 
+    def _write_video_metadata(self, post_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        post_text = str(post_id or "").strip()
+        if not post_text:
+            raise ValueError("post_id is required")
+        meta_dir = self._media_meta_dir()
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = meta_dir / f"{post_text}.json"
+        metadata_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return payload
+
     @staticmethod
     def _extract_post_id_from_name(name: str) -> str:
         text = str(name or "").strip()
@@ -131,8 +144,47 @@ class CacheService:
             item["media_url"] = str(metadata.get("media_url") or "").strip()
             item["thumbnail_url"] = str(metadata.get("thumbnail_url") or "").strip()
             item["local_url"] = str(metadata.get("local_url") or "").strip()
+            item["display_name"] = str(metadata.get("display_name") or "").strip()
 
         return {"total": total, "page": page, "page_size": page_size, "items": paged}
+
+    def update_video_display_name(
+        self,
+        *,
+        post_id: str = "",
+        share_link: str = "",
+        name: str = "",
+        display_name: str = "",
+    ) -> Dict[str, Any]:
+        resolved_post_id = str(post_id or "").strip()
+        if not resolved_post_id and share_link:
+            match = re.search(
+                r"/imagine/post/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+                str(share_link or "").strip(),
+            )
+            if match:
+                resolved_post_id = match.group(1)
+        if not resolved_post_id and name:
+            resolved_post_id = self._extract_post_id_from_name(name)
+        if not resolved_post_id:
+            raise ValueError("Unable to resolve post_id")
+
+        metadata_by_post_id = self._load_video_metadata()
+        payload = dict(metadata_by_post_id.get(resolved_post_id) or {})
+        payload["post_id"] = resolved_post_id
+        payload["media_type"] = str(payload.get("media_type") or "video").strip() or "video"
+        safe_display_name = str(display_name or "").strip()
+        if safe_display_name:
+            payload["display_name"] = safe_display_name
+        else:
+            payload.pop("display_name", None)
+        self._write_video_metadata(resolved_post_id, payload)
+        return {
+            "post_id": resolved_post_id,
+            "display_name": str(payload.get("display_name") or "").strip(),
+            "share_link": str(payload.get("share_link") or "").strip(),
+            "metadata_path": str(self._media_meta_dir() / f"{resolved_post_id}.json"),
+        }
 
     def delete_file(self, media_type: str, name: str) -> Dict[str, Any]:
         cache_dir = self._cache_dir(media_type)
