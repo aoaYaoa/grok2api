@@ -17,6 +17,8 @@ image_format = "url"
 video_format = "html"
 # 是否启用临时对话模式
 temporary = true
+# 自定义人格/提示词（可选）
+custom_instruction = ""
 # 是否禁用 Grok 记忆功能
 disable_memory = true
 # 是否默认启用流式响应
