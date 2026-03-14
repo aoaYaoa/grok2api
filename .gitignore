@@ -63,3 +63,6 @@ data/config.toml
 
 # Local backup files
 *.bak_*
+
+# Worktrees
+.worktrees/
