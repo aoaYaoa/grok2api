@@ -1222,8 +1222,20 @@ class VideoService:
 
     async def create_image_post(self, token: str, image_url: str) -> str:
         """Create image post and return post ID."""
+        media_url = str(image_url or "").strip()
+        if media_url.startswith("data:"):
+            upload_service = UploadService()
+            try:
+                _, file_uri = await upload_service.upload_file(media_url, token)
+            finally:
+                await upload_service.close()
+            media_url = _normalize_assets_url(file_uri)
+            logger.info(
+                "Image post source uploaded: "
+                f"original=data-uri, media_url={media_url[:120]}"
+            )
         return await self.create_post(
-            token, prompt="", media_type="MEDIA_POST_TYPE_IMAGE", media_url=image_url
+            token, prompt="", media_type="MEDIA_POST_TYPE_IMAGE", media_url=media_url
         )
 
     async def _resolve_reference_source_url(
