@@ -1424,6 +1424,10 @@ class ImageCollectProcessor(BaseProcessor):
                     urls = _collect_images(mr)
                 if not urls and resp:
                     urls = _collect_images(resp)
+                if not urls and (data.get("result") if isinstance(data, dict) else None):
+                    urls = _collect_images(data.get("result"))
+                if not urls:
+                    urls = _collect_images(data)
 
                 if urls:
                     for url in urls:

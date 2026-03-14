@@ -106,6 +106,26 @@ class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
         images = await processor.process(stream())
         self.assertEqual(images, ['https://example.com/resp-root.jpg'])
 
+    async def test_collect_images_from_result_root_urls(self):
+        from app.services.grok.services.image_edit import ImageCollectProcessor
+        processor = ImageCollectProcessor('grok-image-edit-test', response_format='url')
+
+        async def fake_process_url(path, media_type='image'):
+            return path
+
+        processor.process_url = fake_process_url  # type: ignore[assignment]
+
+        async def stream():
+            payload = {
+                'result': {
+                    'imageUrls': ['https://example.com/result-root.jpg']
+                }
+            }
+            yield orjson.dumps(payload)
+
+        images = await processor.process(stream())
+        self.assertEqual(images, ['https://example.com/result-root.jpg'])
+
 
 if __name__ == '__main__':
     unittest.main()
