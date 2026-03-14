@@ -3,6 +3,7 @@ import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+import orjson
 
 if 'aiohttp' not in sys.modules:
     aiohttp = types.ModuleType('aiohttp')
@@ -80,6 +81,30 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.details.get('error'), 'empty_result')
         self.assertEqual(ctx.exception.details.get('chat_connected'), True)
         self.assertEqual(ctx.exception.details.get('image_count'), 0)
+
+
+class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collect_images_from_response_root_urls(self):
+        from app.services.grok.services.image_edit import ImageCollectProcessor
+        processor = ImageCollectProcessor('grok-image-edit-test', response_format='url')
+
+        async def fake_process_url(path, media_type='image'):
+            return path
+
+        processor.process_url = fake_process_url  # type: ignore[assignment]
+
+        async def stream():
+            payload = {
+                'result': {
+                    'response': {
+                        'imageUrls': ['https://example.com/resp-root.jpg']
+                    }
+                }
+            }
+            yield orjson.dumps(payload)
+
+        images = await processor.process(stream())
+        self.assertEqual(images, ['https://example.com/resp-root.jpg'])
 
 
 if __name__ == '__main__':
