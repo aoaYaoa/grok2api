@@ -23,7 +23,11 @@
   const editProgressWrap = document.getElementById('editProgressWrap');
   const editProgressBar = document.getElementById('editProgressBar');
   const editProgressText = document.getElementById('editProgressText');
+  const previewLightbox = document.getElementById('previewLightbox');
+  const previewLightboxImg = document.getElementById('previewLightboxImg');
+  const previewLightboxDownload = document.getElementById('previewLightboxDownload');
   const REFERENCE_LIMIT = 5;
+  const WORKBENCH_IMAGE_ACTION_PROMPT_KEY = 'workbench_image_action_prompt_draft';
 
   const state = {
     editing: false,
@@ -50,6 +54,65 @@
     if (typeof showToast === 'function') {
       showToast(message, type);
     }
+  }
+
+  function rememberWorkbenchActionPrompt(value) {
+    const safe = String(value || '');
+    try {
+      if (!safe.trim()) {
+        window.localStorage.removeItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY);
+      } else {
+        window.localStorage.setItem(WORKBENCH_IMAGE_ACTION_PROMPT_KEY, safe);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function bindWorkbenchActionPrompt(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    if (textarea.dataset.actionPromptBound === '1') return;
+    const sync = () => rememberWorkbenchActionPrompt(textarea.value);
+    textarea.addEventListener('input', sync);
+    textarea.addEventListener('change', sync);
+    textarea.addEventListener('blur', sync);
+    textarea.addEventListener('prompt-enhance-applied', sync);
+    textarea.dataset.actionPromptBound = '1';
+  }
+
+  function mountWorkbenchActionPromptEnhancer(textarea) {
+    if (!(textarea instanceof HTMLTextAreaElement)) return;
+    bindWorkbenchActionPrompt(textarea);
+    const api = window.PromptEnhancer;
+    if (api && typeof api.mount === 'function') {
+      api.mount(textarea);
+    }
+    const wrapper = textarea.parentElement;
+    if (wrapper && wrapper.classList.contains('prompt-enhance-wrap')) {
+      wrapper.classList.add('history-prompt-enhance-wrap');
+    }
+  }
+
+  function openPreviewLightbox(url) {
+    if (!previewLightbox || !previewLightboxImg) return;
+    const safeUrl = String(url || '').trim();
+    if (!safeUrl) {
+      toast('未找到可预览的图片', 'warning');
+      return;
+    }
+    previewLightboxImg.src = safeUrl;
+    if (previewLightboxDownload) {
+      previewLightboxDownload.href = safeUrl;
+      previewLightboxDownload.setAttribute('download', `workbench-preview-${Date.now()}.jpg`);
+    }
+    previewLightbox.classList.add('active');
+    previewLightbox.setAttribute('aria-hidden', 'false');
+  }
+
+  function closePreviewLightbox() {
+    if (!previewLightbox) return;
+    previewLightbox.classList.remove('active');
+    previewLightbox.setAttribute('aria-hidden', 'true');
   }
 
   function getParentMemoryApi() {
@@ -1086,6 +1149,9 @@
     img.loading = 'lazy';
     img.decoding = 'async';
     item.appendChild(img);
+    item.addEventListener('click', () => {
+      openPreviewLightbox(primaryUrl);
+    });
     currentGallery.appendChild(item);
 
     currentGallery.classList.remove('hidden');
@@ -1153,6 +1219,232 @@
     setStatus('done', `已切换到历史版本 #${entry.round}`);
   }
 
+  async function runHistoryImageAction(entry, action, promptInput, continueBtn, outpaintBtn) {
+    if (!entry) return;
+    const label = action === 'outpaint' ? '扩图' : '继续';
+    if (state.editing) {
+      if (workbenchEditAbortController) {
+        workbenchEditAbortController.abort();
+      }
+      return;
+    }
+
+    const promptRaw = String(promptInput ? promptInput.value : '').trim();
+    if (!promptRaw) {
+      toast('请输入编辑提示词', 'warning');
+      return;
+    }
+    rememberWorkbenchActionPrompt(promptRaw);
+
+    const references = state.referenceImages
+      .slice(0, REFERENCE_LIMIT)
+      .map((item) => String(item.data || '').trim())
+      .filter(Boolean);
+    const referenceItems = state.referenceImages
+      .slice(0, REFERENCE_LIMIT)
+      .map((item, index) => {
+        const imageUrl = String(item.data || '').trim();
+        const sourceImageUrl = String(item.sourceImageUrl || imageUrl || '').trim();
+        const parentPostId = String(item.parentPostId || '').trim();
+        const originalId = String(item.originalId || parentPostId || extractParentPostId(sourceImageUrl || imageUrl) || '').trim();
+        return {
+          image_url: imageUrl,
+          source_image_url: sourceImageUrl,
+          parent_post_id: parentPostId,
+          original_id: originalId,
+          mention_alias: item.mentionAlias || `Image ${index + 1}`,
+        };
+      })
+      .filter((item) => item.image_url || item.source_image_url || item.parent_post_id);
+    const useReferenceMergeMode = references.length >= 2;
+
+    const parentPostId = String(entry.parentPostId || extractParentPostId(entry.imageUrl) || '').trim();
+    const sourceImageUrl = pickSourceImageUrl(entry, parentPostId, entry.imageUrl || '');
+    const actionMeta = {
+      mode: useReferenceMergeMode ? 'upload' : action,
+      sourceImageUrl: pickSourceImageUrl(entry, parentPostId, entry.imageUrl || ''),
+    };
+
+    if (!parentPostId && !references.length) {
+      toast('当前记录缺少 parentPostId', 'warning');
+      return;
+    }
+
+    if (continueBtn) continueBtn.disabled = true;
+    if (outpaintBtn) outpaintBtn.disabled = true;
+    if (promptInput) promptInput.disabled = true;
+    const activeBtn = action === 'outpaint' ? outpaintBtn : continueBtn;
+    const originalText = activeBtn ? String(activeBtn.textContent || '') : '';
+    if (activeBtn) activeBtn.textContent = `${label}中...`;
+
+    let authHeader = '';
+    try {
+      authHeader = await ensurePublicAuth();
+    } catch (e) {
+      toast(String(e.message || e), 'error');
+      if (String(e.message || '').includes('登录')) {
+        window.location.href = '/login';
+      }
+      if (activeBtn) activeBtn.textContent = originalText;
+      if (continueBtn) continueBtn.disabled = false;
+      if (outpaintBtn) outpaintBtn.disabled = false;
+      if (promptInput) promptInput.disabled = false;
+      return;
+    }
+
+    const body = {
+      prompt: promptRaw,
+      stream: true,
+    };
+
+    if (references.length) {
+      body.image_references = references;
+      body.reference_items = referenceItems;
+      const firstRef = references[0];
+      if (firstRef.startsWith('data:image/')) {
+        body.image_base64 = firstRef;
+      } else {
+        body.image_url = firstRef;
+      }
+    }
+
+    if (parentPostId && !useReferenceMergeMode) {
+      body.parent_post_id = parentPostId;
+      if (sourceImageUrl) {
+        body.source_image_url = sourceImageUrl;
+      }
+      if (!body.reference_items || !body.reference_items.length) {
+        body.reference_items = [{
+          image_url: String(sourceImageUrl || '').trim(),
+          source_image_url: String(sourceImageUrl || '').trim(),
+          parent_post_id: parentPostId,
+          original_id: parentPostId,
+          mention_alias: 'Image 1',
+        }];
+      }
+    } else if (!references.length) {
+      toast('请先添加参考图', 'warning');
+      if (activeBtn) activeBtn.textContent = originalText;
+      if (continueBtn) continueBtn.disabled = false;
+      if (outpaintBtn) outpaintBtn.disabled = false;
+      if (promptInput) promptInput.disabled = false;
+      return;
+    }
+
+    setEditing(true);
+    forceSubmitButtonAbortClickable();
+    startEditProgress();
+    workbenchEditAbortController = new AbortController();
+
+    try {
+      const payload = await requestWorkbenchEditStream(authHeader, body, (evt) => {
+        forceSubmitButtonAbortClickable();
+        const next = Number(evt && evt.progress ? evt.progress : 0);
+        const message = String((evt && evt.message) || '').trim();
+        if (Number.isFinite(next) && next > 0) {
+          const safe = Math.max(editProgressValue, Math.min(99, next));
+          setEditProgress(safe, message ? `${message} · ${safe}%` : `编辑中 ${safe}%`);
+          setStatus('running', message || `编辑中 ${safe}%`);
+        } else if (message) {
+          setEditProgress(editProgressValue, message);
+          setStatus('running', message);
+        }
+      }, workbenchEditAbortController ? workbenchEditAbortController.signal : undefined);
+
+      const imageUrls = Array.isArray(payload?.data)
+        ? payload.data
+          .map((item) => String((item && item.url) || '').trim())
+          .filter(Boolean)
+        : [];
+      const imageUrl = imageUrls[0] || '';
+      if (!imageUrl) {
+        throw new Error('返回结果缺少图片 URL');
+      }
+
+      const previousParentPostId = parentPostId;
+      const generatedParent = String(
+        payload.current_parent_post_id
+        || payload.generated_parent_post_id
+        || payload.input_parent_post_id
+        || extractParentPostId(imageUrl)
+      ).trim();
+      const resolvedParentPostId = generatedParent || previousParentPostId;
+
+      const resolvedSourceImageUrl = pickSourceImageUrl(
+        {
+          current_source_image_url: payload.current_source_image_url,
+          source_image_url: payload.source_image_url,
+          imageUrl,
+        },
+        resolvedParentPostId,
+        sourceImageUrl || actionMeta.sourceImageUrl
+      );
+
+      const mode = String(payload.mode || actionMeta.mode || (parentPostId ? 'parent_post' : 'upload')).trim();
+      const elapsedMs = Number(payload.elapsed_ms || 0);
+
+      state.currentParentPostId = resolvedParentPostId;
+      state.currentSourceImageUrl = resolvedSourceImageUrl;
+      state.currentModeValue = mode || 'parent_post';
+      if (parentPostInput) {
+        parentPostInput.value = state.currentParentPostId || '';
+      }
+      setPreviewImages(imageUrls);
+      updateMeta();
+
+      state.editRound += 1;
+      const createdAt = Date.now();
+      const historyEntries = imageUrls.map((url, index) => {
+        const perParentPostId = String(extractParentPostId(url) || resolvedParentPostId || '').trim();
+        return {
+          id: `${createdAt}_${index}_${Math.random().toString(16).slice(2, 8)}`,
+          round: state.editRound,
+          roundIndex: index + 1,
+          roundTotal: imageUrls.length,
+          prompt: promptRaw,
+          mode: state.currentModeValue,
+          imageUrl: url,
+          imageUrls,
+          parentPostId: perParentPostId,
+          sourceImageUrl: String(url || resolvedSourceImageUrl || '').trim(),
+          elapsedMs: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : 0,
+          createdAt,
+        };
+      });
+      state.history = [...historyEntries, ...state.history];
+      renderHistory();
+      historyEntries.forEach((historyEntry) => {
+        rememberParentPost({
+          parentPostId: historyEntry.parentPostId || resolvedParentPostId,
+          sourceImageUrl: historyEntry.sourceImageUrl || resolvedSourceImageUrl,
+          imageUrl: historyEntry.imageUrl || imageUrl,
+          origin: 'workbench_history_action',
+        });
+      });
+
+      finishEditProgress(true, '编辑完成 100%');
+      setStatus('done', `编辑完成 · round #${state.editRound}（${imageUrls.length} 张）`);
+      toast('编辑成功，已更新当前画面', 'success');
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        finishEditProgress(false, '已中止');
+        setStatus('error', '已中止');
+        toast('已中止编辑', 'warning');
+      } else {
+        finishEditProgress(false, '编辑失败');
+        setStatus('error', '编辑失败');
+        toast(String(e.message || e), 'error');
+      }
+    } finally {
+      workbenchEditAbortController = null;
+      setEditing(false);
+      if (activeBtn) activeBtn.textContent = originalText;
+      if (continueBtn) continueBtn.disabled = false;
+      if (outpaintBtn) outpaintBtn.disabled = false;
+      if (promptInput) promptInput.disabled = false;
+    }
+  }
+
   function renderHistory() {
     if (!historyList || !historyEmpty || !historyCount) return;
     historyList.innerHTML = '';
@@ -1174,6 +1466,10 @@
       thumb.alt = `history-${entry.round}`;
       thumb.loading = 'lazy';
       thumb.decoding = 'async';
+      thumb.addEventListener('click', () => {
+        const previewUrl = pickPreviewUrl(entry, entry.parentPostId);
+        openPreviewLightbox(previewUrl);
+      });
 
       const main = document.createElement('div');
       main.className = 'history-main';
@@ -1192,6 +1488,47 @@
       const prompt = document.createElement('div');
       prompt.className = 'history-prompt';
       prompt.textContent = maskPrompt(entry.prompt);
+
+      const actionRow = document.createElement('div');
+      actionRow.className = 'history-image-action-row';
+
+      const actionTip = document.createElement('div');
+      actionTip.className = 'history-line';
+      actionTip.textContent = '提示：填写提示词后继续/扩图，不会自动回填。';
+
+      const actionPrompt = document.createElement('textarea');
+      actionPrompt.className = 'geist-input history-image-action-prompt';
+      actionPrompt.rows = 2;
+      actionPrompt.placeholder = '提示词（可选，可增强）';
+      bindWorkbenchActionPrompt(actionPrompt);
+
+      actionRow.appendChild(actionTip);
+      actionRow.appendChild(actionPrompt);
+      mountWorkbenchActionPromptEnhancer(actionPrompt);
+
+      const actionButtons = document.createElement('div');
+      actionButtons.className = 'history-image-action-buttons';
+
+      const continueBtn = document.createElement('button');
+      continueBtn.type = 'button';
+      continueBtn.className = 'geist-button-outline history-image-continue-btn';
+      continueBtn.textContent = '继续';
+
+      const outpaintBtn = document.createElement('button');
+      outpaintBtn.type = 'button';
+      outpaintBtn.className = 'geist-button history-image-outpaint-btn';
+      outpaintBtn.textContent = '扩图';
+
+      continueBtn.addEventListener('click', () => {
+        runHistoryImageAction(entry, 'continue', actionPrompt, continueBtn, outpaintBtn);
+      });
+      outpaintBtn.addEventListener('click', () => {
+        runHistoryImageAction(entry, 'outpaint', actionPrompt, continueBtn, outpaintBtn);
+      });
+
+      actionButtons.appendChild(continueBtn);
+      actionButtons.appendChild(outpaintBtn);
+      actionRow.appendChild(actionButtons);
 
       const actions = document.createElement('div');
       actions.className = 'history-actions';
@@ -1230,6 +1567,7 @@
       main.appendChild(line1);
       main.appendChild(line2);
       main.appendChild(prompt);
+      main.appendChild(actionRow);
       main.appendChild(actions);
 
       item.appendChild(thumb);
@@ -1575,6 +1913,15 @@
   }
 
   function bindEvents() {
+    if (previewLightbox) {
+      previewLightbox.addEventListener('click', (event) => {
+        const target = event.target;
+        if (target === previewLightbox || (target && target.matches('[data-preview-close]'))) {
+          closePreviewLightbox();
+        }
+      });
+    }
+
     if (selectSeedBtn && seedImageInput) {
       selectSeedBtn.addEventListener('click', () => {
         seedImageInput.click();
