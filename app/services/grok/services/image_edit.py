@@ -378,7 +378,7 @@ class ImageEditService:
                     "modelMap": {
                         "imageEditModel": "imagine",
                         "imageEditModelConfig": {
-                            "imageReferences": image_urls,
+                            "imageReferences": image_urls[:1],
                         },
                     }
                 }
@@ -980,7 +980,7 @@ class ImageEditService:
                 )
                 tool_overrides = {"imageGen": True}
                 image_edit_config = {
-                    "imageReferences": request_urls,
+                    "imageReferences": request_urls[:1],
                 }
                 if effective_parent_post_id:
                     image_edit_config["parentPostId"] = effective_parent_post_id
