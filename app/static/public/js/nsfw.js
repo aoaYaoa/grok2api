@@ -2435,13 +2435,15 @@
   updateVideoButtons();
 
   /**
-   * NSFW 工作台 双行 Sticky Bar 初始化
+   * NSFW 工作台 双行 Sticky Bar 初始化（移动端专属）
    */
   function initNsfwStickyBar() {
-    /* --- 代理映射 --- */
+    /* 仅移动端执行，PC 下退出避免干扰 */
+    if (!window.matchMedia('(max-width: 900px)').matches) return;
+
+    /* --- 代理映射（只代理两个垃圾桶，imNextBatchBtn 已移除） --- */
     const proxyMap = {
       imClearImagesBtn: 'clearImagesBtn',
-      imNextBatchBtn: 'nextBatchBtn',
       imClearVideosBtn: 'clearVideosBtn',
     };
     Object.entries(proxyMap).forEach(([sId, oId]) => {
@@ -2450,7 +2452,7 @@
       if (sEl && oEl) sEl.addEventListener('click', () => oEl.click());
     });
 
-    /* --- 候选图主按钮：生成6张/停止候选 --- */
+    /* --- 候选图主按钮：生成6张 / 再来6张 / 停止候选 --- */
     const imGenBtn = document.getElementById('imGenerateBtn');
     const genPlayIcon = imGenBtn && imGenBtn.querySelector('.nsfw-btn-play');
     const genStopIcon = imGenBtn && imGenBtn.querySelector('.nsfw-btn-stop');
@@ -2459,21 +2461,41 @@
     function syncGenBtn() {
       if (!imGenBtn) return;
       const isRunning = generateBatchBtn && generateBatchBtn.dataset.running === '1';
+      /* 判断是否已经有候选图：imageCount 不为 "0 张" */
+      const hasImages = imageCount && String(imageCount.textContent || '').trim() !== '0 张';
       imGenBtn.classList.toggle('is-stop', isRunning);
       if (genPlayIcon) genPlayIcon.style.display = isRunning ? 'none' : '';
       if (genStopIcon) genStopIcon.style.display = isRunning ? '' : 'none';
-      if (genLabel) genLabel.textContent = isRunning ? '停止候选' : '生成 6 张';
+      if (genLabel) {
+        if (isRunning) {
+          genLabel.textContent = '停止候选';
+        } else if (hasImages) {
+          genLabel.textContent = '再来 6 张';
+        } else {
+          genLabel.textContent = '生成 6 张';
+        }
+      }
     }
 
     if (imGenBtn) {
       imGenBtn.addEventListener('click', () => {
         const isRunning = generateBatchBtn && generateBatchBtn.dataset.running === '1';
-        (isRunning ? stopBatchBtn : generateBatchBtn) && (isRunning ? stopBatchBtn : generateBatchBtn).click();
+        if (isRunning) {
+          stopBatchBtn && stopBatchBtn.click();
+        } else {
+          /* 再来一批 或 生成 6 张，都走 nextBatchBtn（已有图时） / generateBatchBtn（无图时） */
+          const hasImages = imageCount && String(imageCount.textContent || '').trim() !== '0 张';
+          (hasImages ? nextBatchBtn : generateBatchBtn) && (hasImages ? nextBatchBtn : generateBatchBtn).click();
+        }
       });
     }
-    /* 观察 generateBatchBtn 的 data-running 属性和 disabled 状态 */
+
     if (generateBatchBtn) {
       new MutationObserver(syncGenBtn).observe(generateBatchBtn, { attributes: true, attributeFilter: ['data-running', 'disabled'] });
+    }
+    /* 同时观察 imageCount 变化以切换按钮文字 */
+    if (imageCount) {
+      new MutationObserver(syncGenBtn).observe(imageCount, { characterData: true, childList: true, subtree: true });
     }
     syncGenBtn();
 
@@ -2505,7 +2527,7 @@
     }
     syncVideoBtn();
 
-    /* --- 候选图已选状态同步 → 第二行高亮 --- */
+    /* --- 候选图已选状态同步 → 第二行文字高亮（垃圾桶始终可点） --- */
     const videoRow = document.getElementById('nsfwVideoRow');
     const selectedLabel = document.getElementById('nsfwSelectedLabel');
 
@@ -2514,7 +2536,6 @@
       const text = String(selectedMeta.textContent || '').trim();
       const hasSelected = !text.includes('未选择');
       videoRow.classList.toggle('has-selected', hasSelected);
-      // 截短显示
       if (hasSelected) {
         selectedLabel.textContent = text.length > 22 ? text.slice(0, 22) + '…' : text;
       } else {
@@ -2528,7 +2549,7 @@
       syncSelected();
     }
 
-    /* --- 设置 Bottom Sheet（画面比例、并发、分辨率、时长、NSFW） --- */
+    /* --- 设置 Bottom Sheet --- */
     const settingsBtn = document.getElementById('nsfwSettingsBtn');
     const settingsOverlay = document.getElementById('nsfwSettingsOverlay');
 
@@ -2547,7 +2568,7 @@
       titleEl.textContent = '生成参数';
       settingsSheet.appendChild(titleEl);
 
-      // 将参数表单（画面比例、并发、分辨率、时长、NSFW 这些 field，不含 textarea）移入 sheet
+      /* 将非 textarea 的参数 field 移入 sheet */
       const formGrid = document.querySelector('.form-grid');
       if (formGrid) {
         const nonWideFields = formGrid.querySelectorAll('.field:not(.field-wide)');

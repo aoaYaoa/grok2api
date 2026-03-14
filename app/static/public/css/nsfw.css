@@ -1440,3 +1440,36 @@ html[data-theme='dark'] .nsfw-settings-sheet {
     gap: 0;
   }
 }
+
+/* ============================
+   PC 端隐藏移动端专属组件（默认隐藏）
+   ============================ */
+.nsfw-sticky-bar,
+.nsfw-settings-overlay {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  /* Sticky Bar 移动端恢复显示 */
+  .nsfw-sticky-bar {
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  /* 隐藏"操作"面板（按钮已由 Sticky Bar 承担） */
+  .top-grid > .panel:nth-child(2) {
+    display: none;
+  }
+
+  /* 第二行：整行始终可点击（垃圾桶不依赖选中），只文字颜色变化 */
+  .nsfw-sticky-row--video {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
+  /* 视频主按钮在禁用时自行淡化 */
+  #imStartVideoBtn:disabled {
+    opacity: 0.38;
+    cursor: not-allowed;
+  }
+}

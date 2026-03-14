@@ -1523,3 +1523,17 @@ html[data-theme='dark'] .im-settings-sheet {
     grid-row: auto !important;
   }
 }
+
+/* ============================
+   PC 端隐藏 Imagine 移动端专属组件
+   ============================ */
+.im-sticky-bar,
+.im-settings-overlay {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  .im-sticky-bar {
+    display: flex !important;
+  }
+}

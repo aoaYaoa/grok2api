@@ -2529,6 +2529,8 @@
    * 移动端 Sticky Bar 初始化
    */
   function initStickyBar() {
+    /* 移动端专属：PC 下直接退出，避免 DOM 被移动 */
+    if (!window.matchMedia("(max-width: 900px)").matches) return;
     /* 图标按钮代理 */
     const proxyMap = {
       imClearBtn: 'clearBtn',
