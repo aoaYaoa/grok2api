@@ -65,17 +65,8 @@ body {
   background-color: var(--bg);
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
-  overflow-y: auto;
   width: 100%;
-  min-height: 100%;
   touch-action: manipulation;
-}
-
-@supports (min-height: 100dvh) {
-  body {
-    min-height: 100dvh;
-  }
 }
 
 #app-header {
