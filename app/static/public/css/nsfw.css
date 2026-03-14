@@ -1552,3 +1552,23 @@ html[data-theme='dark'] .nsfw-settings-sheet {
     color: #e2e8f0 !important;
   }
 }
+
+/* ============================
+   nsfw Sticky Bar：让两行操作区等宽，垃圾桶对齐
+   ============================ */
+@media (max-width: 900px) {
+  /* 固定两个操作区等宽 */
+  .nsfw-image-actions,
+  .nsfw-video-actions {
+    width: 160px !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* 两个主按钮 min-width 统一，内容撑开至相同宽度 */
+  .nsfw-main-btn,
+  #imGenerateBtn,
+  #imStartVideoBtn {
+    min-width: 108px !important;
+    flex: 1 !important;
+  }
+}
