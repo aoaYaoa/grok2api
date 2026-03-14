@@ -2111,16 +2111,54 @@ class VideoService:
                             item.get("source_image_url") or item.get("image_url") or ""
                         ).strip()
                         if single_parent_post_id:
-                            response = await service.generate_from_parent_post(
-                                token=token,
-                                prompt=prompt,
-                                parent_post_id=single_parent_post_id,
-                                source_image_url=single_source_image_url,
-                                aspect_ratio=aspect_ratio,
-                                video_length=video_length,
-                                resolution=generation_resolution,
-                                preset=preset,
-                            )
+                            if not has_parent_token_binding:
+                                fallback_image_url = active_image_url
+                                if not fallback_image_url and single_source_image_url:
+                                    upload_service = UploadService()
+                                    try:
+                                        _, file_uri = await upload_service.upload_file(
+                                            single_source_image_url, token
+                                        )
+                                        fallback_image_url = _normalize_assets_url(file_uri)
+                                    finally:
+                                        await upload_service.close()
+                                if fallback_image_url:
+                                    logger.warning(
+                                        "Video reference parentPost fallback to uploaded source image: "
+                                        f"parent_post_id={single_parent_post_id}, token={_token_tag(token)}, "
+                                        f"image_url={fallback_image_url}"
+                                    )
+                                    response = await service.generate_from_image(
+                                        token=token,
+                                        prompt=prompt,
+                                        image_url=fallback_image_url,
+                                        aspect_ratio=aspect_ratio,
+                                        video_length=video_length,
+                                        resolution=generation_resolution,
+                                        preset=preset,
+                                    )
+                                else:
+                                    response = await service.generate_from_parent_post(
+                                        token=token,
+                                        prompt=prompt,
+                                        parent_post_id=single_parent_post_id,
+                                        source_image_url=single_source_image_url,
+                                        aspect_ratio=aspect_ratio,
+                                        video_length=video_length,
+                                        resolution=generation_resolution,
+                                        preset=preset,
+                                    )
+                            else:
+                                response = await service.generate_from_parent_post(
+                                    token=token,
+                                    prompt=prompt,
+                                    parent_post_id=single_parent_post_id,
+                                    source_image_url=single_source_image_url,
+                                    aspect_ratio=aspect_ratio,
+                                    video_length=video_length,
+                                    resolution=generation_resolution,
+                                    preset=preset,
+                                )
                         else:
                             response = await service.generate_from_image(
                                 token=token,
