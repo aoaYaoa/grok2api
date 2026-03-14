@@ -115,3 +115,69 @@ html[data-theme='dark'] .toast-error .toast-icon {
   background: rgba(248, 113, 113, 0.18);
   color: #f87171;
 }
+
+/* Notice Dialog */
+.notice-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.notice-dialog {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 480px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+.notice-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accents-7);
+  margin-bottom: 12px;
+}
+
+.notice-dialog-content {
+  font-size: 13px;
+  color: var(--accents-5);
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+.notice-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.notice-dialog-confirm {
+  background: #000;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.notice-dialog-confirm:hover {
+  opacity: 0.8;
+}
+
+html[data-theme='dark'] .notice-dialog {
+  background: #131a24;
+  color: #e6edf3;
+}
+
+html[data-theme='dark'] .notice-dialog-confirm {
+  background: #e6edf3;
+  color: #0b0f14;
+}
