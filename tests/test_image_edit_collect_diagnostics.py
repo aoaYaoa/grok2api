@@ -126,6 +126,32 @@ class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
         images = await processor.process(stream())
         self.assertEqual(images, ['https://example.com/result-root.jpg'])
 
+    async def test_collect_tracks_payload_keys_when_no_images(self):
+        from app.services.grok.services.image_edit import ImageCollectProcessor
+        processor = ImageCollectProcessor('grok-image-edit-test', response_format='url')
+
+        async def stream():
+            payload = {
+                'result': {
+                    'response': {
+                        'modelResponse': {
+                            'status': 'ok'
+                        }
+                    }
+                },
+                'metadata': {
+                    'foo': 'bar'
+                }
+            }
+            yield orjson.dumps(payload)
+
+        images = await processor.process(stream())
+        self.assertEqual(images, [])
+        self.assertEqual(processor.last_payload_keys, ['metadata', 'result'])
+        self.assertEqual(processor.last_result_keys, ['response'])
+        self.assertEqual(processor.last_response_keys, ['modelResponse'])
+        self.assertEqual(processor.last_model_response_keys, ['status'])
+
 
 if __name__ == '__main__':
     unittest.main()

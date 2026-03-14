@@ -1177,9 +1177,10 @@ class ImageEditService:
                 response_format=response_format,
                 progress_cb=tracked_progress_cb,
             )
-            return await processor.process(response)
+            images = await processor.process(response)
+            return images, processor
 
-        all_images = await _call_edit()
+        all_images, processor = await _call_edit()
 
         if not all_images:
             details = {
@@ -1188,6 +1189,10 @@ class ImageEditService:
                 "image_count": 0,
                 "last_event": collect_state["last_event"],
                 "reference_count": reference_count,
+                "payload_keys": getattr(processor, "last_payload_keys", []),
+                "result_keys": getattr(processor, "last_result_keys", []),
+                "response_keys": getattr(processor, "last_response_keys", []),
+                "model_response_keys": getattr(processor, "last_model_response_keys", []),
             }
             message = (
                 "Image edit upstream connected but returned no image URLs"
@@ -1243,7 +1248,11 @@ class ImageStreamProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                resp = data.get("result", {}).get("response", {})
+                result_root = data.get("result", {}) if isinstance(data, dict) else {}
+                resp = result_root.get("response", {}) if isinstance(result_root, dict) else {}
+                self.last_payload_keys = self._sorted_keys(data)
+                self.last_result_keys = self._sorted_keys(result_root)
+                self.last_response_keys = self._sorted_keys(resp)
 
                 # Image generation progress
                 if img := resp.get("streamingImageGenerationResponse"):
@@ -1378,6 +1387,16 @@ class ImageCollectProcessor(BaseProcessor):
         super().__init__(model, token)
         self.response_format = response_format
         self.progress_cb = progress_cb
+        self.last_payload_keys: list[str] = []
+        self.last_result_keys: list[str] = []
+        self.last_response_keys: list[str] = []
+        self.last_model_response_keys: list[str] = []
+
+    @staticmethod
+    def _sorted_keys(value: Any) -> list[str]:
+        if not isinstance(value, dict):
+            return []
+        return sorted([str(key) for key in value.keys()])
 
     async def _emit_progress(
         self, event: str, progress: int, message: str, **extra: Any
@@ -1410,7 +1429,11 @@ class ImageCollectProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                resp = data.get("result", {}).get("response", {})
+                result_root = data.get("result", {}) if isinstance(data, dict) else {}
+                resp = result_root.get("response", {}) if isinstance(result_root, dict) else {}
+                self.last_payload_keys = self._sorted_keys(data)
+                self.last_result_keys = self._sorted_keys(result_root)
+                self.last_response_keys = self._sorted_keys(resp)
                 if not chat_connected_emitted and resp:
                     chat_connected_emitted = True
                     await self._emit_progress(
@@ -1420,7 +1443,8 @@ class ImageCollectProcessor(BaseProcessor):
                     )
 
                 urls = []
-                if mr := resp.get("modelResponse"):
+                if mr := (resp.get("modelResponse") if isinstance(resp, dict) else None):
+                    self.last_model_response_keys = self._sorted_keys(mr)
                     urls = _collect_images(mr)
                 if not urls and resp:
                     urls = _collect_images(resp)
