@@ -604,6 +604,10 @@ body {
   pointer-events: auto;
 }
 
+.prompt-editor-shell > .prompt-enhance-wrap > .inline-submit-btn {
+  pointer-events: auto;
+}
+
 .form-textarea {
   min-height: 96px;
   resize: vertical;
