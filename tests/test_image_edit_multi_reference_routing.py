@@ -50,7 +50,7 @@ from app.core.exceptions import UpstreamException
 
 
 class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_multi_reference_edit_skips_parent_post_creation(self):
+    async def test_multi_reference_edit_creates_parent_post(self):
         model_info = SimpleNamespace(
             model_id='grok-image-edit-test',
             grok_model='grok-2-image',
@@ -68,7 +68,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
         }.get(key, default)), \
              patch('app.services.grok.services.image_edit.pick_token', AsyncMock(return_value='good-token')), \
              patch.object(ImageEditService, '_upload_images', AsyncMock(return_value=uploaded_urls)), \
-             patch.object(ImageEditService, '_get_parent_post_id', AsyncMock(return_value='should-not-be-used')) as get_parent_post_id, \
+             patch.object(ImageEditService, '_get_parent_post_id', AsyncMock(return_value='created-parent')) as get_parent_post_id, \
              patch.object(ImageEditService, '_collect_images', AsyncMock(return_value=['https://assets.grok.com/users/demo/generated/out/image.jpg'])) as collect_images:
             result = await service.edit(
                 token_mgr=token_mgr,
@@ -83,12 +83,12 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.data, ['https://assets.grok.com/users/demo/generated/out/image.jpg'])
-        get_parent_post_id.assert_not_awaited()
+        get_parent_post_id.assert_awaited_once()
         config = collect_images.await_args.kwargs['model_config_override']['modelMap']['imageEditModelConfig']
         self.assertEqual(config['imageReferences'], uploaded_urls)
-        self.assertNotIn('parentPostId', config)
+        self.assertEqual(config['parentPostId'], 'created-parent')
 
-    async def test_reference_items_multi_skips_parent_post_creation(self):
+    async def test_reference_items_multi_creates_parent_post(self):
         model_info = SimpleNamespace(
             model_id='grok-image-edit-test',
             grok_model='grok-2-image',
@@ -126,7 +126,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
         }.get(key, default)), \
              patch('app.services.grok.services.image_edit.pick_token', AsyncMock(return_value='good-token')), \
              patch.object(ImageEditService, '_prepare_reference_items', AsyncMock(return_value=prepared_refs)), \
-             patch('app.services.grok.services.image_edit.VideoService.create_image_post', AsyncMock(return_value='should-not-be-used')) as create_image_post, \
+             patch('app.services.grok.services.image_edit.VideoService.create_image_post', AsyncMock(return_value='created-parent')) as create_image_post, \
              patch.object(ImageEditService, '_collect_images', AsyncMock(return_value=['https://assets.grok.com/users/demo/generated/out/image.jpg'])) as collect_images:
             result = await service.edit_with_reference_items(
                 token_mgr=token_mgr,
@@ -140,7 +140,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.data, ['https://assets.grok.com/users/demo/generated/out/image.jpg'])
-        create_image_post.assert_not_awaited()
+        create_image_post.assert_awaited_once()
         config = collect_images.await_args.kwargs['model_config_override']['modelMap']['imageEditModelConfig']
         self.assertEqual(
             config['imageReferences'],
@@ -149,7 +149,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
                 "https://assets.grok.com/users/demo/generated/second/content",
             ],
         )
-        self.assertNotIn('parentPostId', config)
+        self.assertEqual(config['parentPostId'], 'created-parent')
 
     async def test_reference_items_empty_result_falls_back_to_upload_edit(self):
         model_info = SimpleNamespace(
@@ -208,6 +208,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
         }.get(key, default)), \
              patch('app.services.grok.services.image_edit.pick_token', AsyncMock(return_value='good-token')), \
              patch.object(ImageEditService, '_prepare_reference_items', AsyncMock(return_value=prepared_refs)), \
+             patch('app.services.grok.services.image_edit.VideoService.create_image_post', AsyncMock(return_value='created-parent')) as create_image_post, \
              patch.object(ImageEditService, '_collect_images', AsyncMock(side_effect=empty_result_error)), \
              patch.object(ImageEditService, 'edit', AsyncMock(return_value=fallback_result)) as fallback_edit:
             result = await service.edit_with_reference_items(
@@ -223,6 +224,7 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.data, fallback_result.data)
         fallback_edit.assert_awaited_once()
+        create_image_post.assert_awaited_once()
         kwargs = fallback_edit.await_args.kwargs
         self.assertEqual(
             kwargs['images'],
