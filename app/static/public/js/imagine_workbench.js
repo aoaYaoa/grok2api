@@ -2290,6 +2290,7 @@
         if (e && e.name === 'AbortError') {
           throw e;
         }
+        workbenchEditAbortController = null;
         if (attempt < 2) {
           toast(`Step ${stepIndex} 失败，正在重试...`, 'warning');
         }
