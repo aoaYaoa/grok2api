@@ -46,7 +46,7 @@ if 'aiohttp_socks' not in sys.modules:
     aiohttp_socks.ProxyConnector = _ProxyConnector
     sys.modules['aiohttp_socks'] = aiohttp_socks
 
-from app.core.exceptions import UpstreamException
+from app.core.exceptions import UpstreamException, AppException
 from app.services.grok.services.image_edit import ImageEditService
 
 
@@ -148,6 +148,52 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertEqual(ctx.exception.details.get('response_id'), 'resp-123')
+
+    async def test_collect_images_retries_once_then_raises_clear_error(self):
+        service = ImageEditService()
+        model_info = SimpleNamespace(model_id='grok-image-edit-test', grok_model='imagine-image-edit')
+        fail_error = UpstreamException(
+            'Image edit upstream connected but returned no image URLs',
+            details={'error': 'empty_result', 'model_response_stream_errors': {'sample_message': 'No image chunks parsed from multipart response'}},
+        )
+
+        with patch('app.services.grok.services.image_edit.GrokChatService.chat', AsyncMock(return_value=object())), \
+             patch.object(ImageEditService, '_collect_images', AsyncMock(side_effect=[fail_error, fail_error])) as collect_mock:
+            with self.assertRaises(AppException) as ctx:
+                await service._collect_images_with_retry(
+                    token='good-token',
+                    prompt='merge',
+                    model_info=model_info,
+                    response_format='url',
+                    tool_overrides={'imageGen': True},
+                    model_config_override={'modelMap': {}},
+                    file_attachments=['file1'],
+                )
+
+        self.assertIn('上游未返回图片结果', ctx.exception.message)
+        self.assertEqual(collect_mock.await_count, 2)
+
+    async def test_collect_images_retries_once_then_returns_images(self):
+        service = ImageEditService()
+        model_info = SimpleNamespace(model_id='grok-image-edit-test', grok_model='imagine-image-edit')
+        fail_error = UpstreamException(
+            'Image edit upstream connected but returned no image URLs',
+            details={'error': 'empty_result', 'model_response_stream_errors': {'sample_message': 'No image chunks parsed from multipart response'}},
+        )
+
+        with patch.object(ImageEditService, '_collect_images', AsyncMock(side_effect=[fail_error, ['https://assets.grok.com/users/demo/generated/ok.jpg']])) as collect_mock:
+            result = await service._collect_images_with_retry(
+                token='good-token',
+                prompt='merge',
+                model_info=model_info,
+                response_format='url',
+                tool_overrides={'imageGen': True},
+                model_config_override={'modelMap': {}},
+                file_attachments=['file1'],
+            )
+
+        self.assertEqual(result, ['https://assets.grok.com/users/demo/generated/ok.jpg'])
+        self.assertEqual(collect_mock.await_count, 2)
 
 
 class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):

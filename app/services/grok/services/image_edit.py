@@ -423,7 +423,7 @@ class ImageEditService:
                     "已提交编辑请求",
                     parent_post_id=parent_post_id or "",
                 )
-                images_out = await self._collect_images(
+                images_out = await self._collect_images_with_retry(
                     token=current_token,
                     prompt=prompt,
                     model_info=model_info,
@@ -634,7 +634,7 @@ class ImageEditService:
                     parent_post_id=effective_parent_post_id,
                 )
                 try:
-                    images_out = await self._collect_images(
+                    images_out = await self._collect_images_with_retry(
                         token=current_token,
                         prompt=prompt,
                         model_info=model_info,
@@ -1017,7 +1017,7 @@ class ImageEditService:
                     )
 
                 try:
-                    images_out = await self._collect_images(
+                    images_out = await self._collect_images_with_retry(
                         token=current_token,
                         prompt=prompt_text,
                         model_info=model_info,
@@ -1219,6 +1219,73 @@ class ImageEditService:
         if return_all_images:
             return all_images
         return [all_images[0]]
+
+    @staticmethod
+    def _is_multipart_empty_error(exc: Exception) -> bool:
+        if not isinstance(exc, UpstreamException):
+            return False
+        details = getattr(exc, "details", None)
+        if not isinstance(details, dict):
+            return False
+        stream_errors = details.get("model_response_stream_errors") or {}
+        sample_message = str(stream_errors.get("sample_message") or stream_errors.get("sample") or "")
+        if "no image chunks parsed from multipart response" in sample_message.lower():
+            return True
+        return False
+
+    async def _collect_images_with_retry(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        model_info: Any,
+        response_format: str,
+        tool_overrides: dict,
+        model_config_override: dict,
+        file_attachments: List[str] | None = None,
+        return_all_images: bool = False,
+        progress_cb: Callable[[str, dict], Any] | None = None,
+    ) -> List[str]:
+        try:
+            return await self._collect_images(
+                token=token,
+                prompt=prompt,
+                model_info=model_info,
+                response_format=response_format,
+                tool_overrides=tool_overrides,
+                model_config_override=model_config_override,
+                file_attachments=file_attachments,
+                return_all_images=return_all_images,
+                progress_cb=progress_cb,
+            )
+        except UpstreamException as e:
+            if not self._is_multipart_empty_error(e):
+                raise
+            logger.warning(
+                "Image edit empty multipart response, retrying once: "
+                f"token={token[:10]}..."
+            )
+            try:
+                return await self._collect_images(
+                    token=token,
+                    prompt=prompt,
+                    model_info=model_info,
+                    response_format=response_format,
+                    tool_overrides=tool_overrides,
+                    model_config_override=model_config_override,
+                    file_attachments=file_attachments,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
+            except UpstreamException as retry_err:
+                if self._is_multipart_empty_error(retry_err):
+                    raise AppException(
+                        message="上游未返回图片结果，请稍后重试或减少图片数量",
+                        error_type=ErrorType.SERVER.value,
+                        code="image_edit_empty_result",
+                        status_code=502,
+                    )
+                raise
 
 
 class ImageStreamProcessor(BaseProcessor):
