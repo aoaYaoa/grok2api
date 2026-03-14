@@ -1499,3 +1499,27 @@ html[data-theme='dark'] .im-settings-sheet {
   background: #111821;
   color: #e2e8f0;
 }
+
+/* Bottom Sheet 内设置项：单列布局 */
+.im-settings-sheet .settings-grid {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: auto !important;
+}
+.im-settings-sheet .settings-block {
+  grid-column: 1 !important;
+  grid-row: auto !important;
+}
+.im-settings-sheet .settings-row {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* 移动端 settings-card 只剩提示词时的布局调整 */
+@media (max-width: 900px) {
+  .settings-card .card-content {
+    margin-bottom: 0;
+  }
+  .settings-card .settings-block-prompt {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+  }
+}

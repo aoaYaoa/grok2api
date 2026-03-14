@@ -2600,8 +2600,20 @@
       titleEl.textContent = '生成设置';
       settingsSheet.appendChild(titleEl);
 
+      // 移动整个 card-content 到 Bottom Sheet
       const cardContent = settingsCard.querySelector('.card-content');
       if (cardContent) settingsSheet.appendChild(cardContent);
+
+      // 把提示词区域（.settings-block-prompt）取出，放回页面 settings-card
+      // 这样提示词始终可见，Bottom Sheet 只含其他设置项
+      const promptBlock = settingsSheet.querySelector('.settings-block-prompt');
+      if (promptBlock) {
+        const promptWrap = document.createElement('div');
+        promptWrap.className = 'card-content';
+        promptWrap.appendChild(promptBlock);
+        settingsCard.appendChild(promptWrap);
+      }
+
       document.body.appendChild(settingsSheet);
     }
 
