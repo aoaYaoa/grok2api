@@ -1175,7 +1175,6 @@ class ImageEditService:
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
                 image_generation_count=1,
-                enable_image_streaming=False,
             )
             processor = ImageCollectProcessor(
                 model_info.model_id,
