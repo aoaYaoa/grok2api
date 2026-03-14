@@ -820,7 +820,7 @@ class ImageEditService:
                 )
                 if not should_upload_for_attachment:
                     normalized_raw = _normalize_asset_url(raw_source)
-                    if normalized_raw and not _is_assets_content_url(normalized_raw):
+                    if normalized_raw and not _is_assets_content_url(normalized_raw) and "imagine-public.x.ai/" not in normalized_raw:
                         should_upload_for_attachment = True
                 if should_upload_for_attachment:
                     file_id, file_uri = await upload_service.upload_file(raw_source, token)
