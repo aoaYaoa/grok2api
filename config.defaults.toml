@@ -135,6 +135,8 @@ stream_timeout = 60
 # single: 单次扩展完成后超分（速度更慢，效果更好）
 # complete: 所有扩展完成后超分（速度更快，效果更差）
 upscale_timing = "complete"
+# 视频延长流式空闲超时时间（秒）
+extension_stream_timeout = 300
 
 # ==================== 语音配置 ====================
 [voice]

@@ -2653,6 +2653,7 @@ class VideoStreamProcessor(BaseProcessor):
         token: str = "",
         show_think: bool = None,
         upscale_on_finish: bool = False,
+        idle_timeout_override: float | None = None,
     ):
         super().__init__(model, token)
         self.response_id: Optional[str] = None
@@ -2661,6 +2662,7 @@ class VideoStreamProcessor(BaseProcessor):
 
         self.show_think = bool(show_think)
         self.upscale_on_finish = bool(upscale_on_finish)
+        self.idle_timeout_override = idle_timeout_override
 
     @staticmethod
     def _extract_video_id(video_url: str) -> str:
@@ -2719,7 +2721,7 @@ class VideoStreamProcessor(BaseProcessor):
         self, response: AsyncIterable[bytes]
     ) -> AsyncGenerator[str, None]:
         """Process video stream response."""
-        idle_timeout = float(get_config("video.stream_timeout") or 0)
+        idle_timeout = self.idle_timeout_override or float(get_config("video.stream_timeout") or 0)
         total_timeout = _resolve_video_total_timeout()
         started_at = time.monotonic()
         fallback_video_id = ""
@@ -2969,9 +2971,16 @@ class VideoStreamProcessor(BaseProcessor):
 class VideoCollectProcessor(BaseProcessor):
     """Video non-stream response processor."""
 
-    def __init__(self, model: str, token: str = "", upscale_on_finish: bool = False):
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        upscale_on_finish: bool = False,
+        idle_timeout_override: float | None = None,
+    ):
         super().__init__(model, token)
         self.upscale_on_finish = bool(upscale_on_finish)
+        self.idle_timeout_override = idle_timeout_override
 
     @staticmethod
     def _extract_video_id(video_url: str) -> str:
@@ -3015,7 +3024,7 @@ class VideoCollectProcessor(BaseProcessor):
         content = ""
         fallback_video_id = ""
         fallback_thumb = ""
-        idle_timeout = get_config("video.stream_timeout")
+        idle_timeout = self.idle_timeout_override or get_config("video.stream_timeout")
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):

@@ -22,6 +22,7 @@
   const editTimestampMs = document.getElementById('editTimestampMs');
   const editExtendPostId = document.getElementById('editExtendPostId');
   const editPromptInput = document.getElementById('editPromptInput');
+  const editLengthSelect = document.getElementById('editLengthSelect');
   const spliceBtn = document.getElementById('spliceBtn');
 
   const promptInput = document.getElementById('promptInput');
@@ -2325,7 +2326,7 @@
       const body = {
         prompt: prompt,
         aspect_ratio: ratioSelect ? ratioSelect.value : '16:9',
-        video_length: 10, // 官方延长固定为 10 秒
+        video_length: editLengthSelect ? parseInt(editLengthSelect.value, 10) : 10,
         resolution_name: resolutionSelect ? resolutionSelect.value : '480p',
         preset: (!prompt || prompt.trim() === '') ? 'spicy' : (presetSelect ? presetSelect.value : 'normal'),
         reasoning_effort: typeof DEFAULT_REASONING_EFFORT !== 'undefined' ? DEFAULT_REASONING_EFFORT : null,
