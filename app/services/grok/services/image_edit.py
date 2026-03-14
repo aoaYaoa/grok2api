@@ -346,23 +346,33 @@ class ImageEditService:
                     f"图片上传完成，共 {len(image_urls)} 张",
                     count=len(image_urls),
                 )
+                use_reference_merge_mode = len(image_urls) >= 2
                 parent_post_id = ""
-                await self._emit_progress(
-                    progress_cb,
-                    "pre_create_start",
-                    36,
-                    "正在创建媒体帖子",
-                )
-                parent_post_id = await self._get_parent_post_id(
-                    current_token, image_urls
-                )
-                await self._emit_progress(
-                    progress_cb,
-                    "pre_create_done",
-                    42,
-                    "媒体帖子创建完成",
-                    parent_post_id=parent_post_id or "",
-                )
+                if use_reference_merge_mode:
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_skipped",
+                        36,
+                        "多参考图模式，跳过媒体帖子创建",
+                        count=len(image_urls),
+                    )
+                else:
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_start",
+                        36,
+                        "正在创建媒体帖子",
+                    )
+                    parent_post_id = await self._get_parent_post_id(
+                        current_token, image_urls
+                    )
+                    await self._emit_progress(
+                        progress_cb,
+                        "pre_create_done",
+                        42,
+                        "媒体帖子创建完成",
+                        parent_post_id=parent_post_id or "",
+                    )
 
                 model_config_override = {
                     "modelMap": {
@@ -950,18 +960,20 @@ class ImageEditService:
                         status_code=400,
                     )
 
+                use_reference_merge_mode = len(request_urls) >= 2
                 effective_parent_post_id = ""
-                effective_parent_post_id = str(root_parent_post_id or "").strip()
-                if not effective_parent_post_id:
-                    first_parent = str(
-                        prepared_refs[0].get("parent_post_id") or ""
-                    ).strip()
-                    if first_parent:
-                        effective_parent_post_id = first_parent
-                if not effective_parent_post_id:
-                    effective_parent_post_id = await VideoService().create_image_post(
-                        current_token, request_urls[0]
-                    )
+                if not use_reference_merge_mode:
+                    effective_parent_post_id = str(root_parent_post_id or "").strip()
+                    if not effective_parent_post_id:
+                        first_parent = str(
+                            prepared_refs[0].get("parent_post_id") or ""
+                        ).strip()
+                        if first_parent:
+                            effective_parent_post_id = first_parent
+                    if not effective_parent_post_id:
+                        effective_parent_post_id = await VideoService().create_image_post(
+                            current_token, request_urls[0]
+                        )
 
                 await self._emit_progress(
                     progress_cb, "chat_request_start", 42, "已提交编辑请求"
