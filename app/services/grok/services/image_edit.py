@@ -960,29 +960,34 @@ class ImageEditService:
                         status_code=400,
                     )
 
-                effective_parent_post_id = str(root_parent_post_id or "").strip()
-                if not effective_parent_post_id:
-                    first_parent = str(
-                        prepared_refs[0].get("parent_post_id") or ""
-                    ).strip()
-                    if first_parent:
-                        effective_parent_post_id = first_parent
-                if not effective_parent_post_id:
-                    effective_parent_post_id = await VideoService().create_image_post(
-                        current_token, request_urls[0]
-                    )
+                use_reference_merge_mode = len(request_urls) >= 2
+                effective_parent_post_id = ""
+                if not use_reference_merge_mode:
+                    effective_parent_post_id = str(root_parent_post_id or "").strip()
+                    if not effective_parent_post_id:
+                        first_parent = str(
+                            prepared_refs[0].get("parent_post_id") or ""
+                        ).strip()
+                        if first_parent:
+                            effective_parent_post_id = first_parent
+                    if not effective_parent_post_id:
+                        effective_parent_post_id = await VideoService().create_image_post(
+                            current_token, request_urls[0]
+                        )
 
                 await self._emit_progress(
                     progress_cb, "chat_request_start", 42, "已提交编辑请求"
                 )
                 tool_overrides = {"imageGen": True}
+                image_edit_config = {
+                    "imageReferences": request_urls,
+                }
+                if effective_parent_post_id:
+                    image_edit_config["parentPostId"] = effective_parent_post_id
                 model_config_override = {
                     "modelMap": {
                         "imageEditModel": "imagine",
-                        "imageEditModelConfig": {
-                            "imageReferences": request_urls,
-                            "parentPostId": effective_parent_post_id,
-                        },
+                        "imageEditModelConfig": image_edit_config,
                     }
                 }
                 _log_final_image_edit_payload(
