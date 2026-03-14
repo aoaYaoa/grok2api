@@ -78,6 +78,11 @@ test('workbench merge mode suppresses parent chain when 2 or more references are
   assert.match(workbenchJs, /mode:\s*useReferenceMergeMode \? 'upload' :/);
 });
 
+test('imagine workbench exposes stepwise merge entry point', () => {
+  assert.match(workbenchHtml, /stepwise-merge/);
+  assert.match(workbenchJs, /startStepwiseMerge/);
+});
+
 
 test('workbench preview sizing stays fixed and history enhancer controls are visible', () => {
   assert.match(workbenchCss, /--workbench-preview-height/);
