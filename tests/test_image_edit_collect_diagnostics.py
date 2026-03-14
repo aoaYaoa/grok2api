@@ -67,6 +67,7 @@ class FakeSummaryProcessor:
         self.last_result_keys = ['response']
         self.last_response_keys = ['modelResponse']
         self.last_model_response_keys = ['imageEditUris']
+        self.last_result_title = 'blocked'
         self.last_payload_summary = {}
         self.last_result_summary = {}
         self.last_response_summary = {}
@@ -75,6 +76,14 @@ class FakeSummaryProcessor:
                 'count': 1,
                 'sample': 'https://assets.grok.com/users/demo/generated/abc/content'
             }
+        }
+        self.last_model_response_stream_errors = {
+            'count': 1,
+            'sample': 'policy_violation'
+        }
+        self.last_model_response_tool_responses = {
+            'count': 1,
+            'sample_keys': ['type', 'message']
         }
 
     async def process(self, response):
@@ -123,6 +132,15 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         summary = ctx.exception.details.get('model_response_summary') or {}
         self.assertEqual(summary.get('imageEditUris', {}).get('count'), 1)
+        self.assertEqual(ctx.exception.details.get('result_title'), 'blocked')
+        self.assertEqual(
+            (ctx.exception.details.get('model_response_stream_errors') or {}).get('count'),
+            1,
+        )
+        self.assertEqual(
+            (ctx.exception.details.get('model_response_tool_responses') or {}).get('count'),
+            1,
+        )
 
 
 class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):

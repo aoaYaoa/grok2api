@@ -1193,10 +1193,17 @@ class ImageEditService:
                 "result_keys": getattr(processor, "last_result_keys", []),
                 "response_keys": getattr(processor, "last_response_keys", []),
                 "model_response_keys": getattr(processor, "last_model_response_keys", []),
+                "result_title": getattr(processor, "last_result_title", ""),
                 "payload_summary": getattr(processor, "last_payload_summary", {}),
                 "result_summary": getattr(processor, "last_result_summary", {}),
                 "response_summary": getattr(processor, "last_response_summary", {}),
                 "model_response_summary": getattr(processor, "last_model_response_summary", {}),
+                "model_response_stream_errors": getattr(
+                    processor, "last_model_response_stream_errors", {}
+                ),
+                "model_response_tool_responses": getattr(
+                    processor, "last_model_response_tool_responses", {}
+                ),
             }
             message = (
                 "Image edit upstream connected but returned no image URLs"
@@ -1395,10 +1402,13 @@ class ImageCollectProcessor(BaseProcessor):
         self.last_result_keys: list[str] = []
         self.last_response_keys: list[str] = []
         self.last_model_response_keys: list[str] = []
+        self.last_result_title: str = ""
         self.last_payload_summary: dict[str, dict] = {}
         self.last_result_summary: dict[str, dict] = {}
         self.last_response_summary: dict[str, dict] = {}
         self.last_model_response_summary: dict[str, dict] = {}
+        self.last_model_response_stream_errors: dict[str, Any] = {}
+        self.last_model_response_tool_responses: dict[str, Any] = {}
 
     @staticmethod
     def _sorted_keys(value: Any) -> list[str]:
@@ -1442,6 +1452,31 @@ class ImageCollectProcessor(BaseProcessor):
             summary[key] = entry
         return summary
 
+    @staticmethod
+    def _summarize_list_field(value: Any) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        if value is None:
+            return summary
+        if isinstance(value, list):
+            summary["count"] = len(value)
+            if value:
+                first = value[0]
+                if isinstance(first, dict):
+                    summary["sample_keys"] = sorted([str(k) for k in first.keys()])[:6]
+                else:
+                    summary["sample_type"] = type(first).__name__
+                    if isinstance(first, str):
+                        summary["sample"] = first[:160]
+            return summary
+        if isinstance(value, dict):
+            summary["count"] = len(value)
+            summary["sample_keys"] = sorted([str(k) for k in value.keys()])[:6]
+            return summary
+        summary["type"] = type(value).__name__
+        if isinstance(value, str):
+            summary["sample"] = value[:160]
+        return summary
+
     async def _emit_progress(
         self, event: str, progress: int, message: str, **extra: Any
     ) -> None:
@@ -1478,9 +1513,18 @@ class ImageCollectProcessor(BaseProcessor):
                 self.last_payload_keys = self._sorted_keys(data)
                 self.last_result_keys = self._sorted_keys(result_root)
                 self.last_response_keys = self._sorted_keys(resp)
+                self.last_model_response_keys = []
+                self.last_result_title = ""
+                if isinstance(result_root, dict):
+                    title = result_root.get("title")
+                    if isinstance(title, str):
+                        self.last_result_title = title
                 self.last_payload_summary = self._summarize_image_fields(data)
                 self.last_result_summary = self._summarize_image_fields(result_root)
                 self.last_response_summary = self._summarize_image_fields(resp)
+                self.last_model_response_summary = {}
+                self.last_model_response_stream_errors = {}
+                self.last_model_response_tool_responses = {}
                 if not chat_connected_emitted and resp:
                     chat_connected_emitted = True
                     await self._emit_progress(
@@ -1493,6 +1537,13 @@ class ImageCollectProcessor(BaseProcessor):
                 if mr := (resp.get("modelResponse") if isinstance(resp, dict) else None):
                     self.last_model_response_keys = self._sorted_keys(mr)
                     self.last_model_response_summary = self._summarize_image_fields(mr)
+                    if isinstance(mr, dict):
+                        self.last_model_response_stream_errors = self._summarize_list_field(
+                            mr.get("streamErrors")
+                        )
+                        self.last_model_response_tool_responses = self._summarize_list_field(
+                            mr.get("toolResponses")
+                        )
                     urls = _collect_images(mr)
                 if not urls and resp:
                     urls = _collect_images(resp)
