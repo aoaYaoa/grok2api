@@ -53,6 +53,9 @@
           <div id="referenceStrip" class="reference-strip">
             <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 5 张）</div>
           </div>
+          <div class="stepwise-merge-row">
+            <button id="stepwiseMergeBtn" class="geist-button-outline stepwise-merge-btn hidden" type="button">分步合成</button>
+          </div>
 
           <div class="parent-quick-row">
             <label class="field-label" for="parentPostInput">粘贴 parentPostId（全局记忆）</label>
@@ -138,6 +141,16 @@
       <div class="preview-lightbox-actions">
         <a id="previewLightboxDownload" class="preview-lightbox-download" href="#" download>下载</a>
         <button type="button" class="preview-lightbox-close" data-preview-close>关闭</button>
+      </div>
+    </div>
+  </div>
+  <div id="stepwiseMergeModal" class="stepwise-merge-modal hidden" role="dialog" aria-hidden="true">
+    <div class="stepwise-merge-panel">
+      <h3>选择首步两张参考图</h3>
+      <div id="stepwiseMergeGrid" class="stepwise-merge-grid"></div>
+      <div class="stepwise-merge-actions">
+        <button id="stepwiseMergeConfirm" type="button" class="geist-button" disabled>开始合成</button>
+        <button id="stepwiseMergeCancel" type="button" class="geist-button-outline">取消</button>
       </div>
     </div>
   </div>
