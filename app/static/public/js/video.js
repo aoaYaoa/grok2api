@@ -3327,12 +3327,12 @@
     // ── 按钮代理：点击 sticky bar 按钮 = 点击原始按钮 ──
     if (mobileStart) {
       mobileStart.addEventListener('click', () => {
-        if (startBtn && !startBtn.disabled) startBtn.click();
-      });
-    }
-    if (mobileStop) {
-      mobileStop.addEventListener('click', () => {
-        if (stopBtn && !stopBtn.disabled) stopBtn.click();
+        const running = stopBtn && !stopBtn.classList.contains('hidden');
+        if (running) {
+          if (stopBtn && !stopBtn.disabled) stopBtn.click();
+        } else {
+          if (startBtn && !startBtn.disabled) startBtn.click();
+        }
       });
     }
     if (mobileSplice) {
@@ -3341,14 +3341,22 @@
       });
     }
 
-    // ── 同步生成按钮状态（running / idle）到 sticky bar ──
+    // ── 同步生成按钮状态（running / idle）到一体切换按钮 ──
     function syncGenerateSlotState() {
-      if (!slotGenerate || !mobileStart || !mobileStop) return;
+      if (!mobileStart) return;
       const running = stopBtn && !stopBtn.classList.contains('hidden');
-      mobileStop.classList.toggle('hidden', !running);
-      mobileStart.classList.toggle('hidden', running);
-      slotGenerate.classList.toggle('is-running', running);
-      if (mobileStart) mobileStart.disabled = Boolean(startBtn && startBtn.disabled);
+      // 切换图标
+      const playIcon = mobileStart.querySelector('.mobile-gen-play');
+      const stopIcon = mobileStart.querySelector('.mobile-gen-stop');
+      const label = mobileStart.querySelector('.mobile-gen-label');
+      if (playIcon) playIcon.style.display = running ? 'none' : '';
+      if (stopIcon) stopIcon.style.display = running ? '' : 'none';
+      if (label) label.textContent = running ? '停止' : '开始生成';
+      // 切换样式：running 时改为 outline 风格
+      mobileStart.className = running
+        ? 'geist-button-outline mobile-action-btn gap-2'
+        : 'geist-button mobile-action-btn gap-2';
+      mobileStart.disabled = !running && Boolean(startBtn && startBtn.disabled);
     }
 
     if (startBtn || stopBtn) {
@@ -3369,7 +3377,7 @@
           if (slotGenerate) slotGenerate.classList.toggle('mobile-action-slot--active', !spliceVisible);
           if (slotSplice)   slotSplice.classList.toggle('mobile-action-slot--active', spliceVisible);
         },
-        { threshold: 0.15 }
+        { threshold: 0.7 }
       );
       io.observe(targetPanel);
     }

@@ -314,21 +314,18 @@
       </button>
       <!-- 右：操作区，根据上下文滑动切换 -->
       <div class="mobile-action-ops">
-        <!-- 生成模式（默认） -->
+        <!-- 生成模式（默认）：开始/停止一体切换按钮 -->
         <div id="mobileBarGenerate" class="mobile-action-slot mobile-action-slot--active">
           <button id="mobileStartBtn" class="geist-button mobile-action-btn gap-2" type="button">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            <svg class="mobile-gen-play" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round">
               <polygon points="5 3 19 12 5 21 5 3" />
             </svg>
-            开始生成
-          </button>
-          <button id="mobileStopBtn" class="geist-button-outline mobile-action-btn gap-2 hidden" type="button">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
+            <svg class="mobile-gen-stop" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" style="display:none">
               <rect x="5" y="5" width="14" height="14" />
             </svg>
-            停止
+            <span class="mobile-gen-label">开始生成</span>
           </button>
         </div>
         <!-- 延长模式（滚到延长区时） -->
@@ -355,7 +352,7 @@
   <script src="/static/common/js/toast.js"></script>
   <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
   <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/video.js?v=0.6.3"></script>
+  <script src="/static/public/js/video.js?v=0.6.4"></script>
 </body>
 
 </html>

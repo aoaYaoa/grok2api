@@ -20,6 +20,9 @@
   <script src="/static/common/js/theme.js?v=__ASSET_VERSION__"></script>
   <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
   <link href="/static/public/css/imagine.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <script src="/static/common/js/theme.js?v=0.1.0"></script>
+  <link href="/static/common/css/common.css?v=0.3.8" rel="stylesheet">
+  <link href="/static/public/css/imagine.css?v=0.5.1" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
 </head>
 
@@ -299,12 +302,13 @@
             <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
           </svg>
         </button>
-        <!-- 批量下载 -->
-        <button class="im-icon-btn" id="imBatchBtn" type="button" title="批量下载" aria-label="批量下载">
+        <!-- 批量下载全部（layers 图标，与下载选中区分） -->
+        <button class="im-icon-btn" id="imBatchBtn" type="button" title="批量下载全部" aria-label="批量下载">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
           </svg>
         </button>
         <!-- 全选 -->
