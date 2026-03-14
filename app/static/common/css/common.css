@@ -53,9 +53,13 @@ html[data-theme='dark'] {
   --voice-bg: #0b0f14;
 }
 
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 html {
-  width: 100%;
-  min-height: 100%;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
@@ -65,12 +69,21 @@ body {
   background-color: var(--bg);
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
-  width: 100%;
   touch-action: manipulation;
 }
 
 #app-header {
   height: 56px;
+}
+
+.admin-main-scroll {
+  position: fixed;
+  top: 56px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .font-mono {
