@@ -241,6 +241,33 @@ class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary['fileUris']['count'], 1)
         self.assertEqual(summary['generatedImageUrls']['count'], 0)
 
+    async def test_collect_preserves_first_nonempty_model_response(self):
+        from app.services.grok.services.image_edit import ImageCollectProcessor
+        processor = ImageCollectProcessor('grok-image-edit-test', response_format='url')
+
+        async def stream():
+            first = {
+                'result': {
+                    'response': {
+                        'modelResponse': {
+                            'imageEditUris': [
+                                'https://assets.grok.com/users/demo/generated/abc/content'
+                            ],
+                            'streamErrors': ['policy_violation'],
+                        }
+                    }
+                }
+            }
+            yield orjson.dumps(first)
+            yield orjson.dumps({'result': {'title': 'blocked'}})
+
+        images = await processor.process(stream())
+        self.assertEqual(images, [])
+        self.assertEqual(processor.last_model_response_keys, ['imageEditUris', 'streamErrors'])
+        self.assertEqual(processor.last_model_response_summary['imageEditUris']['count'], 1)
+        self.assertEqual(processor.last_model_response_stream_errors['count'], 1)
+        self.assertEqual(processor.last_result_title, 'blocked')
+
 
 if __name__ == '__main__':
     unittest.main()

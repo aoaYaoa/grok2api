@@ -1510,21 +1510,28 @@ class ImageCollectProcessor(BaseProcessor):
 
                 result_root = data.get("result", {}) if isinstance(data, dict) else {}
                 resp = result_root.get("response", {}) if isinstance(result_root, dict) else {}
-                self.last_payload_keys = self._sorted_keys(data)
-                self.last_result_keys = self._sorted_keys(result_root)
-                self.last_response_keys = self._sorted_keys(resp)
-                self.last_model_response_keys = []
-                self.last_result_title = ""
+                payload_keys = self._sorted_keys(data)
+                if payload_keys:
+                    self.last_payload_keys = payload_keys
+                result_keys = self._sorted_keys(result_root)
+                if result_keys:
+                    self.last_result_keys = result_keys
+                response_keys = self._sorted_keys(resp)
+                if response_keys:
+                    self.last_response_keys = response_keys
                 if isinstance(result_root, dict):
                     title = result_root.get("title")
-                    if isinstance(title, str):
+                    if isinstance(title, str) and title:
                         self.last_result_title = title
-                self.last_payload_summary = self._summarize_image_fields(data)
-                self.last_result_summary = self._summarize_image_fields(result_root)
-                self.last_response_summary = self._summarize_image_fields(resp)
-                self.last_model_response_summary = {}
-                self.last_model_response_stream_errors = {}
-                self.last_model_response_tool_responses = {}
+                payload_summary = self._summarize_image_fields(data)
+                if payload_summary:
+                    self.last_payload_summary = payload_summary
+                result_summary = self._summarize_image_fields(result_root)
+                if result_summary:
+                    self.last_result_summary = result_summary
+                response_summary = self._summarize_image_fields(resp)
+                if response_summary:
+                    self.last_response_summary = response_summary
                 if not chat_connected_emitted and resp:
                     chat_connected_emitted = True
                     await self._emit_progress(
@@ -1535,15 +1542,19 @@ class ImageCollectProcessor(BaseProcessor):
 
                 urls = []
                 if mr := (resp.get("modelResponse") if isinstance(resp, dict) else None):
-                    self.last_model_response_keys = self._sorted_keys(mr)
-                    self.last_model_response_summary = self._summarize_image_fields(mr)
+                    model_response_keys = self._sorted_keys(mr)
+                    if model_response_keys:
+                        self.last_model_response_keys = model_response_keys
+                    model_response_summary = self._summarize_image_fields(mr)
+                    if model_response_summary:
+                        self.last_model_response_summary = model_response_summary
                     if isinstance(mr, dict):
-                        self.last_model_response_stream_errors = self._summarize_list_field(
-                            mr.get("streamErrors")
-                        )
-                        self.last_model_response_tool_responses = self._summarize_list_field(
-                            mr.get("toolResponses")
-                        )
+                        stream_errors = self._summarize_list_field(mr.get("streamErrors"))
+                        if stream_errors:
+                            self.last_model_response_stream_errors = stream_errors
+                        tool_responses = self._summarize_list_field(mr.get("toolResponses"))
+                        if tool_responses:
+                            self.last_model_response_tool_responses = tool_responses
                     urls = _collect_images(mr)
                 if not urls and resp:
                     urls = _collect_images(resp)
