@@ -79,12 +79,14 @@ class FakeSummaryProcessor:
         }
         self.last_model_response_stream_errors = {
             'count': 1,
-            'sample': 'policy_violation'
+            'sample': 'policy_violation',
+            'sample_message': 'upstream policy_violation'
         }
         self.last_model_response_tool_responses = {
             'count': 1,
             'sample_keys': ['type', 'message']
         }
+        self.last_response_id = 'resp-123'
 
     async def process(self, response):
         if self.progress_cb:
@@ -138,9 +140,14 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertEqual(
+            (ctx.exception.details.get('model_response_stream_errors') or {}).get('sample_message'),
+            'upstream policy_violation',
+        )
+        self.assertEqual(
             (ctx.exception.details.get('model_response_tool_responses') or {}).get('count'),
             1,
         )
+        self.assertEqual(ctx.exception.details.get('response_id'), 'resp-123')
 
 
 class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):

@@ -1194,6 +1194,7 @@ class ImageEditService:
                 "response_keys": getattr(processor, "last_response_keys", []),
                 "model_response_keys": getattr(processor, "last_model_response_keys", []),
                 "result_title": getattr(processor, "last_result_title", ""),
+                "response_id": getattr(processor, "last_response_id", ""),
                 "payload_summary": getattr(processor, "last_payload_summary", {}),
                 "result_summary": getattr(processor, "last_result_summary", {}),
                 "response_summary": getattr(processor, "last_response_summary", {}),
@@ -1403,6 +1404,7 @@ class ImageCollectProcessor(BaseProcessor):
         self.last_response_keys: list[str] = []
         self.last_model_response_keys: list[str] = []
         self.last_result_title: str = ""
+        self.last_response_id: str = ""
         self.last_payload_summary: dict[str, dict] = {}
         self.last_result_summary: dict[str, dict] = {}
         self.last_response_summary: dict[str, dict] = {}
@@ -1463,6 +1465,12 @@ class ImageCollectProcessor(BaseProcessor):
                 first = value[0]
                 if isinstance(first, dict):
                     summary["sample_keys"] = sorted([str(k) for k in first.keys()])[:6]
+                    message = first.get("message")
+                    internal_error = first.get("internalError")
+                    if isinstance(message, str) and message:
+                        summary["sample_message"] = message[:160]
+                    elif isinstance(internal_error, str) and internal_error:
+                        summary["sample_message"] = internal_error[:160]
                 else:
                     summary["sample_type"] = type(first).__name__
                     if isinstance(first, str):
@@ -1523,6 +1531,10 @@ class ImageCollectProcessor(BaseProcessor):
                     title = result_root.get("title")
                     if isinstance(title, str) and title:
                         self.last_result_title = title
+                if isinstance(resp, dict):
+                    response_id = resp.get("responseId")
+                    if isinstance(response_id, str) and response_id:
+                        self.last_response_id = response_id
                 payload_summary = self._summarize_image_fields(data)
                 if payload_summary:
                     self.last_payload_summary = payload_summary
