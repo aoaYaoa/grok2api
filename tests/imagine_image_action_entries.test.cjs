@@ -97,6 +97,11 @@ test('imagine workbench stepwise results render step badges', () => {
   assert.match(workbenchCss, /\.history-step-badge/);
 });
 
+test('imagine workbench bumps asset versions when shipping stepwise merge', () => {
+  assert.match(workbenchHtml, /imagine_workbench\.css\?v=0\.2\.1/);
+  assert.match(workbenchHtml, /imagine_workbench\.js\?v=0\.2\.1/);
+});
+
 
 test('workbench preview sizing stays fixed and history enhancer controls are visible', () => {
   assert.match(workbenchCss, /--workbench-preview-height/);
