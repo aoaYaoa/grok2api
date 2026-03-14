@@ -2524,4 +2524,106 @@
       }
     });
   }
+
+  /**
+   * 移动端 Sticky Bar 初始化
+   */
+  function initStickyBar() {
+    /* 图标按钮代理 */
+    const proxyMap = {
+      imClearBtn: 'clearBtn',
+      imBatchBtn: 'batchDownloadBtn',
+      imSelectAllBtn: 'toggleSelectAllBtn',
+      imDownloadSelectedBtn: 'downloadSelectedBtn',
+    };
+    Object.entries(proxyMap).forEach(([stickyId, origId]) => {
+      const stickyEl = document.getElementById(stickyId);
+      const origEl = document.getElementById(origId);
+      if (stickyEl && origEl) stickyEl.addEventListener('click', () => origEl.click());
+    });
+
+    /* 主按钮（开始/停止）同步 */
+    const imBtn = document.getElementById('imStartStopBtn');
+    const playIcon = imBtn && imBtn.querySelector('.im-btn-icon-play');
+    const stopIcon = imBtn && imBtn.querySelector('.im-btn-icon-stop');
+    const btnLabel = imBtn && imBtn.querySelector('.im-btn-label');
+
+    function syncMainBtn() {
+      if (!imBtn) return;
+      const isStopping = startBtn && startBtn.classList.contains('hidden');
+      imBtn.classList.toggle('is-stop', !!isStopping);
+      if (playIcon) playIcon.style.display = isStopping ? 'none' : '';
+      if (stopIcon) stopIcon.style.display = isStopping ? '' : 'none';
+      if (btnLabel) btnLabel.textContent = isStopping ? '停止' : '开始';
+    }
+
+    if (imBtn) {
+      imBtn.addEventListener('click', () => {
+        const isStopping = startBtn && startBtn.classList.contains('hidden');
+        (isStopping ? stopBtn : startBtn) && (isStopping ? stopBtn : startBtn).click();
+      });
+    }
+    if (startBtn) new MutationObserver(syncMainBtn).observe(startBtn, { attributes: true, attributeFilter: ['class'] });
+    syncMainBtn();
+
+    /* 选中数字角标同步 */
+    const origBadge = document.getElementById('selectedCount');
+    const imBadge = document.getElementById('imSelectedBadge');
+    function syncBadge() {
+      if (!origBadge || !imBadge) return;
+      const count = parseInt(origBadge.textContent || '0', 10);
+      imBadge.textContent = String(count);
+      imBadge.classList.toggle('visible', count > 0);
+    }
+    if (origBadge) {
+      new MutationObserver(syncBadge).observe(origBadge, { characterData: true, childList: true, subtree: true });
+      syncBadge();
+    }
+
+    /* 生成设置 Bottom Sheet */
+    const settingsBtn = document.getElementById('imSettingsBtn');
+    const settingsOverlay = document.getElementById('imSettingsOverlay');
+    const settingsCard = document.querySelector('.settings-card');
+
+    let settingsSheet = document.getElementById('imSettingsSheet');
+    if (!settingsSheet && settingsCard) {
+      settingsSheet = document.createElement('div');
+      settingsSheet.id = 'imSettingsSheet';
+      settingsSheet.className = 'im-settings-sheet';
+
+      const handle = document.createElement('div');
+      handle.className = 'im-settings-sheet-handle';
+      settingsSheet.appendChild(handle);
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'im-settings-sheet-title';
+      titleEl.textContent = '生成设置';
+      settingsSheet.appendChild(titleEl);
+
+      const cardContent = settingsCard.querySelector('.card-content');
+      if (cardContent) settingsSheet.appendChild(cardContent);
+      document.body.appendChild(settingsSheet);
+    }
+
+    function openSettings() {
+      if (!settingsSheet || !settingsOverlay) return;
+      settingsOverlay.classList.add('active');
+      requestAnimationFrame(() => settingsSheet.classList.add('open'));
+    }
+    function closeSettings() {
+      if (!settingsSheet || !settingsOverlay) return;
+      settingsSheet.classList.remove('open');
+      settingsOverlay.classList.remove('active');
+    }
+
+    if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
+    if (settingsOverlay) settingsOverlay.addEventListener('click', closeSettings);
+    const sheetHandle = settingsSheet && settingsSheet.querySelector('.im-settings-sheet-handle');
+    if (sheetHandle) sheetHandle.addEventListener('click', closeSettings);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && settingsSheet && settingsSheet.classList.contains('open')) closeSettings();
+    });
+  }
+
+  initStickyBar();
 })();

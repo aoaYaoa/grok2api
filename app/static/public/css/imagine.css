@@ -1297,3 +1297,205 @@ html[data-theme='dark'] .waterfall-item.selected .image-checkbox::after {
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================
+   移动端 Sticky Bar im-sticky-bar（<=900px）
+   ============================ */
+@media (max-width: 900px) {
+  body {
+    padding-bottom: 72px !important;
+  }
+
+  .im-sticky-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: #fff;
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.07);
+  }
+
+  .im-sticky-bar-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 700px;
+    margin: 0 auto;
+  }
+
+  .im-icon-divider {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .im-icon-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    justify-content: center;
+  }
+
+  .im-icon-btn {
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fff;
+    color: var(--fg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .15s ease, border-color .15s ease;
+    position: relative;
+    padding: 0;
+  }
+
+  .im-icon-btn:active {
+    background: var(--accents-1);
+  }
+
+  .im-icon-btn--danger {
+    color: #ef4444;
+    border-color: #fecaca;
+  }
+
+  .im-icon-btn--danger:active {
+    background: #fef2f2;
+  }
+
+  .im-selected-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    display: none;
+    pointer-events: none;
+  }
+
+  .im-selected-badge.visible {
+    display: block;
+  }
+
+  .im-main-btn {
+    height: 40px;
+    padding: 0 18px;
+    font-size: 14px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    min-width: 88px;
+    justify-content: center;
+  }
+
+  .im-main-btn.is-stop {
+    background: #fee2e2 !important;
+    color: #ef4444 !important;
+    border: 1px solid #fecaca !important;
+  }
+
+  .im-settings-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+
+  .im-settings-overlay.active {
+    display: block;
+  }
+
+  .im-settings-sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 301;
+    background: #fff;
+    border-radius: 20px 20px 0 0;
+    padding: 0 16px 24px;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    max-height: 88vh;
+    overflow-y: auto;
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.18);
+    transition: transform .28s cubic-bezier(.2, 0, 0, 1);
+    transform: translateY(100%);
+  }
+
+  .im-settings-sheet.open {
+    transform: translateY(0);
+  }
+
+  .im-settings-sheet-handle {
+    display: flex;
+    justify-content: center;
+    padding: 12px 0 8px;
+    cursor: pointer;
+  }
+
+  .im-settings-sheet-handle::after {
+    content: '';
+    width: 36px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--border);
+  }
+
+  .im-settings-sheet-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accents-7);
+    margin-bottom: 14px;
+    text-align: center;
+  }
+}
+
+html[data-theme='dark'] .im-sticky-bar {
+  background: #111821;
+  border-top-color: #2b3440;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.3);
+}
+
+html[data-theme='dark'] .im-icon-btn {
+  background: #1a2330;
+  border-color: #3b4654;
+  color: #c9d6e5;
+}
+
+html[data-theme='dark'] .im-icon-btn:active {
+  background: #243244;
+}
+
+html[data-theme='dark'] .im-main-btn.is-stop {
+  background: #2d1414 !important;
+  color: #f87171 !important;
+  border-color: #7f1d1d !important;
+}
+
+html[data-theme='dark'] .im-settings-sheet {
+  background: #111821;
+  color: #e2e8f0;
+}
