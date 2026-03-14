@@ -78,30 +78,6 @@ test('workbench merge mode suppresses parent chain when 2 or more references are
   assert.match(workbenchJs, /mode:\s*useReferenceMergeMode \? 'upload' :/);
 });
 
-test('imagine workbench exposes stepwise merge entry point', () => {
-  assert.match(workbenchHtml, /stepwise-merge/);
-  assert.match(workbenchJs, /startStepwiseMerge/);
-});
-
-test('imagine workbench exposes stepwise merge modal state', () => {
-  assert.match(workbenchJs, /stepwiseMergeState/);
-  assert.match(workbenchJs, /openStepwiseMergeModal/);
-});
-
-test('imagine workbench wires stepwise merge execution', () => {
-  assert.match(workbenchJs, /async function runStepwiseMerge/);
-});
-
-test('imagine workbench stepwise results render step badges', () => {
-  assert.match(workbenchJs, /history-step-badge/);
-  assert.match(workbenchCss, /\.history-step-badge/);
-});
-
-test('imagine workbench bumps asset versions when shipping stepwise merge', () => {
-  assert.match(workbenchHtml, /imagine_workbench\.css\?v=0\.2\.1/);
-  assert.match(workbenchHtml, /imagine_workbench\.js\?v=0\.2\.1/);
-});
-
 
 test('workbench preview sizing stays fixed and history enhancer controls are visible', () => {
   assert.match(workbenchCss, /--workbench-preview-height/);

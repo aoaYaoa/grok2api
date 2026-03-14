@@ -19,7 +19,7 @@
   <script src="/static/common/js/theme.js?v=0.1.0"></script>
   <link href="/static/common/css/common.css?v=0.3.7" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
-  <link href="/static/public/css/imagine_workbench.css?v=0.2.1" rel="stylesheet">
+  <link href="/static/public/css/imagine_workbench.css?v=0.2.0" rel="stylesheet">
 </head>
 
 <body class="public-page min-h-screen flex flex-col" style="background-color: var(--bg);">
@@ -52,9 +52,6 @@
 
           <div id="referenceStrip" class="reference-strip">
             <div class="reference-empty">可上传 / 粘贴 / 拖拽参考图（最多 5 张）</div>
-          </div>
-          <div class="stepwise-merge-row">
-            <button id="stepwiseMergeBtn" class="geist-button-outline stepwise-merge-btn hidden" type="button">分步合成</button>
           </div>
 
           <div class="parent-quick-row">
@@ -144,16 +141,6 @@
       </div>
     </div>
   </div>
-  <div id="stepwiseMergeModal" class="stepwise-merge-modal hidden" role="dialog" aria-hidden="true">
-    <div class="stepwise-merge-panel">
-      <h3>选择首步两张参考图</h3>
-      <div id="stepwiseMergeGrid" class="stepwise-merge-grid"></div>
-      <div class="stepwise-merge-actions">
-        <button id="stepwiseMergeConfirm" type="button" class="geist-button" disabled>开始合成</button>
-        <button id="stepwiseMergeCancel" type="button" class="geist-button-outline">取消</button>
-      </div>
-    </div>
-  </div>
 
   <div id="app-footer"></div>
 
@@ -165,7 +152,7 @@
   <script src="/static/common/js/toast.js"></script>
   <script src="/static/common/js/prompt-enhancer.js?v=0.1.15"></script>
   <script src="/static/common/js/pwa.js?v=0.1.1"></script>
-  <script src="/static/public/js/imagine_workbench.js?v=0.2.1"></script>
+  <script src="/static/public/js/imagine_workbench.js?v=0.2.0"></script>
 </body>
 
 </html>

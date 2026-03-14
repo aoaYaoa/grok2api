@@ -26,11 +26,6 @@
   const previewLightbox = document.getElementById('previewLightbox');
   const previewLightboxImg = document.getElementById('previewLightboxImg');
   const previewLightboxDownload = document.getElementById('previewLightboxDownload');
-  const stepwiseMergeBtn = document.getElementById('stepwiseMergeBtn');
-  const stepwiseMergeModal = document.getElementById('stepwiseMergeModal');
-  const stepwiseMergeGrid = document.getElementById('stepwiseMergeGrid');
-  const stepwiseMergeConfirm = document.getElementById('stepwiseMergeConfirm');
-  const stepwiseMergeCancel = document.getElementById('stepwiseMergeCancel');
   const REFERENCE_LIMIT = 5;
   const WORKBENCH_IMAGE_ACTION_PROMPT_KEY = 'workbench_image_action_prompt_draft';
 
@@ -44,14 +39,6 @@
     currentModeValue: 'upload',
     history: [],
     editRound: 0,
-  };
-  const stepwiseMergeState = {
-    active: false,
-    pendingRefs: [],
-    selectedIds: new Set(),
-    currentStep: 0,
-    totalSteps: 0,
-    lastResultUrl: '',
   };
   let workbenchEditAbortController = null;
   let editProgressTimer = null;
@@ -126,93 +113,6 @@
     if (!previewLightbox) return;
     previewLightbox.classList.remove('active');
     previewLightbox.setAttribute('aria-hidden', 'true');
-  }
-
-  function updateStepwiseMergeEntryVisibility() {
-    if (!stepwiseMergeBtn) return;
-    const visible = state.referenceImages.length >= 3;
-    stepwiseMergeBtn.classList.toggle('hidden', !visible);
-    stepwiseMergeBtn.disabled = !visible;
-    stepwiseMergeBtn.setAttribute('aria-disabled', visible ? 'false' : 'true');
-  }
-
-  function openStepwiseMergeModal() {
-    if (!stepwiseMergeModal || !stepwiseMergeGrid) return;
-    if (state.referenceImages.length < 3) {
-      toast('至少需要 3 张参考图才能分步合成', 'warning');
-      return;
-    }
-    stepwiseMergeState.active = true;
-    stepwiseMergeState.pendingRefs = state.referenceImages.map((item) => ({ ...item }));
-    stepwiseMergeState.selectedIds = new Set();
-    renderStepwiseMergeGrid();
-    stepwiseMergeModal.classList.remove('hidden');
-    stepwiseMergeModal.setAttribute('aria-hidden', 'false');
-  }
-
-  function closeStepwiseMergeModal() {
-    if (!stepwiseMergeModal) return;
-    stepwiseMergeState.active = false;
-    stepwiseMergeState.selectedIds = new Set();
-    stepwiseMergeModal.classList.add('hidden');
-    stepwiseMergeModal.setAttribute('aria-hidden', 'true');
-  }
-
-  function updateStepwiseMergeConfirm() {
-    if (!stepwiseMergeConfirm) return;
-    stepwiseMergeConfirm.disabled = stepwiseMergeState.selectedIds.size !== 2;
-  }
-
-  function renderStepwiseMergeGrid() {
-    if (!stepwiseMergeGrid) return;
-    stepwiseMergeGrid.innerHTML = '';
-    stepwiseMergeState.pendingRefs.forEach((item) => {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'stepwise-merge-card';
-      if (stepwiseMergeState.selectedIds.has(item.id)) {
-        card.classList.add('is-selected');
-      }
-      card.dataset.id = item.id;
-      card.addEventListener('click', () => {
-        toggleStepwiseSelection(item.id);
-      });
-
-      const img = document.createElement('img');
-      img.src = item.data;
-      img.alt = item.mentionAlias || item.name || 'reference';
-      img.loading = 'lazy';
-      card.appendChild(img);
-
-      const label = document.createElement('span');
-      label.className = 'stepwise-merge-card-label';
-      label.textContent = item.mentionAlias || item.name || 'Image';
-      card.appendChild(label);
-
-      stepwiseMergeGrid.appendChild(card);
-    });
-    updateStepwiseMergeConfirm();
-  }
-
-  function toggleStepwiseSelection(id) {
-    if (!id) return;
-    if (stepwiseMergeState.selectedIds.has(id)) {
-      stepwiseMergeState.selectedIds.delete(id);
-      renderStepwiseMergeGrid();
-      return;
-    }
-    if (stepwiseMergeState.selectedIds.size >= 2) {
-      toast('首步只能选择两张参考图', 'warning');
-      return;
-    }
-    stepwiseMergeState.selectedIds.add(id);
-    renderStepwiseMergeGrid();
-  }
-
-  async function startStepwiseMerge() {
-    if (typeof runStepwiseMerge === 'function') {
-      await runStepwiseMerge();
-    }
   }
 
   function getParentMemoryApi() {
@@ -1001,34 +901,6 @@
     syncPromptRichInputFromTextarea();
   }
 
-  function trimReferenceImagesToLimit() {
-    if (state.referenceImages.length <= REFERENCE_LIMIT) return;
-    let overflow = state.referenceImages.length - REFERENCE_LIMIT;
-    const removeIndexes = new Set();
-    state.referenceImages.forEach((item, index) => {
-      if (overflow <= 0) return;
-      if (!item.stepResult) {
-        removeIndexes.add(index);
-        overflow -= 1;
-      }
-    });
-    for (let i = 0; i < state.referenceImages.length && overflow > 0; i += 1) {
-      if (removeIndexes.has(i)) continue;
-      removeIndexes.add(i);
-      overflow -= 1;
-    }
-    if (removeIndexes.size) {
-      state.referenceImages = state.referenceImages.filter((_, index) => !removeIndexes.has(index));
-    }
-  }
-
-  function markStepResult(entry, stepIndex, stepTotal) {
-    if (!entry) return;
-    entry.stepResult = true;
-    entry.stepIndex = Number(stepIndex || 0);
-    entry.stepTotal = Number(stepTotal || 0);
-  }
-
   function updateReferenceSummary() {
     if (!seedFileName) return;
     seedFileName.textContent = `已添加 ${state.referenceImages.length}/${REFERENCE_LIMIT} 张`;
@@ -1043,7 +915,6 @@
       empty.textContent = `可上传 / 粘贴 / 拖拽参考图（最多 ${REFERENCE_LIMIT} 张）`;
       referenceStrip.appendChild(empty);
       updateReferenceSummary();
-      updateStepwiseMergeEntryVisibility();
       return;
     }
 
@@ -1102,7 +973,6 @@
       referenceStrip.appendChild(addSlot);
     }
     updateReferenceSummary();
-    updateStepwiseMergeEntryVisibility();
   }
 
   function previewReference(id) {
@@ -1609,12 +1479,7 @@
       const roundLabel = entry.roundTotal && entry.roundTotal > 1
         ? `#${entry.round}-${entry.roundIndex || 1}`
         : `#${entry.round}`;
-      const stepTotal = Number(entry.stepTotal || 0);
-      const stepIndex = Number(entry.stepIndex || 0);
-      const stepBadge = entry.stepResult
-        ? `<span class="history-step-badge">Step ${stepIndex || 1}/${stepTotal || stepIndex || 1}</span>`
-        : '';
-      line1.innerHTML = `<strong>${roundLabel}</strong>${stepBadge ? ` ${stepBadge}` : ''} 路 ${formatTime(entry.createdAt)} 路 ${entry.elapsedMs}ms`;
+      line1.innerHTML = `<strong>${roundLabel}</strong> 路 ${formatTime(entry.createdAt)} 路 ${entry.elapsedMs}ms`;
 
       const line2 = document.createElement('div');
       line2.className = 'history-line';
@@ -1854,38 +1719,6 @@
     return authHeader;
   }
 
-  function buildStepwiseReferencePayload(items) {
-    const references = items
-      .map((item) => String((item && (item.data || item.imageUrl || item.url)) || '').trim())
-      .filter(Boolean);
-    const referenceItems = items
-      .map((item, index) => {
-        const imageUrl = String((item && (item.data || item.imageUrl || item.url)) || '').trim();
-        const sourceImageUrl = String((item && (item.sourceImageUrl || item.source_image_url)) || imageUrl || '').trim();
-        const originalId = String((item && (item.originalId || item.parentPostId)) || extractParentPostId(sourceImageUrl || imageUrl) || '').trim();
-        return {
-          image_url: imageUrl,
-          source_image_url: sourceImageUrl,
-          parent_post_id: '',
-          original_id: originalId,
-          mention_alias: (item && item.mentionAlias) ? item.mentionAlias : `Image ${index + 1}`,
-        };
-      })
-      .filter((item) => item.image_url || item.source_image_url || item.parent_post_id);
-    if (!references.length) return null;
-    const payload = {
-      image_references: references,
-      reference_items: referenceItems,
-    };
-    const firstRef = references[0];
-    if (firstRef && firstRef.startsWith('data:image/')) {
-      payload.image_base64 = firstRef;
-    } else if (firstRef) {
-      payload.image_url = firstRef;
-    }
-    return payload;
-  }
-
   async function runEdit() {
     if (state.editing) {
       if (workbenchEditAbortController) {
@@ -2079,253 +1912,12 @@
     }
   }
 
-  async function runStepwiseMerge() {
-    if (state.editing) {
-      if (workbenchEditAbortController) {
-        workbenchEditAbortController.abort();
-      }
-      return;
-    }
-
-    const prompt = getPromptValue();
-    if (!prompt) {
-      toast('请输入编辑提示词', 'warning');
-      return;
-    }
-
-    if (state.referenceImages.length < 3) {
-      toast('至少需要 3 张参考图才能分步合成', 'warning');
-      return;
-    }
-
-    if (stepwiseMergeState.selectedIds.size !== 2) {
-      toast('请先选择两张首步参考图', 'warning');
-      return;
-    }
-
-    let authHeader = '';
-    try {
-      authHeader = await ensurePublicAuth();
-    } catch (e) {
-      toast(String(e.message || e), 'error');
-      if (String(e.message || '').includes('登录')) {
-        window.location.href = '/login';
-      }
-      return;
-    }
-
-    const orderedRefs = state.referenceImages.slice();
-    const selectedInOrder = orderedRefs.filter((item) => stepwiseMergeState.selectedIds.has(item.id));
-    if (selectedInOrder.length !== 2) {
-      toast('首步参考图选择异常', 'warning');
-      return;
-    }
-    const remaining = orderedRefs.filter((item) => !stepwiseMergeState.selectedIds.has(item.id));
-
-    closeStepwiseMergeModal();
-    stepwiseMergeState.totalSteps = remaining.length + 1;
-    stepwiseMergeState.currentStep = 0;
-    stepwiseMergeState.lastResultUrl = '';
-
-    setEditing(true);
-    forceSubmitButtonAbortClickable();
-    startEditProgress();
-    setStatus('running', `分步合成 1/${stepwiseMergeState.totalSteps}`);
-
-    try {
-      let currentRef = await mergeStepwisePair(selectedInOrder[0], selectedInOrder[1], 1, authHeader, prompt);
-      for (let i = 0; i < remaining.length; i += 1) {
-        currentRef = await mergeStepwisePair(currentRef, remaining[i], i + 2, authHeader, prompt);
-      }
-      finishEditProgress(true, '分步合成完成 100%');
-      setStatus('done', `分步合成完成 · ${stepwiseMergeState.totalSteps} 步`);
-      toast('分步合成成功', 'success');
-    } catch (e) {
-      if (e && e.name === 'AbortError') {
-        finishEditProgress(false, '已中止');
-        setStatus('error', '已中止');
-        toast('已中止编辑', 'warning');
-      } else {
-        finishEditProgress(false, '分步合成失败');
-        setStatus('error', '分步合成失败');
-        toast(String(e.message || e), 'error');
-      }
-    } finally {
-      workbenchEditAbortController = null;
-      setEditing(false);
-    }
-  }
-
-  async function mergeStepwisePair(leftRef, rightRef, stepIndex, authHeader, prompt) {
-    const stepTotal = Math.max(1, stepwiseMergeState.totalSteps || 1);
-    stepwiseMergeState.currentStep = stepIndex;
-    const stepLabel = `分步合成 ${stepIndex}/${stepTotal}`;
-    const payloadBase = buildStepwiseReferencePayload([leftRef, rightRef]);
-    if (!payloadBase || !payloadBase.reference_items || payloadBase.reference_items.length < 2) {
-      throw new Error('参考图不足，无法分步合成');
-    }
-
-    let lastError = null;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      workbenchEditAbortController = new AbortController();
-      try {
-        const payload = await requestWorkbenchEditStream(authHeader, {
-          prompt,
-          stream: true,
-          ...payloadBase,
-        }, (evt) => {
-          forceSubmitButtonAbortClickable();
-          const next = Number(evt && evt.progress ? evt.progress : 0);
-          const message = String((evt && evt.message) || '').trim();
-          if (Number.isFinite(next) && next > 0) {
-            const stepProgress = Math.max(1, Math.min(99, next));
-            const overall = Math.round((((stepIndex - 1) + stepProgress / 100) / stepTotal) * 100);
-            const safeOverall = Math.max(editProgressValue, Math.min(99, overall));
-            setEditProgress(safeOverall, message ? `${stepLabel} · ${message} · ${safeOverall}%` : `${stepLabel} · ${safeOverall}%`);
-            setStatus('running', message ? `${stepLabel} · ${message}` : stepLabel);
-          } else if (message) {
-            setEditProgress(editProgressValue, `${stepLabel} · ${message}`);
-            setStatus('running', `${stepLabel} · ${message}`);
-          }
-        }, workbenchEditAbortController ? workbenchEditAbortController.signal : undefined);
-
-        const imageUrls = Array.isArray(payload?.data)
-          ? payload.data
-            .map((item) => String((item && item.url) || '').trim())
-            .filter(Boolean)
-          : [];
-        const imageUrl = imageUrls[0] || '';
-        if (!imageUrl) {
-          throw new Error('返回结果缺少图片 URL');
-        }
-
-        const generatedParent = String(
-          payload.current_parent_post_id
-          || payload.generated_parent_post_id
-          || payload.input_parent_post_id
-          || extractParentPostId(imageUrl)
-        ).trim();
-        const resolvedParentPostId = generatedParent || extractParentPostId(imageUrl) || '';
-
-        const sourceImageUrl = pickSourceImageUrl(
-          {
-            current_source_image_url: payload.current_source_image_url,
-            source_image_url: payload.source_image_url,
-            imageUrl,
-          },
-          resolvedParentPostId,
-          imageUrl
-        );
-
-        const mode = String(payload.mode || 'upload').trim();
-        const elapsedMs = Number(payload.elapsed_ms || 0);
-
-        state.currentParentPostId = resolvedParentPostId;
-        state.currentSourceImageUrl = sourceImageUrl;
-        state.currentModeValue = mode || 'upload';
-        if (parentPostInput) {
-          parentPostInput.value = state.currentParentPostId || '';
-        }
-        setPreviewImages(imageUrls);
-        updateMeta();
-
-        state.editRound += 1;
-        const createdAt = Date.now();
-        const historyEntries = imageUrls.map((url, index) => {
-          const perParentPostId = String(extractParentPostId(url) || resolvedParentPostId || '').trim();
-          const entry = {
-            id: `${createdAt}_${index}_${Math.random().toString(16).slice(2, 8)}`,
-            round: state.editRound,
-            roundIndex: index + 1,
-            roundTotal: imageUrls.length,
-            prompt,
-            mode: state.currentModeValue,
-            imageUrl: url,
-            imageUrls,
-            parentPostId: perParentPostId,
-            sourceImageUrl: String(url || sourceImageUrl || '').trim(),
-            elapsedMs: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : 0,
-            createdAt,
-          };
-          markStepResult(entry, stepIndex, stepTotal);
-          return entry;
-        });
-        state.history = [...historyEntries, ...state.history];
-        renderHistory();
-        historyEntries.forEach((entry) => {
-          rememberParentPost({
-            parentPostId: entry.parentPostId || resolvedParentPostId,
-            sourceImageUrl: entry.sourceImageUrl || sourceImageUrl,
-            imageUrl: entry.imageUrl || imageUrl,
-            origin: 'workbench_stepwise_merge',
-          });
-        });
-
-        const refEntry = {
-          id: buildRefId(),
-          name: `Step ${stepIndex}`,
-          mime: '',
-          data: imageUrl,
-          source: 'step_result',
-          parentPostId: resolvedParentPostId,
-          sourceImageUrl: sourceImageUrl || imageUrl,
-          isPrimary: false,
-          createdAt: Date.now(),
-          stepResult: true,
-          stepIndex,
-          stepTotal,
-        };
-        state.referenceImages.push(refEntry);
-        normalizeReferenceOrder();
-        trimReferenceImagesToLimit();
-        normalizeReferenceOrder();
-        renderReferenceStrip();
-
-        stepwiseMergeState.lastResultUrl = imageUrl;
-        setEditProgress(Math.round((stepIndex / stepTotal) * 100), `${stepLabel} 完成`);
-        workbenchEditAbortController = null;
-        return refEntry;
-      } catch (e) {
-        lastError = e;
-        if (e && e.name === 'AbortError') {
-          throw e;
-        }
-        workbenchEditAbortController = null;
-        if (attempt < 2) {
-          toast(`Step ${stepIndex} 失败，正在重试...`, 'warning');
-        }
-      } finally {
-        if (workbenchEditAbortController && workbenchEditAbortController.signal?.aborted) {
-          workbenchEditAbortController = null;
-        }
-      }
-    }
-    throw lastError || new Error('stepwise_merge_failed');
-  }
-
   function bindEvents() {
     if (previewLightbox) {
       previewLightbox.addEventListener('click', (event) => {
         const target = event.target;
         if (target === previewLightbox || (target && target.matches('[data-preview-close]'))) {
           closePreviewLightbox();
-        }
-      });
-    }
-
-    if (stepwiseMergeBtn) {
-      stepwiseMergeBtn.addEventListener('click', openStepwiseMergeModal);
-    }
-    if (stepwiseMergeCancel) {
-      stepwiseMergeCancel.addEventListener('click', closeStepwiseMergeModal);
-    }
-    if (stepwiseMergeConfirm) {
-      stepwiseMergeConfirm.addEventListener('click', startStepwiseMerge);
-    }
-    if (stepwiseMergeModal) {
-      stepwiseMergeModal.addEventListener('click', (event) => {
-        if (event.target === stepwiseMergeModal) {
-          closeStepwiseMergeModal();
         }
       });
     }

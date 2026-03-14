@@ -137,22 +137,6 @@ def _resolve_source_image_url(
     return ""
 
 
-async def _canonicalize_parent_source_image_url(
-    token: str,
-    parent_post_id: str,
-    source_image_url: str = "",
-) -> str:
-    """为 parentPostId 场景生成稳定的 source_image_url。"""
-    raw_url = str(source_image_url or "").strip()
-    if raw_url:
-        return _resolve_source_image_url(
-            image_url=raw_url,
-            parent_post_id=parent_post_id,
-            fallback_source_image_url=raw_url,
-        )
-    return _build_imagine_public_url(parent_post_id)
-
-
 def _mask_token(token: str) -> str:
     raw = str(token or "").replace("sso=", "")
     if len(raw) <= 12:

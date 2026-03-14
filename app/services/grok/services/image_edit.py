@@ -423,7 +423,7 @@ class ImageEditService:
                     "已提交编辑请求",
                     parent_post_id=parent_post_id or "",
                 )
-                images_out = await self._collect_images_with_retry(
+                images_out = await self._collect_images(
                     token=current_token,
                     prompt=prompt,
                     model_info=model_info,
@@ -634,7 +634,7 @@ class ImageEditService:
                     parent_post_id=effective_parent_post_id,
                 )
                 try:
-                    images_out = await self._collect_images_with_retry(
+                    images_out = await self._collect_images(
                         token=current_token,
                         prompt=prompt,
                         model_info=model_info,
@@ -1017,7 +1017,7 @@ class ImageEditService:
                     )
 
                 try:
-                    images_out = await self._collect_images_with_retry(
+                    images_out = await self._collect_images(
                         token=current_token,
                         prompt=prompt_text,
                         model_info=model_info,
@@ -1177,10 +1177,9 @@ class ImageEditService:
                 response_format=response_format,
                 progress_cb=tracked_progress_cb,
             )
-            images = await processor.process(response)
-            return images, processor
+            return await processor.process(response)
 
-        all_images, processor = await _call_edit()
+        all_images = await _call_edit()
 
         if not all_images:
             details = {
@@ -1189,22 +1188,6 @@ class ImageEditService:
                 "image_count": 0,
                 "last_event": collect_state["last_event"],
                 "reference_count": reference_count,
-                "payload_keys": getattr(processor, "last_payload_keys", []),
-                "result_keys": getattr(processor, "last_result_keys", []),
-                "response_keys": getattr(processor, "last_response_keys", []),
-                "model_response_keys": getattr(processor, "last_model_response_keys", []),
-                "result_title": getattr(processor, "last_result_title", ""),
-                "response_id": getattr(processor, "last_response_id", ""),
-                "payload_summary": getattr(processor, "last_payload_summary", {}),
-                "result_summary": getattr(processor, "last_result_summary", {}),
-                "response_summary": getattr(processor, "last_response_summary", {}),
-                "model_response_summary": getattr(processor, "last_model_response_summary", {}),
-                "model_response_stream_errors": getattr(
-                    processor, "last_model_response_stream_errors", {}
-                ),
-                "model_response_tool_responses": getattr(
-                    processor, "last_model_response_tool_responses", {}
-                ),
             }
             message = (
                 "Image edit upstream connected but returned no image URLs"
@@ -1219,73 +1202,6 @@ class ImageEditService:
         if return_all_images:
             return all_images
         return [all_images[0]]
-
-    @staticmethod
-    def _is_multipart_empty_error(exc: Exception) -> bool:
-        if not isinstance(exc, UpstreamException):
-            return False
-        details = getattr(exc, "details", None)
-        if not isinstance(details, dict):
-            return False
-        stream_errors = details.get("model_response_stream_errors") or {}
-        sample_message = str(stream_errors.get("sample_message") or stream_errors.get("sample") or "")
-        if "no image chunks parsed from multipart response" in sample_message.lower():
-            return True
-        return False
-
-    async def _collect_images_with_retry(
-        self,
-        *,
-        token: str,
-        prompt: str,
-        model_info: Any,
-        response_format: str,
-        tool_overrides: dict,
-        model_config_override: dict,
-        file_attachments: List[str] | None = None,
-        return_all_images: bool = False,
-        progress_cb: Callable[[str, dict], Any] | None = None,
-    ) -> List[str]:
-        try:
-            return await self._collect_images(
-                token=token,
-                prompt=prompt,
-                model_info=model_info,
-                response_format=response_format,
-                tool_overrides=tool_overrides,
-                model_config_override=model_config_override,
-                file_attachments=file_attachments,
-                return_all_images=return_all_images,
-                progress_cb=progress_cb,
-            )
-        except UpstreamException as e:
-            if not self._is_multipart_empty_error(e):
-                raise
-            logger.warning(
-                "Image edit empty multipart response, retrying once: "
-                f"token={token[:10]}..."
-            )
-            try:
-                return await self._collect_images(
-                    token=token,
-                    prompt=prompt,
-                    model_info=model_info,
-                    response_format=response_format,
-                    tool_overrides=tool_overrides,
-                    model_config_override=model_config_override,
-                    file_attachments=file_attachments,
-                    return_all_images=return_all_images,
-                    progress_cb=progress_cb,
-                )
-            except UpstreamException as retry_err:
-                if self._is_multipart_empty_error(retry_err):
-                    raise AppException(
-                        message="上游未返回图片结果，请稍后重试或减少图片数量",
-                        error_type=ErrorType.SERVER.value,
-                        code="image_edit_empty_result",
-                        status_code=502,
-                    )
-                raise
 
 
 class ImageStreamProcessor(BaseProcessor):
@@ -1327,11 +1243,7 @@ class ImageStreamProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                result_root = data.get("result", {}) if isinstance(data, dict) else {}
-                resp = result_root.get("response", {}) if isinstance(result_root, dict) else {}
-                self.last_payload_keys = self._sorted_keys(data)
-                self.last_result_keys = self._sorted_keys(result_root)
-                self.last_response_keys = self._sorted_keys(resp)
+                resp = data.get("result", {}).get("response", {})
 
                 # Image generation progress
                 if img := resp.get("streamingImageGenerationResponse"):
@@ -1466,91 +1378,6 @@ class ImageCollectProcessor(BaseProcessor):
         super().__init__(model, token)
         self.response_format = response_format
         self.progress_cb = progress_cb
-        self.last_payload_keys: list[str] = []
-        self.last_result_keys: list[str] = []
-        self.last_response_keys: list[str] = []
-        self.last_model_response_keys: list[str] = []
-        self.last_result_title: str = ""
-        self.last_response_id: str = ""
-        self.last_payload_summary: dict[str, dict] = {}
-        self.last_result_summary: dict[str, dict] = {}
-        self.last_response_summary: dict[str, dict] = {}
-        self.last_model_response_summary: dict[str, dict] = {}
-        self.last_model_response_stream_errors: dict[str, Any] = {}
-        self.last_model_response_tool_responses: dict[str, Any] = {}
-
-    @staticmethod
-    def _sorted_keys(value: Any) -> list[str]:
-        if not isinstance(value, dict):
-            return []
-        return sorted([str(key) for key in value.keys()])
-
-    @staticmethod
-    def _summarize_image_fields(value: Any) -> dict[str, dict]:
-        if not isinstance(value, dict):
-            return {}
-        summary: dict[str, dict] = {}
-        keys = (
-            "generatedImageUrls",
-            "imageUrls",
-            "imageURLs",
-            "imageEditUris",
-            "fileUris",
-            "imageAttachments",
-        )
-        for key in keys:
-            if key not in value:
-                continue
-            item = value.get(key)
-            entry: dict[str, Any] = {}
-            if isinstance(item, list):
-                entry["count"] = len(item)
-                if item:
-                    first = item[0]
-                    if isinstance(first, dict):
-                        entry["sample_keys"] = sorted([str(k) for k in first.keys()])[:6]
-                    else:
-                        entry["sample_type"] = type(first).__name__
-                        if isinstance(first, str):
-                            entry["sample"] = first[:160]
-            elif isinstance(item, str):
-                entry["count"] = 1
-                entry["sample"] = item[:160]
-            else:
-                entry["type"] = type(item).__name__
-            summary[key] = entry
-        return summary
-
-    @staticmethod
-    def _summarize_list_field(value: Any) -> dict[str, Any]:
-        summary: dict[str, Any] = {}
-        if value is None:
-            return summary
-        if isinstance(value, list):
-            summary["count"] = len(value)
-            if value:
-                first = value[0]
-                if isinstance(first, dict):
-                    summary["sample_keys"] = sorted([str(k) for k in first.keys()])[:6]
-                    message = first.get("message")
-                    internal_error = first.get("internalError")
-                    if isinstance(message, str) and message:
-                        summary["sample_message"] = message[:160]
-                    elif isinstance(internal_error, str) and internal_error:
-                        summary["sample_message"] = internal_error[:160]
-                else:
-                    summary["sample_type"] = type(first).__name__
-                    if isinstance(first, str):
-                        summary["sample"] = first[:160]
-            return summary
-        if isinstance(value, dict):
-            summary["count"] = len(value)
-            summary["sample_keys"] = sorted([str(k) for k in value.keys()])[:6]
-            return summary
-        summary["type"] = type(value).__name__
-        if isinstance(value, str):
-            summary["sample"] = value[:160]
-        return summary
 
     async def _emit_progress(
         self, event: str, progress: int, message: str, **extra: Any
@@ -1583,34 +1410,7 @@ class ImageCollectProcessor(BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                result_root = data.get("result", {}) if isinstance(data, dict) else {}
-                resp = result_root.get("response", {}) if isinstance(result_root, dict) else {}
-                payload_keys = self._sorted_keys(data)
-                if payload_keys:
-                    self.last_payload_keys = payload_keys
-                result_keys = self._sorted_keys(result_root)
-                if result_keys:
-                    self.last_result_keys = result_keys
-                response_keys = self._sorted_keys(resp)
-                if response_keys:
-                    self.last_response_keys = response_keys
-                if isinstance(result_root, dict):
-                    title = result_root.get("title")
-                    if isinstance(title, str) and title:
-                        self.last_result_title = title
-                if isinstance(resp, dict):
-                    response_id = resp.get("responseId")
-                    if isinstance(response_id, str) and response_id:
-                        self.last_response_id = response_id
-                payload_summary = self._summarize_image_fields(data)
-                if payload_summary:
-                    self.last_payload_summary = payload_summary
-                result_summary = self._summarize_image_fields(result_root)
-                if result_summary:
-                    self.last_result_summary = result_summary
-                response_summary = self._summarize_image_fields(resp)
-                if response_summary:
-                    self.last_response_summary = response_summary
+                resp = data.get("result", {}).get("response", {})
                 if not chat_connected_emitted and resp:
                     chat_connected_emitted = True
                     await self._emit_progress(
@@ -1619,82 +1419,60 @@ class ImageCollectProcessor(BaseProcessor):
                         "模型连接成功，正在生成图片",
                     )
 
-                urls = []
-                if mr := (resp.get("modelResponse") if isinstance(resp, dict) else None):
-                    model_response_keys = self._sorted_keys(mr)
-                    if model_response_keys:
-                        self.last_model_response_keys = model_response_keys
-                    model_response_summary = self._summarize_image_fields(mr)
-                    if model_response_summary:
-                        self.last_model_response_summary = model_response_summary
-                    if isinstance(mr, dict):
-                        stream_errors = self._summarize_list_field(mr.get("streamErrors"))
-                        if stream_errors:
-                            self.last_model_response_stream_errors = stream_errors
-                        tool_responses = self._summarize_list_field(mr.get("toolResponses"))
-                        if tool_responses:
-                            self.last_model_response_tool_responses = tool_responses
-                    urls = _collect_images(mr)
-                if not urls and resp:
-                    urls = _collect_images(resp)
-                if not urls and (data.get("result") if isinstance(data, dict) else None):
-                    urls = _collect_images(data.get("result"))
-                if not urls:
-                    urls = _collect_images(data)
-
-                if urls:
-                    for url in urls:
-                        if self.response_format == "url":
+                if mr := resp.get("modelResponse"):
+                    if urls := _collect_images(mr):
+                        for url in urls:
+                            if self.response_format == "url":
+                                try:
+                                    processed = await self.process_url(url, "image")
+                                except Exception as e:
+                                    logger.warning(
+                                        "Image collect URL resolve failed, fallback to raw URL: "
+                                        f"error={e}"
+                                    )
+                                    processed = _normalize_fallback_image_url(url)
+                                if processed:
+                                    images.append(processed)
+                                    progress = min(90, 64 + len(images) * 12)
+                                    await self._emit_progress(
+                                        "image_downloaded",
+                                        progress,
+                                        f"已下载第 {len(images)} 张图片",
+                                        count=len(images),
+                                    )
+                                continue
                             try:
-                                processed = await self.process_url(url, "image")
+                                dl_service = self._get_dl()
+                                base64_data = await dl_service.parse_b64(
+                                    url, self.token, "image"
+                                )
+                                if base64_data:
+                                    if "," in base64_data:
+                                        b64 = base64_data.split(",", 1)[1]
+                                    else:
+                                        b64 = base64_data
+                                    images.append(b64)
+                                    progress = min(90, 64 + len(images) * 12)
+                                    await self._emit_progress(
+                                        "image_downloaded",
+                                        progress,
+                                        f"已下载第 {len(images)} 张图片",
+                                        count=len(images),
+                                    )
                             except Exception as e:
                                 logger.warning(
-                                    "Image collect URL resolve failed, fallback to raw URL: "
-                                    f"error={e}"
+                                    f"Failed to convert image to base64, falling back to URL: {e}"
                                 )
-                                processed = _normalize_fallback_image_url(url)
-                            if processed:
-                                images.append(processed)
-                                progress = min(90, 64 + len(images) * 12)
-                                await self._emit_progress(
-                                    "image_downloaded",
-                                    progress,
-                                    f"已下载第 {len(images)} 张图片",
-                                    count=len(images),
-                                )
-                            continue
-                        try:
-                            dl_service = self._get_dl()
-                            base64_data = await dl_service.parse_b64(
-                                url, self.token, "image"
-                            )
-                            if base64_data:
-                                if "," in base64_data:
-                                    b64 = base64_data.split(",", 1)[1]
-                                else:
-                                    b64 = base64_data
-                                images.append(b64)
-                                progress = min(90, 64 + len(images) * 12)
-                                await self._emit_progress(
-                                    "image_downloaded",
-                                    progress,
-                                    f"已下载第 {len(images)} 张图片",
-                                    count=len(images),
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to convert image to base64, falling back to URL: {e}"
-                            )
-                            processed = await self.process_url(url, "image")
-                            if processed:
-                                images.append(processed)
-                                progress = min(90, 64 + len(images) * 12)
-                                await self._emit_progress(
-                                    "image_downloaded",
-                                    progress,
-                                    f"已下载第 {len(images)} 张图片",
-                                    count=len(images),
-                                )
+                                processed = await self.process_url(url, "image")
+                                if processed:
+                                    images.append(processed)
+                                    progress = min(90, 64 + len(images) * 12)
+                                    await self._emit_progress(
+                                        "image_downloaded",
+                                        progress,
+                                        f"已下载第 {len(images)} 张图片",
+                                        count=len(images),
+                                    )
 
         except asyncio.CancelledError:
             logger.debug("Image collect cancelled by client")

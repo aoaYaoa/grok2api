@@ -64,23 +64,5 @@ class ImagineSourceUrlResolutionTests(unittest.TestCase):
         )
 
 
-class ImagineParentSourceCanonicalizationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_canonicalize_parent_source_image_url_falls_back_to_imagine_public(self):
-        parent_post_id = '9e51c8d6-e799-41fd-86bb-e697d88c6937'
-        self.assertTrue(
-            hasattr(imagine, '_canonicalize_parent_source_image_url'),
-            'missing _canonicalize_parent_source_image_url helper',
-        )
-        result = await imagine._canonicalize_parent_source_image_url(
-            'test-token',
-            parent_post_id,
-            '',
-        )
-        self.assertEqual(
-            result,
-            f'https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg',
-        )
-
-
 if __name__ == '__main__':
     unittest.main()
