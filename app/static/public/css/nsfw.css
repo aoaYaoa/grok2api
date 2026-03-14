@@ -1489,3 +1489,66 @@ html[data-theme='dark'] .nsfw-settings-sheet {
     margin-left: 0 !important;
   }
 }
+
+/* ============================
+   NSFW Sticky Bar 最终规范（与 imagine 对齐：40px / 14px / 600）
+   ============================ */
+@media (max-width: 900px) {
+  /* 统一图标按钮尺寸 */
+  .nsfw-icon-btn {
+    width: 40px !important;
+    height: 40px !important;
+    border-radius: 10px !important;
+  }
+
+  /* 统一主按钮：高度/字体与 imagine .im-main-btn 保持一致 */
+  .nsfw-main-btn {
+    height: 40px !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    padding: 0 16px !important;
+    min-width: 90px !important;
+    margin-left: 0 !important;
+  }
+
+  /* nsfw-image-actions / nsfw-video-actions gap 统一 */
+  .nsfw-image-actions,
+  .nsfw-video-actions {
+    gap: 8px !important;
+  }
+
+  /* 行最小高度与 imagine 一致 */
+  .nsfw-sticky-row {
+    min-height: 52px !important;
+    padding: 6px 0 !important;
+    gap: 8px !important;
+  }
+
+  /* 行内 padding 保持对称 */
+  .nsfw-sticky-bar {
+    padding: 4px 14px !important;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* 暗色主题（移动端，sticky bar 可见时） */
+  html[data-theme='dark'] .nsfw-sticky-bar {
+    background: #111821 !important;
+    border-top-color: #2b3440 !important;
+  }
+
+  html[data-theme='dark'] .nsfw-icon-btn {
+    background: #1a2330 !important;
+    border-color: #3b4654 !important;
+    color: #c9d6e5 !important;
+  }
+
+  html[data-theme='dark'] .nsfw-icon-btn:active {
+    background: #243244 !important;
+  }
+
+  html[data-theme='dark'] .nsfw-settings-sheet {
+    background: #111821 !important;
+    color: #e2e8f0 !important;
+  }
+}

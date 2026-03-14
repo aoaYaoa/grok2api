@@ -1537,3 +1537,45 @@ html[data-theme='dark'] .im-settings-sheet {
     display: flex !important;
   }
 }
+
+/* ============================
+   Imagine Sticky Bar 样式分离修正
+   （暗色主题和 Bottom Sheet 内规则严格在移动端生效）
+   ============================ */
+@media (max-width: 900px) {
+  /* Bottom Sheet 内参数 */
+  .im-settings-sheet .settings-grid {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto !important;
+  }
+
+  .im-settings-sheet .settings-block {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+  }
+
+  .im-settings-sheet .settings-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* 暗色主题（移动端，sticky bar 可见时） */
+  html[data-theme='dark'] .im-sticky-bar {
+    background: #111821 !important;
+    border-top-color: #2b3440 !important;
+  }
+
+  html[data-theme='dark'] .im-icon-btn {
+    background: #1a2330 !important;
+    border-color: #3b4654 !important;
+    color: #c9d6e5 !important;
+  }
+
+  html[data-theme='dark'] .im-icon-btn:active {
+    background: #243244 !important;
+  }
+
+  html[data-theme='dark'] .im-settings-sheet {
+    background: #111821 !important;
+    color: #e2e8f0 !important;
+  }
+}
