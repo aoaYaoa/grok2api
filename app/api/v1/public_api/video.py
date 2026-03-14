@@ -323,6 +323,17 @@ def _normalize_string_list(values: Optional[List[str]]) -> List[str]:
 def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
 
+    def _normalize_parent_item(
+        parent_post_id: str,
+        image_url: str,
+        source_image_url: str,
+    ) -> tuple[str, str, str]:
+        if parent_post_id and image_url:
+            if not source_image_url:
+                source_image_url = image_url
+            image_url = ""
+        return parent_post_id, image_url, source_image_url
+
     for raw in data.reference_items or []:
         if not isinstance(raw, dict):
             continue
@@ -334,6 +345,9 @@ def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
             _validate_image_url(image_url)
         if source_image_url:
             _validate_image_url(source_image_url)
+        parent_post_id, image_url, source_image_url = _normalize_parent_item(
+            parent_post_id, image_url, source_image_url
+        )
         if parent_post_id or image_url or source_image_url:
             items.append(
                 {
@@ -362,6 +376,9 @@ def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
         _validate_image_url(single_image_url)
     if single_source_image_url:
         _validate_image_url(single_source_image_url)
+    single_parent, single_image_url, single_source_image_url = _normalize_parent_item(
+        single_parent, single_image_url, single_source_image_url
+    )
     if single_parent or single_image_url or single_source_image_url:
         items.insert(
             0,

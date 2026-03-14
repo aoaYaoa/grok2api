@@ -1146,6 +1146,8 @@ class VideoService:
             prompt_text = ""
 
         image_core = (source_image_url or "").strip()
+        if image_core.startswith("data:"):
+            image_core = ""
         if prompt_text:
             mode_flag = "--mode=custom"
             if image_core:

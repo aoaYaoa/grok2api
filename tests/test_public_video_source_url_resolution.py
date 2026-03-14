@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 if 'aiohttp' not in sys.modules:
     aiohttp = types.ModuleType('aiohttp')
@@ -45,6 +46,7 @@ if 'aiohttp_socks' not in sys.modules:
     sys.modules['aiohttp_socks'] = aiohttp_socks
 
 from app.api.v1.public_api import video
+from app.api.v1.public_api.video import VideoStartRequest
 
 
 class PublicVideoSourceUrlResolutionTests(unittest.TestCase):
@@ -69,6 +71,36 @@ class PublicVideoSourceUrlResolutionTests(unittest.TestCase):
             result,
             'https://imagine-public.x.ai/imagine-public/images/37b7e1ef-2bba-4a9c-b47c-8d2580734617.jpg',
         )
+
+
+class PublicVideoReferenceNormalizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reference_item_parent_post_with_image_url_is_accepted(self):
+        payload = VideoStartRequest(
+            prompt="",
+            image_url=None,
+            parent_post_id=None,
+            source_image_url=None,
+            reference_items=[
+                {
+                    "parent_post_id": "137130a0-ef3f-43c7-b177-d6ca2b4d4a5d",
+                    "image_url": "https://imagine-public.x.ai/imagine-public/images/137130a0-ef3f-43c7-b177-d6ca2b4d4a5d.jpg",
+                    "source_image_url": "https://imagine-public.x.ai/imagine-public/images/137130a0-ef3f-43c7-b177-d6ca2b4d4a5d.jpg",
+                    "mention_alias": "Image 1",
+                }
+            ],
+            reasoning_effort="low",
+            aspect_ratio="3:2",
+            video_length=6,
+            resolution_name="480p",
+            preset="normal",
+            concurrent=1,
+        )
+
+        with patch("app.api.v1.public_api.video._new_session", AsyncMock(return_value="task-1")) as new_session:
+            result = await video.public_video_start(payload)
+
+        self.assertEqual(result.get("task_id"), "task-1")
+        new_session.assert_awaited_once()
 
 
 if __name__ == '__main__':
