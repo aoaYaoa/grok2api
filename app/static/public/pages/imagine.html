@@ -257,6 +257,23 @@
       清空
     </button>
     <span class="toolbar-sep"></span>
+    <button id="batchDownloadBtn"
+      class="batch-download-btn geist-button-outline text-xs px-3 gap-1 border-0 hover:bg-gray-100" title="批量下载">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
+      </svg>
+      <span>批量</span>
+    </button>
+    <div id="selectionToolbar" class="selection-toolbar hidden">
+      <button id="toggleSelectAllBtn"
+        class="geist-button-outline text-xs px-3 gap-1 border-0 hover:bg-gray-100">全选</button>
+      <button id="downloadSelectedBtn" class="geist-button-outline text-xs px-3 gap-1 border-0 hover:bg-gray-100">下载
+        <span id="selectedCount" class="selected-count">0</span></button>
+    </div>
+  </div>
+
   <!-- 移动端生成设置遮罩（Bottom Sheet） -->
   <div id="imSettingsOverlay" class="im-settings-overlay"></div>
 
