@@ -1473,3 +1473,19 @@ html[data-theme='dark'] .nsfw-settings-sheet {
     cursor: not-allowed;
   }
 }
+
+/* nsfw-image-actions：与 nsfw-video-actions 对齐 */
+@media (max-width: 900px) {
+  .nsfw-image-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  /* 覆盖：主按钮不再需要自己 margin-left:auto */
+  .nsfw-sticky-row--image .nsfw-main-btn {
+    margin-left: 0 !important;
+  }
+}
