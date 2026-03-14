@@ -60,6 +60,29 @@ class FakeProcessor:
         return []
 
 
+class FakeSummaryProcessor:
+    def __init__(self, model, token, response_format='url', progress_cb=None):
+        self.progress_cb = progress_cb
+        self.last_payload_keys = ['result']
+        self.last_result_keys = ['response']
+        self.last_response_keys = ['modelResponse']
+        self.last_model_response_keys = ['imageEditUris']
+        self.last_payload_summary = {}
+        self.last_result_summary = {}
+        self.last_response_summary = {}
+        self.last_model_response_summary = {
+            'imageEditUris': {
+                'count': 1,
+                'sample': 'https://assets.grok.com/users/demo/generated/abc/content'
+            }
+        }
+
+    async def process(self, response):
+        if self.progress_cb:
+            await self.progress_cb('chat_connected', {'progress': 60, 'message': '模型连接成功，正在生成图片'})
+        return []
+
+
 class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_collect_images_reports_connected_empty_state(self):
         service = ImageEditService()
@@ -81,6 +104,25 @@ class ImageEditCollectDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.details.get('error'), 'empty_result')
         self.assertEqual(ctx.exception.details.get('chat_connected'), True)
         self.assertEqual(ctx.exception.details.get('image_count'), 0)
+
+    async def test_collect_images_includes_model_response_summary(self):
+        service = ImageEditService()
+        model_info = SimpleNamespace(model_id='grok-image-edit-test', grok_model='imagine-image-edit')
+
+        with patch('app.services.grok.services.image_edit.GrokChatService.chat', AsyncMock(return_value=object())), \
+             patch('app.services.grok.services.image_edit.ImageCollectProcessor', FakeSummaryProcessor):
+            with self.assertRaises(UpstreamException) as ctx:
+                await service._collect_images(
+                    token='good-token',
+                    prompt='merge two people',
+                    model_info=model_info,
+                    response_format='url',
+                    tool_overrides={'imageGen': True},
+                    model_config_override={'modelMap': {}},
+                )
+
+        summary = ctx.exception.details.get('model_response_summary') or {}
+        self.assertEqual(summary.get('imageEditUris', {}).get('count'), 1)
 
 
 class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
@@ -151,6 +193,35 @@ class ImageEditCollectResponseRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processor.last_result_keys, ['response'])
         self.assertEqual(processor.last_response_keys, ['modelResponse'])
         self.assertEqual(processor.last_model_response_keys, ['status'])
+
+    async def test_collect_tracks_image_field_summary_when_no_images(self):
+        from app.services.grok.services.image_edit import ImageCollectProcessor
+        processor = ImageCollectProcessor('grok-image-edit-test', response_format='url')
+
+        async def stream():
+            payload = {
+                'result': {
+                    'response': {
+                        'modelResponse': {
+                            'imageEditUris': [
+                                'https://assets.grok.com/users/demo/generated/abc/content'
+                            ],
+                            'fileUris': [
+                                'https://assets.grok.com/users/demo/generated/def/content'
+                            ],
+                            'generatedImageUrls': []
+                        }
+                    }
+                }
+            }
+            yield orjson.dumps(payload)
+
+        images = await processor.process(stream())
+        self.assertEqual(images, [])
+        summary = processor.last_model_response_summary
+        self.assertEqual(summary['imageEditUris']['count'], 1)
+        self.assertEqual(summary['fileUris']['count'], 1)
+        self.assertEqual(summary['generatedImageUrls']['count'], 0)
 
 
 if __name__ == '__main__':
