@@ -1368,7 +1368,6 @@ html[data-theme='dark'] .chat-sidebar {
 .chat-shell {
   flex: 1;
   min-width: 0;
-  border-left: 1px solid var(--chat-border);
   padding-left: 16px;
 }
 
