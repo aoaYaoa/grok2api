@@ -46,6 +46,7 @@ if 'aiohttp_socks' not in sys.modules:
     sys.modules['aiohttp_socks'] = aiohttp_socks
 
 from app.services.grok.services.image_edit import ImageEditService
+from app.core.exceptions import UpstreamException
 
 
 class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -149,6 +150,84 @@ class ImageEditMultiReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertNotIn('parentPostId', config)
+
+    async def test_reference_items_empty_result_falls_back_to_upload_edit(self):
+        model_info = SimpleNamespace(
+            model_id='grok-image-edit-test',
+            grok_model='grok-2-image',
+            cost=SimpleNamespace(value='low'),
+        )
+        token_mgr = SimpleNamespace(consume=AsyncMock(return_value=True))
+        service = ImageEditService()
+        prepared_refs = [
+            {
+                "source_url": "data:image/png;base64,AAA",
+                "request_url": "https://assets.grok.com/users/demo/generated/first/content",
+                "resolved_url": "https://assets.grok.com/users/demo/generated/first/content",
+                "original_id": "",
+                "resolved_id": "first",
+                "mention_id": "first",
+                "attachment_id": "first",
+                "parent_post_id": "",
+                "mention_alias": "Image 1",
+            },
+            {
+                "source_url": "data:image/png;base64,BBB",
+                "request_url": "https://assets.grok.com/users/demo/generated/second/content",
+                "resolved_url": "https://assets.grok.com/users/demo/generated/second/content",
+                "original_id": "",
+                "resolved_id": "second",
+                "mention_id": "second",
+                "attachment_id": "second",
+                "parent_post_id": "",
+                "mention_alias": "Image 2",
+            },
+            {
+                "source_url": "data:image/png;base64,CCC",
+                "request_url": "https://assets.grok.com/users/demo/generated/third/content",
+                "resolved_url": "https://assets.grok.com/users/demo/generated/third/content",
+                "original_id": "",
+                "resolved_id": "third",
+                "mention_id": "third",
+                "attachment_id": "third",
+                "parent_post_id": "",
+                "mention_alias": "Image 3",
+            },
+        ]
+        fallback_result = SimpleNamespace(
+            stream=False,
+            data=['https://assets.grok.com/users/demo/generated/out/image.jpg'],
+        )
+        empty_result_error = UpstreamException(
+            'Image edit upstream connected but returned no image URLs',
+            details={'error': 'empty_result', 'chat_connected': True, 'image_count': 0},
+        )
+
+        with patch('app.services.grok.services.image_edit.get_config', side_effect=lambda key, default=None: {
+            'retry.max_retry': 1,
+        }.get(key, default)), \
+             patch('app.services.grok.services.image_edit.pick_token', AsyncMock(return_value='good-token')), \
+             patch.object(ImageEditService, '_prepare_reference_items', AsyncMock(return_value=prepared_refs)), \
+             patch.object(ImageEditService, '_collect_images', AsyncMock(side_effect=empty_result_error)), \
+             patch.object(ImageEditService, 'edit', AsyncMock(return_value=fallback_result)) as fallback_edit:
+            result = await service.edit_with_reference_items(
+                token_mgr=token_mgr,
+                token='good-token',
+                model_info=model_info,
+                prompt='合照',
+                reference_items=[{"image_url": "a"}, {"image_url": "b"}, {"image_url": "c"}],
+                response_format='url',
+                stream=False,
+                return_all_images=True,
+            )
+
+        self.assertEqual(result.data, fallback_result.data)
+        fallback_edit.assert_awaited_once()
+        kwargs = fallback_edit.await_args.kwargs
+        self.assertEqual(
+            kwargs['images'],
+            ['data:image/png;base64,AAA', 'data:image/png;base64,BBB', 'data:image/png;base64,CCC'],
+        )
 
 
 if __name__ == '__main__':

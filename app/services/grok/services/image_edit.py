@@ -1016,17 +1016,53 @@ class ImageEditService:
                         token_used=current_token,
                     )
 
-                images_out = await self._collect_images(
-                    token=current_token,
-                    prompt=prompt_text,
-                    model_info=model_info,
-                    response_format=response_format,
-                    tool_overrides=tool_overrides,
-                    model_config_override=model_config_override,
-                    file_attachments=file_attachments,
-                    return_all_images=return_all_images,
-                    progress_cb=progress_cb,
-                )
+                try:
+                    images_out = await self._collect_images(
+                        token=current_token,
+                        prompt=prompt_text,
+                        model_info=model_info,
+                        response_format=response_format,
+                        tool_overrides=tool_overrides,
+                        model_config_override=model_config_override,
+                        file_attachments=file_attachments,
+                        return_all_images=return_all_images,
+                        progress_cb=progress_cb,
+                    )
+                except UpstreamException as e:
+                    details = getattr(e, "details", None)
+                    has_parent = any(
+                        str(item.get("parent_post_id") or "").strip()
+                        for item in prepared_refs
+                    )
+                    fallback_sources = [
+                        str(item.get("source_url") or "").strip()
+                        for item in prepared_refs
+                        if str(item.get("source_url") or "").strip()
+                    ]
+                    if (
+                        isinstance(details, dict)
+                        and details.get("error") == "empty_result"
+                        and len(request_urls) >= 2
+                        and not has_parent
+                        and fallback_sources
+                    ):
+                        logger.warning(
+                            "Image edit empty result, fallback to upload mode: "
+                            f"count={len(fallback_sources)}, token={current_token[:10]}..."
+                        )
+                        return await self.edit(
+                            token_mgr=token_mgr,
+                            token=current_token,
+                            model_info=model_info,
+                            prompt=prompt,
+                            images=fallback_sources,
+                            n=1,
+                            response_format=response_format,
+                            stream=stream,
+                            return_all_images=return_all_images,
+                            progress_cb=progress_cb,
+                        )
+                    raise
                 try:
                     await token_mgr.consume(current_token, EffortType.HIGH)
                 except Exception as e:
