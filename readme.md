@@ -299,6 +299,65 @@ curl http://localhost:8000/v1/videos \
   }'
 ```
 
+### 单图模式视频
+
+`POST /v1/public/video/start`
+
+单图时可通过 `single_image_mode` 指定这张图的用途：
+
+- `frame`：作为首帧
+- `reference`：作为参考图
+
+单图作为首帧：
+
+```bash
+curl http://127.0.0.1:8000/v1/public/video/start \
+  -H "Content-Type: application/json" \
+  -H "x-public-key: YOUR_PUBLIC_KEY" \
+  -d '{
+    "prompt": "两人合唱",
+    "reference_items": [
+      {
+        "image_url": "data:image/png;base64,AAA...",
+        "source_image_url": "data:image/png;base64,AAA...",
+        "mention_alias": "Image 1"
+      }
+    ],
+    "single_image_mode": "frame",
+    "aspect_ratio": "3:2",
+    "video_length": 6,
+    "resolution_name": "480p",
+    "preset": "normal",
+    "concurrent": 1
+  }'
+```
+
+单图作为参考图：
+
+```bash
+curl http://127.0.0.1:8000/v1/public/video/start \
+  -H "Content-Type: application/json" \
+  -H "x-public-key: YOUR_PUBLIC_KEY" \
+  -d '{
+    "prompt": "两人合唱",
+    "reference_items": [
+      {
+        "image_url": "data:image/png;base64,AAA...",
+        "source_image_url": "data:image/png;base64,AAA...",
+        "mention_alias": "Image 1"
+      }
+    ],
+    "single_image_mode": "reference",
+    "aspect_ratio": "3:2",
+    "video_length": 6,
+    "resolution_name": "480p",
+    "preset": "normal",
+    "concurrent": 1
+  }'
+```
+
+### 图片编辑
+
 <details>
 <summary>支持的请求参数</summary>
 

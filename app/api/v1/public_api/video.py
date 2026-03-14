@@ -211,6 +211,7 @@ async def _new_session(
     reference_items: Optional[List[Dict[str, str]]] = None,
     nsfw: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
+    single_image_mode: str = "frame",
     # 视频延长相关
     is_video_extension: bool = False,
     extend_post_id: Optional[str] = None,
@@ -235,6 +236,7 @@ async def _new_session(
             "reference_items": reference_items or [],
             "nsfw": bool(nsfw if nsfw is not None else True),
             "reasoning_effort": reasoning_effort,
+            "single_image_mode": single_image_mode,
             "is_video_extension": is_video_extension,
             "extend_post_id": extend_post_id,
             "video_extension_start_time": video_extension_start_time,
@@ -417,6 +419,7 @@ class VideoStartRequest(BaseModel):
     video_length: Optional[int] = 6
     resolution_name: Optional[str] = "480p"
     preset: Optional[str] = "normal"
+    single_image_mode: Optional[str] = "frame"
     concurrent: Optional[int] = Field(1, ge=1, le=4)
     image_url: Optional[str] = None
     parent_post_id: Optional[str] = None
@@ -470,6 +473,10 @@ async def public_video_start(data: VideoStartRequest):
     concurrent = int(data.concurrent or 1)
     if concurrent < 1 or concurrent > 4:
         raise HTTPException(status_code=400, detail="concurrent must be between 1 and 4")
+
+    single_image_mode = str(data.single_image_mode or "frame").strip().lower()
+    if single_image_mode not in ("frame", "reference"):
+        raise HTTPException(status_code=400, detail="single_image_mode must be one of ['frame','reference']")
 
     reference_items = _build_reference_items(data)
     if len(reference_items) > 7:
@@ -572,6 +579,7 @@ async def public_video_start(data: VideoStartRequest):
             reference_items=reference_items,
             nsfw=data.nsfw,
             reasoning_effort=reasoning_effort,
+            single_image_mode=single_image_mode,
             is_video_extension=is_video_extension,
             extend_post_id=extend_post_id,
             video_extension_start_time=video_extension_start_time,
@@ -590,6 +598,7 @@ async def public_video_start(data: VideoStartRequest):
         "reference_count": len(reference_items),
         "extend_post_id": extend_post_id,
         "file_attachment_id": file_attachment_id or "",
+        "single_image_mode": single_image_mode,
     }
 
 
@@ -612,6 +621,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
         source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     reasoning_effort = session.get("reasoning_effort")
     nsfw = bool(session.get("nsfw", True))
+    single_image_mode = str(session.get("single_image_mode") or "frame").strip() or "frame"
 
     async def event_stream():
         try:
@@ -685,6 +695,7 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
                 reference_items=reference_items,
                 preferred_token=preferred_token,
                 nsfw=nsfw,
+                single_image_mode=single_image_mode,
             )
 
             async for chunk in _with_sse_keepalive(stream):

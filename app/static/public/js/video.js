@@ -39,6 +39,7 @@
   const resolutionSelect = document.getElementById('resolutionSelect');
   const presetSelect = document.getElementById('presetSelect');
   const concurrentSelect = document.getElementById('concurrentSelect');
+  const singleImageModeSelect = document.getElementById('singleImageModeSelect');
   const statusText = document.getElementById('statusText');
   const progressBar = document.getElementById('progressBar');
   const progressFill = document.getElementById('progressFill');
@@ -1436,6 +1437,7 @@
         video_length: lengthSelect ? parseInt(lengthSelect.value, 10) : 6,
         resolution_name: resolutionSelect ? resolutionSelect.value : '480p',
         preset: presetSelect ? presetSelect.value : 'normal',
+        single_image_mode: singleImageModeSelect ? singleImageModeSelect.value : 'frame',
         concurrent: getConcurrentValue()
       })
     });
@@ -2159,6 +2161,7 @@
         video_length: lengthSelect ? parseInt(lengthSelect.value, 10) : 6,
         resolution_name: resolutionSelect ? resolutionSelect.value : '480p',
         preset: presetSelect ? presetSelect.value : 'custom',
+        single_image_mode: 'frame',
         concurrent,
         n: concurrent,
         edit_context: editCtx
@@ -3205,7 +3208,7 @@
     hideReferenceMentionMenu();
   });
 
-  [ratioSelect, lengthSelect, resolutionSelect, presetSelect, concurrentSelect]
+  [ratioSelect, lengthSelect, resolutionSelect, presetSelect, concurrentSelect, singleImageModeSelect]
     .filter(Boolean)
     .forEach((el) => {
       el.addEventListener('change', updateMeta);
