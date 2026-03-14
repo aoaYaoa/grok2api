@@ -20,6 +20,7 @@
   <link href="/static/common/css/common.css?v=__ASSET_VERSION__" rel="stylesheet">
   <link href="/static/common/css/toast.css" rel="stylesheet">
   <link href="/static/public/css/nsfw.css?v=__ASSET_VERSION__" rel="stylesheet">
+  <link href="/static/public/css/nsfw.css?v=0.4.0" rel="stylesheet">
 </head>
 
 <body class="public-page min-h-screen flex flex-col" style="background-color: var(--bg);">
@@ -191,6 +192,14 @@
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
+      <!-- 清空候选图 垃圾桶 -->
+      <button class="nsfw-icon-btn nsfw-icon-btn--danger" id="imClearImagesBtn" type="button" title="清空候选图">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+        </svg>
+      </button>
       <!-- 主按钮：生成6张 / 再来6张 / 停止候选 -->
       <button id="imGenerateBtn" class="geist-button nsfw-main-btn" type="button">
         <svg class="nsfw-btn-play" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -212,16 +221,8 @@
     <div class="nsfw-sticky-row nsfw-sticky-row--video" id="nsfwVideoRow">
       <!-- 左：已选图摘要 -->
       <div class="nsfw-selected-label" id="nsfwSelectedLabel">未选择候选图</div>
-      <!-- 右：两个垃圾桶 + 生成视频主按钮 -->
+      <!-- 右：清空视频垃圾桶 + 生成视频主按钮 -->
       <div class="nsfw-video-actions">
-        <!-- 清空候选图 垃圾桶 -->
-        <button class="nsfw-icon-btn nsfw-icon-btn--danger" id="imClearImagesBtn" type="button" title="清空候选图">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-            <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
-          </svg>
-        </button>
         <!-- 清空视频结果 垃圾桶 -->
         <button class="nsfw-icon-btn nsfw-icon-btn--danger" id="imClearVideosBtn" type="button" title="清空视频结果">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
