@@ -942,19 +942,9 @@ class ImageEditService:
                     if str(item.get("request_url") or item.get("resolved_url") or "").strip()
                 ]
                 file_attachments = [
-                    str(
-                        item.get("attachment_id")
-                        or item.get("resolved_id")
-                        or item.get("mention_id")
-                        or ""
-                    ).strip()
+                    str(item.get("attachment_id") or "").strip()
                     for item in prepared_refs
-                    if str(
-                        item.get("attachment_id")
-                        or item.get("resolved_id")
-                        or item.get("mention_id")
-                        or ""
-                    ).strip()
+                    if str(item.get("attachment_id") or "").strip()
                 ]
                 if not request_urls:
                     raise AppException(
