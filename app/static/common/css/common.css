@@ -53,12 +53,6 @@ html[data-theme='dark'] {
   --voice-bg: #0b0f14;
 }
 
-html,
-body {
-  height: 100%;
-  overflow: hidden;
-}
-
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
@@ -715,6 +709,10 @@ td.table-empty {
   width: 14px;
   height: 14px;
   fill: currentColor;
+}
+
+#app-footer {
+  display: contents;
 }
 
 .app-footer {
