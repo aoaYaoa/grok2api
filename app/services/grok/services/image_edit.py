@@ -842,7 +842,11 @@ class ImageEditService:
                     resolved_url = _normalize_asset_url(raw_source)
                     resolved_id = _extract_image_post_id(resolved_url)
                     mention_id = mention_id or resolved_id
-                    attachment_id = resolved_id
+                    # imagine-public URLs should not be used as fileAttachments
+                    if "imagine-public.x.ai/" in raw_source:
+                        attachment_id = ""
+                    else:
+                        attachment_id = resolved_id
                 prepared.append(
                     {
                         "source_url": raw_source,
