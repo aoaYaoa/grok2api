@@ -304,6 +304,14 @@ body {
   padding: 0 12px;
 }
 
+.video-extend-time-inline {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  color: var(--accents-5);
+}
+
 .settings-block {
   display: flex;
   flex-direction: column;
