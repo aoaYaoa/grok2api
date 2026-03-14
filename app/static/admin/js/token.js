@@ -236,12 +236,12 @@ function renderTable() {
       emptyState.textContent = currentFilter === 'all'
         ? '暂无 Token，请点击右上角导入或添加。'
         : '当前筛选无结果，请切换筛选条件。';
+      emptyState.classList.remove('hidden');
     }
-    emptyState.classList.remove('hidden');
     updateSelectionState();
     return;
   }
-  emptyState.classList.add('hidden');
+  if (emptyState) emptyState.classList.add('hidden');
 
   const fragment = document.createDocumentFragment();
   visibleTokens.forEach((item) => {
