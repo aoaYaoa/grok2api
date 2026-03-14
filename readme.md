@@ -40,6 +40,17 @@ cd grok2api
 docker compose up -d --build grok2api
 ```
 
+### 服务器部署（Docker）
+
+```bash
+ssh netcup
+cd /root/grok2api
+git pull
+docker compose up -d --build grok2api
+```
+
+> 如需强制刷新前端缓存，可临时追加：`APP_ASSET_VERSION=20260308b`
+
 ### Vercel 部署
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,SERVER_STORAGE_TYPE,SERVER_STORAGE_URL&envDefaults=%7B%22DATA_DIR%22%3A%22/tmp/data%22%2C%22LOG_FILE_ENABLED%22%3A%22false%22%2C%22LOG_LEVEL%22%3A%22INFO%22%2C%22SERVER_STORAGE_TYPE%22%3A%22local%22%2C%22SERVER_STORAGE_URL%22%3A%22%22%7D)
