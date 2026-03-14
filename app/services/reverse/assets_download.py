@@ -44,12 +44,26 @@ class AssetsDownloadReverse:
                 yield data[i:i + chunk_size]
 
     @staticmethod
-    async def _urllib_get(url: str, headers: dict[str, str], timeout: int) -> "AssetsDownloadReverse._SimpleResponse":
+    async def _urllib_get(
+        url: str,
+        headers: dict[str, str],
+        timeout: int,
+        proxy_url: str = "",
+    ) -> "AssetsDownloadReverse._SimpleResponse":
         """使用标准库 urllib 兜底下载，绕过 curl TLS 实现。"""
         req = urllib.request.Request(url=url, headers=headers, method="GET")
 
         def _do_get():
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            opener = None
+            if proxy_url:
+                proxy_handler = urllib.request.ProxyHandler(
+                    {"http": proxy_url, "https": proxy_url}
+                )
+                opener = urllib.request.build_opener(proxy_handler)
+            else:
+                opener = urllib.request.build_opener()
+
+            with opener.open(req, timeout=timeout) as resp:
                 status = int(getattr(resp, "status", 200) or 200)
                 body = resp.read()
                 raw_headers = {}
@@ -137,13 +151,13 @@ class AssetsDownloadReverse:
                 try:
                     return await _single_get(use_impersonate=True, use_proxy=True)
                 except Exception as first_err:
-                    # TLS/握手类问题常出现在代理或浏览器指纹组合，降级直连重试一次。
+                    # TLS/握手类问题常出现在浏览器指纹组合，降级为不伪装浏览器后重试。
                     logger.warning(
                         "AssetsDownloadReverse primary request failed, fallback direct: "
                         f"error={first_err}"
                     )
                     try:
-                        return await _single_get(use_impersonate=False, use_proxy=False)
+                        return await _single_get(use_impersonate=False, use_proxy=True)
                     except Exception as second_err:
                         # curl 栈仍失败时，使用标准库 urllib 再兜底一次，绕开 curl TLS 实现。
                         logger.warning(
@@ -154,6 +168,7 @@ class AssetsDownloadReverse:
                             url=url,
                             headers=headers,
                             timeout=timeout,
+                            proxy_url=proxy_url,
                         )
                         if fallback_resp.status_code != 200:
                             logger.error(

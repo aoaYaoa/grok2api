@@ -2,6 +2,8 @@
 Local cache utilities.
 """
 
+import json
+import re
 from typing import Any, Dict
 
 from app.core.storage import DATA_DIR
@@ -25,6 +27,47 @@ class CacheService:
 
     def _allowed_exts(self, media_type: str):
         return IMAGE_EXTS if media_type == "image" else VIDEO_EXTS
+
+    def _media_meta_dir(self):
+        return DATA_DIR / "tmp" / "media-meta"
+
+    def _load_video_metadata(self) -> dict[str, dict[str, Any]]:
+        meta_dir = self._media_meta_dir()
+        if not meta_dir.exists():
+            return {}
+
+        metadata_by_post_id: dict[str, dict[str, Any]] = {}
+        for file_path in meta_dir.glob("*.json"):
+            try:
+                payload = json.loads(file_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("media_type") or "").strip().lower() != "video":
+                continue
+            post_id = str(payload.get("post_id") or "").strip()
+            if not post_id:
+                continue
+            metadata_by_post_id[post_id] = payload
+        return metadata_by_post_id
+
+    @staticmethod
+    def _extract_post_id_from_name(name: str) -> str:
+        text = str(name or "").strip()
+        if not text:
+            return ""
+        match = re.search(
+            r"generated-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-",
+            text,
+        )
+        if match:
+            return match.group(1)
+        all_matches = re.findall(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            text,
+        )
+        return all_matches[-1] if all_matches else ""
 
     def get_stats(self, media_type: str = "image") -> Dict[str, Any]:
         cache_dir = self._cache_dir(media_type)
@@ -70,8 +113,24 @@ class CacheService:
         start = max(0, (page - 1) * page_size)
         paged = items[start : start + page_size]
 
+        metadata_by_post_id = self._load_video_metadata() if media_type == "video" else {}
+
         for item in paged:
             item["view_url"] = f"/v1/files/{media_type}/{item['name']}"
+            if media_type != "video":
+                continue
+            post_id = self._extract_post_id_from_name(item["name"])
+            if not post_id:
+                continue
+            metadata = metadata_by_post_id.get(post_id)
+            if not metadata:
+                continue
+            item["post_id"] = str(metadata.get("post_id") or "").strip()
+            item["share_link"] = str(metadata.get("share_link") or "").strip()
+            item["original_post_id"] = str(metadata.get("original_post_id") or "").strip()
+            item["media_url"] = str(metadata.get("media_url") or "").strip()
+            item["thumbnail_url"] = str(metadata.get("thumbnail_url") or "").strip()
+            item["local_url"] = str(metadata.get("local_url") or "").strip()
 
         return {"total": total, "page": page, "page_size": page_size, "items": paged}
 

@@ -1044,6 +1044,84 @@ class _VideoChainSSEWriter:
         return chunks
 
 
+async def _try_log_video_share_link(
+    token: str,
+    post_id: str,
+    *,
+    local_url: str = "",
+    thumbnail_url: str = "",
+) -> str:
+    """视频生成完成后尝试创建分享链接并写入元数据。"""
+    token_text = str(token or "").strip()
+    post_text = str(post_id or "").strip()
+    if not token_text or not post_text:
+        return ""
+    try:
+        logger.info(f"Video create-link attempt: post_id={post_text}")
+        async with AsyncSession() as session:
+            metadata = await MediaPostReverse.capture_metadata(
+                session,
+                token_text,
+                post_text,
+                media_type="video",
+                local_url=local_url,
+                thumbnail_url=thumbnail_url,
+            )
+        share_link = str(metadata.get("share_link") or "").strip()
+        metadata_path = str(metadata.get("metadata_path") or "").strip()
+        if share_link:
+            logger.info(
+                "Video create-link success: "
+                f"post_id={post_text}, share_link={share_link}, metadata_path={metadata_path or '-'}"
+            )
+        else:
+            logger.info(
+                "Video create-link completed without shareLink: "
+                f"post_id={post_text}, metadata_path={metadata_path or '-'}"
+            )
+        return share_link
+    except Exception as e:
+        details = getattr(e, "details", None)
+        logger.warning(
+            "Video create-link failed: "
+            f"post_id={post_text}, error={e}, details={details}"
+        )
+        return ""
+
+
+async def _fetch_share_page_media_urls(share_link: str) -> tuple[str, str]:
+    share_text = str(share_link or "").strip()
+    if not share_text:
+        return "", ""
+    try:
+        async with AsyncSession() as session:
+            response = await session.get(share_text, timeout=get_config("video.timeout"))
+        html = str(getattr(response, "text", "") or "")
+        if not html:
+            return "", ""
+        video_match = re.search(
+            r'<meta\s+property="og:video"\s+content="([^"]+)"',
+            html,
+            flags=re.IGNORECASE,
+        )
+        image_match = re.search(
+            r'<meta\s+property="og:image"\s+content="([^"]+)"',
+            html,
+            flags=re.IGNORECASE,
+        )
+        video_url = str(video_match.group(1) if video_match else "").strip()
+        image_url = str(image_match.group(1) if image_match else "").strip()
+        if video_url or image_url:
+            logger.info(
+                "Video share page meta resolved: "
+                f"share_link={share_text}, video_url={video_url or '-'}, image_url={image_url or '-'}"
+            )
+        return video_url, image_url
+    except Exception as e:
+        logger.warning(f"Video share page fetch failed: share_link={share_text}, error={e}")
+        return "", ""
+
+
 class VideoService:
     """Video generation service."""
 

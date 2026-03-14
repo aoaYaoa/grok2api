@@ -4,6 +4,7 @@ Reverse interface: media post create.
 
 import asyncio
 import json
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,85 @@ class MediaPostReverse:
 
         def json(self):
             return json.loads(self.text or "{}")
+
+    @staticmethod
+    def _metadata_dir() -> Path:
+        path = DATA_DIR / "tmp" / "media-meta"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    async def write_metadata(post_id: str, metadata: dict[str, Any]) -> Path | None:
+        post_text = str(post_id or "").strip()
+        if not post_text or not isinstance(metadata, dict):
+            return None
+        metadata_path = MediaPostReverse._metadata_dir() / f"{post_text}.json"
+
+        def _write() -> None:
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        await asyncio.to_thread(_write)
+        return metadata_path
+
+    @staticmethod
+    async def capture_metadata(
+        session: AsyncSession,
+        token: str,
+        post_id: str,
+        *,
+        media_type: str = "",
+        local_url: str = "",
+        thumbnail_url: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        post_text = str(post_id or "").strip()
+        if not post_text:
+            return {}
+        post_payload = {}
+        share_payload = {}
+        share_link = ""
+        try:
+            post_resp = await MediaPostReverse.get(session, token, post_text)
+            post_payload = post_resp.json() if post_resp is not None else {}
+        except Exception as e:
+            logger.warning(f"MediaPost metadata get failed: post_id={post_text}, error={e}")
+        try:
+            share_resp = await MediaPostReverse.create_link(session, token, post_text)
+            share_payload = share_resp.json() if share_resp is not None else {}
+            if isinstance(share_payload, dict):
+                share_link = str(share_payload.get("shareLink") or "").strip()
+        except Exception as e:
+            logger.warning(f"MediaPost metadata create-link failed: post_id={post_text}, error={e}")
+
+        canonical_post_id = post_text
+        if share_link:
+            match = re.search(r"/imagine/post/([0-9a-fA-F-]{32,36})", share_link)
+            if match:
+                canonical_post_id = match.group(1)
+
+        post = post_payload.get("post", {}) if isinstance(post_payload, dict) else {}
+        metadata: dict[str, Any] = {
+            "post_id": canonical_post_id,
+            "share_link": share_link,
+            "media_type": str(media_type or post.get("mediaType") or "").strip(),
+            "media_url": str(post.get("mediaUrl") or "").strip(),
+            "thumbnail_url": str(post.get("thumbnailImageUrl") or thumbnail_url or "").strip(),
+            "mime_type": str(post.get("mimeType") or "").strip(),
+            "original_post_id": str(post.get("originalPostId") or "").strip(),
+            "original_ref_type": str(post.get("originalRefType") or "").strip(),
+            "local_url": str(local_url or "").strip(),
+            "user_id": str(post.get("userId") or "").strip(),
+            "model_name": str(post.get("modelName") or "").strip(),
+        }
+        if extra:
+            metadata.update(extra)
+        path = await MediaPostReverse.write_metadata(canonical_post_id, metadata)
+        if path:
+            metadata["metadata_path"] = str(path)
+        return metadata
 
     @staticmethod
     async def _urllib_post(
