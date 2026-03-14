@@ -177,24 +177,88 @@
     </div>
   </main>
 
-  <div class="mobile-fab" data-mobile-fab>
-    <div class="mobile-fab-panel">
-      <div class="mobile-fab-actions">
-        <button class="geist-button" data-proxy-click="#generateBatchBtn" type="button">生成6张</button>
-        <button class="geist-button-outline" data-proxy-click="#stopBatchBtn" type="button">停候选</button>
-        <button class="geist-button-outline" data-proxy-click="#nextBatchBtn" type="button">再来一批</button>
-        <button class="geist-button-outline" data-proxy-click="#clearImagesBtn" type="button">清图片</button>
-        <button class="geist-button" data-proxy-click="#startVideoBtn" type="button">开始视频</button>
-        <button class="geist-button-outline" data-proxy-click="#extendVideoBtn" type="button">延长视频</button>
-        <button class="geist-button-outline" data-proxy-click="#stopVideoBtn" type="button">停视频</button>
-        <button class="geist-button-outline" data-proxy-click="#clearVideosBtn" type="button">清视频</button>
+  <!-- 移动端设置遮罩（Bottom Sheet） -->
+  <div id="nsfwSettingsOverlay" class="nsfw-settings-overlay"></div>
+
+  <!-- 移动端双行 Sticky Bar -->
+  <div id="nsfwStickyBar" class="nsfw-sticky-bar">
+    <!-- 第一行：候选图操作 -->
+    <div class="nsfw-sticky-row nsfw-sticky-row--image">
+      <!-- 左：设置 -->
+      <button class="nsfw-icon-btn" id="nsfwSettingsBtn" type="button" title="生成参数" aria-label="生成参数">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <div class="nsfw-icon-divider"></div>
+      <!-- 中：图标操作 -->
+      <div class="nsfw-icon-group">
+        <!-- 清空图片 -->
+        <button class="nsfw-icon-btn nsfw-icon-btn--danger" id="imClearImagesBtn" type="button" title="清空图片">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>
+        </button>
+        <!-- 再来一批 -->
+        <button class="nsfw-icon-btn" id="imNextBatchBtn" type="button" title="再来一批">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+          </svg>
+        </button>
+      </div>
+      <!-- 右：主按钮（生成6张/停止候选） -->
+      <button id="imGenerateBtn" class="geist-button nsfw-main-btn" type="button">
+        <svg class="nsfw-btn-play" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <svg class="nsfw-btn-stop" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+          <rect x="5" y="5" width="14" height="14"/>
+        </svg>
+        <span class="nsfw-btn-label">生成 6 张</span>
+      </button>
+    </div>
+
+    <!-- 行分隔线 -->
+    <div class="nsfw-sticky-row-sep"></div>
+
+    <!-- 第二行：视频操作（候选图已选时高亮） -->
+    <div class="nsfw-sticky-row nsfw-sticky-row--video" id="nsfwVideoRow">
+      <!-- 左：已选图摘要 -->
+      <div class="nsfw-selected-label" id="nsfwSelectedLabel">未选择候选图</div>
+      <!-- 右侧视频操作 -->
+      <div class="nsfw-video-actions">
+        <!-- 清空视频 -->
+        <button class="nsfw-icon-btn nsfw-icon-btn--danger" id="imClearVideosBtn" type="button" title="清空视频结果">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/>
+            <line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
+            <line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/>
+            <line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/>
+          </svg>
+        </button>
+        <!-- 生成视频/中断视频 主按钮 -->
+        <button id="imStartVideoBtn" class="geist-button nsfw-main-btn nsfw-main-btn--video" type="button" disabled>
+          <svg class="nsfw-btn-play" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          <svg class="nsfw-btn-stop" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+            <rect x="5" y="5" width="14" height="14"/>
+          </svg>
+          <span class="nsfw-btn-label">生成视频</span>
+        </button>
       </div>
     </div>
-    <button class="mobile-fab-toggle" data-fab-toggle type="button" aria-label="打开操作菜单">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 5v14M5 12h14" />
-      </svg>
-    </button>
   </div>
 
   <div id="lightbox" class="image-lightbox">

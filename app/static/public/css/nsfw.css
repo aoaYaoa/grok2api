@@ -1145,3 +1145,230 @@ html[data-theme='dark'] .video-item.selected {
     grid-column: auto;
   }
 }
+
+/* ============================
+   NSFW 工作台 移动端双行 Sticky Bar（<=900px）
+   ============================ */
+@media (max-width: 900px) {
+  body {
+    padding-bottom: 108px !important;
+  }
+
+  .nsfw-sticky-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: #fff;
+    border-top: 1px solid var(--border);
+    padding: 8px 14px;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.07);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .nsfw-sticky-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 0;
+  }
+
+  .nsfw-sticky-row-sep {
+    height: 1px;
+    background: var(--border);
+    margin: 0 -2px;
+    opacity: 0.6;
+  }
+
+  .nsfw-icon-divider {
+    width: 1px;
+    height: 22px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .nsfw-icon-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    justify-content: flex-start;
+  }
+
+  .nsfw-icon-btn {
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: #fff;
+    color: var(--fg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .15s ease;
+    padding: 0;
+    position: relative;
+  }
+
+  .nsfw-icon-btn:active {
+    background: var(--accents-1);
+  }
+
+  .nsfw-icon-btn--danger {
+    color: #ef4444;
+    border-color: #fecaca;
+  }
+
+  .nsfw-icon-btn--danger:active {
+    background: #fef2f2;
+  }
+
+  .nsfw-main-btn {
+    height: 36px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    border-radius: 9px;
+    min-width: 84px;
+    justify-content: center;
+    margin-left: auto;
+  }
+
+  .nsfw-main-btn.is-stop {
+    background: #fee2e2 !important;
+    color: #ef4444 !important;
+    border: 1px solid #fecaca !important;
+  }
+
+  /* 视频行 */
+  .nsfw-sticky-row--video {
+    opacity: 0.46;
+    pointer-events: none;
+    transition: opacity .2s ease;
+  }
+
+  .nsfw-sticky-row--video.has-selected {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .nsfw-selected-label {
+    flex: 1;
+    font-size: 11px;
+    color: var(--accents-5);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nsfw-sticky-row--video.has-selected .nsfw-selected-label {
+    color: #2563eb;
+    font-weight: 500;
+  }
+
+  .nsfw-video-actions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+  }
+
+  /* Settings Overlay */
+  .nsfw-settings-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+
+  .nsfw-settings-overlay.active {
+    display: block;
+  }
+
+  /* Settings Bottom Sheet */
+  .nsfw-settings-sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 301;
+    background: #fff;
+    border-radius: 20px 20px 0 0;
+    padding: 0 16px 24px;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.18);
+    transition: transform .28s cubic-bezier(.2, 0, 0, 1);
+    transform: translateY(100%);
+  }
+
+  .nsfw-settings-sheet.open {
+    transform: translateY(0);
+  }
+
+  .nsfw-settings-sheet-handle {
+    display: flex;
+    justify-content: center;
+    padding: 12px 0 6px;
+    cursor: pointer;
+  }
+
+  .nsfw-settings-sheet-handle::after {
+    content: '';
+    width: 36px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--border);
+  }
+
+  .nsfw-settings-sheet-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accents-7);
+    margin-bottom: 14px;
+    text-align: center;
+  }
+}
+
+/* 暗色主题 */
+html[data-theme='dark'] .nsfw-sticky-bar {
+  background: #111821;
+  border-top-color: #2b3440;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.3);
+}
+
+html[data-theme='dark'] .nsfw-icon-btn {
+  background: #1a2330;
+  border-color: #3b4654;
+  color: #c9d6e5;
+}
+
+html[data-theme='dark'] .nsfw-icon-btn:active {
+  background: #243244;
+}
+
+html[data-theme='dark'] .nsfw-main-btn.is-stop {
+  background: #2d1414 !important;
+  color: #f87171 !important;
+  border-color: #7f1d1d !important;
+}
+
+html[data-theme='dark'] .nsfw-settings-sheet {
+  background: #111821;
+  color: #e2e8f0;
+}
