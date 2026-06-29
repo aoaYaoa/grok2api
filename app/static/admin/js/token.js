@@ -27,6 +27,16 @@ function setText(id, text) {
   if (el) el.innerText = text;
 }
 
+function tr(key, params = {}) {
+  if (typeof window.t === 'function') return window.t(key, params);
+  const fallback = {
+    'token.perPage': `${params.size} / 页`,
+    'token.clearSelection': '取消选择',
+    'common.selectAll': '全选'
+  };
+  return fallback[key] || key;
+}
+
 function openModal(id) {
   const modal = byId(id);
   if (!modal) return null;
@@ -445,8 +455,8 @@ function updateSelectionState() {
   const selectAllCaret = byId('select-all-caret');
   if (selectAllLabel) {
     selectAllLabel.textContent = selectedCount > 0
-      ? t('token.clearSelection')
-      : t('common.selectAll');
+      ? tr('token.clearSelection')
+      : tr('common.selectAll');
   }
   if (selectAllTrigger) {
     selectAllTrigger.classList.toggle('is-active', selectedCount > 0);
@@ -1147,7 +1157,7 @@ function refreshPageSizeOptionsI18n() {
   Array.from(sizeSelect.options).forEach((opt) => {
     const size = parseInt(opt.value, 10);
     if (!Number.isFinite(size)) return;
-    opt.textContent = t('token.perPage', { size });
+    opt.textContent = tr('token.perPage', { size });
   });
 }
 
