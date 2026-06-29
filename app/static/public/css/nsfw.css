@@ -118,6 +118,20 @@ body {
   resize: vertical;
 }
 
+.nsfw-local-upload-field {
+  border: 1px solid var(--nsfw-border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fcfcfd 0%, #f7f8fb 100%);
+  padding: 14px;
+}
+
+.nsfw-local-upload-copy {
+  margin: -2px 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--nsfw-muted);
+}
+
 .action-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -315,6 +329,11 @@ html[data-theme='dark'] .candidate-card {
 html[data-theme='dark'] .candidate-card.selected {
   border-color: #60a5fa;
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.22);
+}
+
+html[data-theme='dark'] .nsfw-local-upload-field {
+  background: linear-gradient(180deg, #151c26 0%, #121922 100%);
+  border-color: #2b3440;
 }
 
 html[data-theme='dark'] .selected-badge {

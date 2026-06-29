@@ -332,6 +332,15 @@ class TokenManager:
                 return pool_name
         return None
 
+    def get_token_info_by_token(self, token_str: str) -> Optional[TokenInfo]:
+        """Return TokenInfo for the given token string."""
+        raw_token = token_str.replace("sso=", "")
+        for pool in self.pools.values():
+            token = pool.get(raw_token)
+            if token:
+                return token
+        return None
+
     async def consume(
         self, token_str: str, effort: EffortType = EffortType.LOW
     ) -> bool:

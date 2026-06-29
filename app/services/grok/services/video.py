@@ -2062,10 +2062,17 @@ class VideoService:
             bound_token = await token_map.get_token(parent_post_id)
         if bound_token:
             preferred_token = bound_token
-        has_parent_token_binding = bool(bound_token or preferred_token)
 
         if preferred_token.startswith("sso="):
             preferred_token = preferred_token[4:]
+        preferred_token_info = (
+            token_mgr.get_token_info_by_token(preferred_token)
+            if preferred_token
+            else None
+        )
+        has_parent_token_binding = bool(
+            preferred_token_info and preferred_token_info.is_available()
+        )
         if image_attachments and not reference_items:
             reference_items = [
                 {
@@ -2082,10 +2089,16 @@ class VideoService:
         for attempt in range(max_token_retries):
             token = ""
             if preferred_token and preferred_token not in used_tokens:
-                if token_mgr.get_pool_name_for_token(preferred_token):
+                if preferred_token_info and preferred_token_info.is_available():
                     token = preferred_token
                     logger.info(
                         f"Video token routing: preferred bound token -> token={_token_tag(token)}"
+                    )
+                elif preferred_token_info:
+                    used_tokens.add(preferred_token)
+                    logger.warning(
+                        "Video token routing: preferred bound token unavailable, fallback to normal routing "
+                        f"(token={_token_tag(preferred_token)}, status={preferred_token_info.status.value}, quota={preferred_token_info.quota})"
                     )
                 else:
                     used_tokens.add(preferred_token)
@@ -2216,7 +2229,7 @@ class VideoService:
                             resolution=generation_resolution,
                             preset=preset,
                         )
-                    elif effective_single_image_mode == "reference":
+                    elif single_image_mode == "reference":
                         response = await service.generate_from_reference_items(
                             token=token,
                             prompt=prompt,

@@ -28,6 +28,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./app/static:/app/app/static
     restart: unless-stopped
 
   warp:

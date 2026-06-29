@@ -7,12 +7,14 @@ import json
 import re
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from curl_cffi.requests import AsyncSession
 
 from app.core.logger import logger
 from app.core.config import get_config
 from app.core.exceptions import UpstreamException
+from app.core.storage import DATA_DIR
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status

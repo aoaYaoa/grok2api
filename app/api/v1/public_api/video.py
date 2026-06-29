@@ -23,6 +23,7 @@ router = APIRouter()
 VIDEO_SESSION_TTL = 600
 _VIDEO_SESSIONS: dict[str, dict] = {}
 _VIDEO_SESSIONS_LOCK = asyncio.Lock()
+_PARENT_POST_SSE_LOCKS: dict[str, asyncio.Lock] = {}
 _VENDOR_CACHE: dict[str, bytes] = {}
 _VENDOR_LOCK = asyncio.Lock()
 
@@ -129,6 +130,17 @@ def _mask_token(token: str) -> str:
     return f"{raw[:6]}...{raw[-6:]}"
 
 
+def _get_parent_post_sse_lock(parent_post_id: str) -> asyncio.Lock:
+    parent_id = str(parent_post_id or "").strip()
+    if not parent_id:
+        return asyncio.Lock()
+    lock = _PARENT_POST_SSE_LOCKS.get(parent_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PARENT_POST_SSE_LOCKS[parent_id] = lock
+    return lock
+
+
 def _drain_stream_task(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
@@ -186,6 +198,53 @@ async def _with_sse_keepalive(stream: Any, interval_seconds: float = 15.0):
         if pending is not None and not pending.done():
             pending.cancel()
         await _close_async_iterator(iterator)
+
+
+async def _stream_collected_video_result(
+    result_coro: Any,
+    *,
+    request: Request,
+    task_id: str,
+    keepalive_interval: float = 15.0,
+):
+    pending = asyncio.create_task(result_coro)
+    pending.add_done_callback(_drain_stream_task)
+
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {pending},
+                timeout=max(0.01, float(keepalive_interval or 15.0)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if pending in done:
+                result = pending.result()
+                yield f"data: {orjson.dumps(result).decode()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            if await request.is_disconnected():
+                logger.info(f"Public video client disconnected: {task_id}")
+                pending.cancel()
+                return
+            if task_id not in _VIDEO_SESSIONS:
+                logger.info(f"Public video task stopped by user: {task_id}")
+                pending.cancel()
+                return
+            yield ": keepalive\n\n"
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
+async def _collect_parent_post_video_result(
+    model_id: str,
+    messages: List[Dict[str, Any]],
+    completion_kwargs: Dict[str, Any],
+    parent_post_id: str,
+):
+    async with _get_parent_post_sse_lock(parent_post_id):
+        return await VideoService.completions(model_id, messages, **completion_kwargs)
 
 
 
@@ -629,6 +688,12 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
     reasoning_effort = session.get("reasoning_effort")
     nsfw = bool(session.get("nsfw", True))
     single_image_mode = str(session.get("single_image_mode") or "frame").strip() or "frame"
+    is_video_extension = bool(session.get("is_video_extension"))
+    extend_post_id = str(session.get("extend_post_id") or "").strip() or None
+    video_extension_start_time = session.get("video_extension_start_time")
+    original_post_id = str(session.get("original_post_id") or "").strip() or None
+    file_attachment_id = str(session.get("file_attachment_id") or "").strip() or None
+    stitch_with_extend = bool(session.get("stitch_with_extend", True))
 
     async def event_stream():
         try:
@@ -675,35 +740,43 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
             else:
                 messages = [{"role": "user", "content": prompt}]
 
-            # 从 session 取得视频延长参数
-            is_video_extension = bool(session.get("is_video_extension"))
-            extend_post_id = str(session.get("extend_post_id") or "").strip() or None
-            video_extension_start_time = session.get("video_extension_start_time")
-            original_post_id = str(session.get("original_post_id") or "").strip() or None
-            file_attachment_id = str(session.get("file_attachment_id") or "").strip() or None
-            stitch_with_extend = bool(session.get("stitch_with_extend", True))
+            completion_kwargs = {
+                "stream": True,
+                "reasoning_effort": reasoning_effort,
+                "aspect_ratio": aspect_ratio,
+                "video_length": video_length,
+                "resolution": resolution_name,
+                "preset": preset,
+                "parent_post_id": parent_post_id or None,
+                "extend_post_id": extend_post_id if is_video_extension else None,
+                "video_extension_start_time": video_extension_start_time if is_video_extension else None,
+                "original_post_id": original_post_id if is_video_extension else None,
+                "file_attachment_id": file_attachment_id if is_video_extension else None,
+                "stitch_with_extend": stitch_with_extend,
+                "source_image_url": source_image_url,
+                "reference_items": reference_items,
+                "preferred_token": preferred_token,
+                "nsfw": nsfw,
+                "single_image_mode": single_image_mode,
+            }
 
-            stream = await VideoService.completions(
-                model_id,
-                messages,
-                stream=True,
-                reasoning_effort=reasoning_effort,
-                aspect_ratio=aspect_ratio,
-                video_length=video_length,
-                resolution=resolution_name,
-                preset=preset,
-                parent_post_id=parent_post_id or None,
-                extend_post_id=extend_post_id if is_video_extension else None,
-                video_extension_start_time=video_extension_start_time if is_video_extension else None,
-                original_post_id=original_post_id if is_video_extension else None,
-                file_attachment_id=file_attachment_id if is_video_extension else None,
-                stitch_with_extend=stitch_with_extend,
-                source_image_url=source_image_url,
-                reference_items=reference_items,
-                preferred_token=preferred_token,
-                nsfw=nsfw,
-                single_image_mode=single_image_mode,
-            )
+            should_collect_parent_post = bool(parent_post_id and not is_video_extension)
+            if should_collect_parent_post:
+                completion_kwargs["stream"] = False
+                async for chunk in _stream_collected_video_result(
+                    _collect_parent_post_video_result(
+                        model_id,
+                        messages,
+                        completion_kwargs,
+                        parent_post_id,
+                    ),
+                    request=request,
+                    task_id=task_id,
+                ):
+                    yield chunk
+                return
+
+            stream = await VideoService.completions(model_id, messages, **completion_kwargs)
 
             async for chunk in _with_sse_keepalive(stream):
                 if await request.is_disconnected():
