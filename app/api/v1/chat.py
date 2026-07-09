@@ -2,12 +2,13 @@
 Chat Completions API 路由
 """
 
-import asyncio
-from typing import Any, Dict, List, Optional, Union
 import base64
 import binascii
+import asyncio
 import time
+from typing import Any, Dict, List, Optional, Union
 
+import orjson
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -21,20 +22,27 @@ from app.services.token import get_token_manager
 from app.core.config import get_config
 from app.core.exceptions import ValidationException, AppException, ErrorType
 from app.core.logger import logger
-
+from app.services.grok.utils.response import (
+    make_chat_chunk,
+    make_chat_response,
+    wrap_image_content,
+)
 
 class MessageItem(BaseModel):
     """消息项"""
 
     role: str
-    content: Union[str, List[Dict[str, Any]]]
+    content: Optional[Union[str, Dict[str, Any], List[Dict[str, Any]]]]
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class VideoConfig(BaseModel):
     """视频生成配置"""
 
     aspect_ratio: Optional[str] = Field("3:2", description="视频比例: 1280x720(16:9), 720x1280(9:16), 1792x1024(3:2), 1024x1792(2:3), 1024x1024(1:1)")
-    video_length: Optional[int] = Field(6, description="视频时长(秒): 6-30")
+    video_length: Optional[int] = Field(6, description="视频时长(秒): 6 / 10 / 15")
     resolution_name: Optional[str] = Field("480p", description="视频分辨率: 480p, 720p")
     preset: Optional[str] = Field("custom", description="风格预设: fun, normal, spicy")
     single_image_mode: Optional[str] = Field("frame", description="单图模式: frame=作为首帧, reference=作为参考图")
@@ -63,12 +71,16 @@ class ChatCompletionRequest(BaseModel):
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
     # 图片生成配置
     image_config: Optional[ImageConfig] = Field(None, description="图片生成参数")
+    # Tool calling
+    tools: Optional[List[Dict[str, Any]]] = Field(None, description="Tool definitions")
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Tool choice: auto/required/none/specific")
+    parallel_tool_calls: Optional[bool] = Field(True, description="Allow parallel tool calls")
     # 兼容 Vercel AI SDK 等 provider-specific 扩展参数
     provider_options: Optional[Dict[str, Any]] = Field(None, description="Provider-specific options")
     providerOptions: Optional[Dict[str, Any]] = Field(None, description="Provider-specific options (camelCase)")
 
 
-VALID_ROLES = {"developer", "system", "user", "assistant"}
+VALID_ROLES = {"developer", "system", "user", "assistant", "tool"}
 USER_CONTENT_TYPES = {"text", "image_url", "input_audio", "file"}
 ALLOWED_IMAGE_SIZES = {
     "1280x720",
@@ -269,6 +281,40 @@ def _chat_error_as_success_response(model: str, message: str) -> JSONResponse:
     )
 
 
+def _build_chat_image_content(images: List[str], response_format: str) -> str:
+    """将图片结果包装为 chat.completions 可消费的 markdown 内容。"""
+    items = [
+        wrap_image_content(str(item or "").strip(), response_format)
+        for item in (images or [])
+        if str(item or "").strip()
+    ]
+    return "\n".join(items)
+
+
+def _build_chat_image_stream(
+    model: str,
+    content: str,
+    usage: Optional[dict] = None,
+):
+    """将最终图片结果包装为 OpenAI 标准 chat chunk 流。"""
+    async def _stream():
+        response_id = f"chatcmpl-{int(time.time() * 1000)}"
+        if content:
+            yield f"data: {orjson.dumps(make_chat_chunk(response_id, model, content)).decode()}\n\n"
+        final_chunk = make_chat_chunk(
+            response_id=response_id,
+            model=model,
+            content="",
+            is_final=True,
+        )
+        if usage is not None:
+            final_chunk["usage"] = usage
+        yield f"data: {orjson.dumps(final_chunk).decode()}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return _stream()
+
+
 def _video_error_message(exc: Exception) -> str:
     """统一视频错误文案，避免工具层只看到底层 HTTP 错误。"""
     if isinstance(exc, AppException):
@@ -346,12 +392,16 @@ def validate_request(request: ChatCompletionRequest):
 
         # 字符串内容
         if isinstance(content, str):
-            if not content.strip():
+            if not content.strip() and msg.role != "assistant":
                 raise ValidationException(
                     message="Message content cannot be empty",
                     param=f"messages.{idx}.content",
                     code="empty_content",
                 )
+
+        elif isinstance(content, dict):
+            msg.content = [content]
+            content = msg.content
 
         # 列表内容
         elif isinstance(content, list):
@@ -458,14 +508,24 @@ def validate_request(request: ChatCompletionRequest):
                             param=f"messages.{idx}.content.{block_idx}.file",
                             code="missing_file",
                         )
+                    reusable_file_id = (
+                        file_data.get("grok_file_id")
+                        or file_data.get("file_id")
+                        or block.get("grok_file_id")
+                        or block.get("file_id")
+                    )
+                    if reusable_file_id:
+                        continue
                     _validate_media_input(
                         file_data.get("file_data", ""),
                         "file.file_data",
                         f"messages.{idx}.content.{block_idx}.file.file_data",
                     )
-        else:
+        elif content is None and (msg.role == "tool" or msg.tool_calls):
+            pass
+        elif not isinstance(content, list):
             raise ValidationException(
-                message="Message content must be a string or array",
+                message="Message content must be a string, object, or array",
                 param=f"messages.{idx}.content",
                 code="invalid_content",
             )
@@ -646,12 +706,9 @@ def validate_request(request: ChatCompletionRequest):
             )
         config.aspect_ratio = ratio_map[config.aspect_ratio]
 
-        if config.video_length is None:
-            config.video_length = 6
-        config.video_length = int(config.video_length)
-        if config.video_length < 6 or config.video_length > 30:
+        if config.video_length not in (6, 10, 15):
             raise ValidationException(
-                message="video_length must be between 6 and 30 seconds",
+                message="video_length must be 6, 10, or 15 seconds",
                 param="video_config.video_length",
                 code="invalid_video_length",
             )
@@ -776,21 +833,21 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # image edit 支持最多 3 张参考图
         image_refs = image_urls[:3]
 
-        is_stream = (
+        requested_stream = (
             request.stream if request.stream is not None else get_config("app.stream")
         )
         image_conf = request.image_config or ImageConfig()
-        _validate_image_config(image_conf, stream=bool(is_stream))
+        _validate_image_config(image_conf, stream=bool(requested_stream))
         response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
         n = 1
 
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
+        quota_mode = ModelService.quota_mode_for_model(request.model)
 
         token = None
         for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
+            token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
             if token:
                 break
 
@@ -810,36 +867,39 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             images=image_refs,
             n=n,
             response_format=response_format,
-            stream=bool(is_stream),
+            stream=False,
         )
 
-        if result.stream:
-            return _build_streaming_response(result.data, raw_request, request.model)
-
-        data = [{response_field: img} for img in result.data]
+        usage = {
+            "total_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
+        }
+        content = _build_chat_image_content(result.data, response_format)
+        if bool(requested_stream):
+            return _build_streaming_response(
+                _build_chat_image_stream(request.model, content, usage),
+                raw_request,
+                request.model,
+            )
         return JSONResponse(
-            content={
-                "created": int(time.time()),
-                "data": data,
-                "usage": {
-                    "total_tokens": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
-                },
-            }
+            content=make_chat_response(
+                model=request.model,
+                content=content,
+                usage=usage,
+            )
         )
 
     if model_info and model_info.is_image:
         prompt, _ = _extract_prompt_images(request.messages)
 
-        is_stream = (
+        requested_stream = (
             request.stream if request.stream is not None else get_config("app.stream")
         )
         image_conf = request.image_config or ImageConfig()
-        _validate_image_config(image_conf, stream=bool(is_stream))
+        _validate_image_config(image_conf, stream=bool(requested_stream))
         response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
         n = image_conf.n or 1
         size = image_conf.size or "1024x1024"
         aspect_ratio_map = {
@@ -853,10 +913,11 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
+        quota_mode = ModelService.quota_mode_for_model(request.model)
 
         token = None
         for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
+            token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
             if token:
                 break
 
@@ -877,25 +938,28 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             response_format=response_format,
             size=size,
             aspect_ratio=aspect_ratio,
-            stream=bool(is_stream),
+            stream=False,
         )
 
-        if result.stream:
-            return _build_streaming_response(result.data, raw_request, request.model)
-
-        data = [{response_field: img} for img in result.data]
         usage = result.usage_override or {
             "total_tokens": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
         }
+        content = _build_chat_image_content(result.data, response_format)
+        if bool(requested_stream):
+            return _build_streaming_response(
+                _build_chat_image_stream(request.model, content, usage),
+                raw_request,
+                request.model,
+            )
         return JSONResponse(
-            content={
-                "created": int(time.time()),
-                "data": data,
-                "usage": usage,
-            }
+            content=make_chat_response(
+                model=request.model,
+                content=content,
+                usage=usage,
+            )
         )
 
     if model_info and model_info.is_video:
@@ -986,6 +1050,12 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             reasoning_effort=request.reasoning_effort,
             temperature=request.temperature,
             top_p=request.top_p,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            parallel_tool_calls=(
+                True if request.parallel_tool_calls is None else request.parallel_tool_calls
+            ),
+            provider_options=request.provider_options or request.providerOptions,
         )
 
     if isinstance(result, dict):

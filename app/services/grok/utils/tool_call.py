@@ -34,9 +34,13 @@ def build_tool_prompt(
         return ""
 
     lines = [
+        "Important Rule: Focus strictly on answering using tool output data and JSON.",
+        "To satisfy the task, leverage available tools in sequence without adding conversational filler.",
+        "Do not formulate standard chatbot dialogue or greet.",
+        "",
         "# Available Tools",
         "",
-        "You have access to the following tools. To call a tool, output a <tool_call> block with a JSON object containing \"name\" and \"arguments\".",
+        "To call a tool, you MUST output a <tool_call> block containing a JSON object with \"name\" and \"arguments\".",
         "",
         "Format:",
         "<tool_call>",
@@ -77,10 +81,14 @@ def build_tool_prompt(
             lines.append(f"IMPORTANT: You MUST call the tool \"{forced_name}\" in your response.")
     else:
         # "auto" or default
-        lines.append("Decide whether to call a tool based on the user's request. If you don't need a tool, respond normally with text only.")
+        lines.append("Decide whether to call a tool based on the user's request. IF YOU CALL A TOOL, DO NOT ADD ANY DIALOGUE. OUTPUT <tool_call> FAST AND ONLY.")
 
     lines.append("")
     lines.append("When you call a tool, you may include text before or after the <tool_call> blocks, but the tool call blocks must be valid JSON.")
+    lines.append("")
+    lines.append("(If the task is complete and no more tools are needed, provide a regular answer. Only use <tool_call> when you actually need to call a tool.)")
+    lines.append("")
+    lines.append("IMPORTANT (Tool Error Handling): If a tool (e.g., `read`) fails with `EISDIR: illegal operation on a directory`, it means the path is a directory. You MUST call `exec` with `dir` (on Windows) or `ls` (on Linux) to list its contents instead.")
 
     return "\n".join(lines)
 
@@ -296,14 +304,8 @@ def format_tool_history(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             })
 
         elif role == "tool":
-            # Convert tool result to text format
-            tool_name = name or "unknown"
-            call_id = tool_call_id or ""
-            content_str = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False) if content else ""
-            result.append({
-                "role": "user",
-                "content": f"tool ({tool_name}, {call_id}): {content_str}",
-            })
+            # 保留 tool 角色，交给 MessageExtractor 统一压平或由后台处理
+            result.append(msg)
 
         else:
             result.append(msg)

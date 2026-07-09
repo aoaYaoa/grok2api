@@ -37,5 +37,17 @@ def get_proxy() -> str:
     return _get("base_proxy_url", "") or ""
 
 
+def get_cf_clearance_value() -> str:
+    return _get("cf_clearance", "") or ""
+
+
+def get_cf_cookies_value() -> str:
+    return _get("cf_cookies", "") or ""
+
+
+def is_cf_clearance_usable() -> bool:
+    return bool(get_cf_clearance_value() or get_cf_cookies_value())
+
+
 def is_enabled() -> bool:
     return bool(_get("enabled", False))

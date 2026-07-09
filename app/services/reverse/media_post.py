@@ -1,13 +1,13 @@
 """
-Reverse interface: media post create.
+Reverse interface: media post create/get.
 """
 
 import asyncio
 import json
 import re
 import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 from curl_cffi.requests import AsyncSession
 
@@ -20,8 +20,12 @@ from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
 
 MEDIA_POST_API = "https://grok.com/rest/media/post/create"
+MEDIA_POST_GET_API = "https://grok.com/rest/media/post/get"
+MEDIA_POST_CREATE_LINK_API = "https://grok.com/rest/media/post/create-link"
+
+
 class MediaPostReverse:
-    """/rest/media/post/create reverse interface."""
+    """/rest/media/post/* reverse interface."""
 
     @dataclass
     class _SimpleResponse:
@@ -71,18 +75,25 @@ class MediaPostReverse:
         post_payload = {}
         share_payload = {}
         share_link = ""
+        create_public_share_link = bool(get_config("asset.create_public_share_link", True))
         try:
             post_resp = await MediaPostReverse.get(session, token, post_text)
             post_payload = post_resp.json() if post_resp is not None else {}
         except Exception as e:
             logger.warning(f"MediaPost metadata get failed: post_id={post_text}, error={e}")
-        try:
-            share_resp = await MediaPostReverse.create_link(session, token, post_text)
-            share_payload = share_resp.json() if share_resp is not None else {}
-            if isinstance(share_payload, dict):
-                share_link = str(share_payload.get("shareLink") or "").strip()
-        except Exception as e:
-            logger.warning(f"MediaPost metadata create-link failed: post_id={post_text}, error={e}")
+        if create_public_share_link:
+            try:
+                share_resp = await MediaPostReverse.create_link(session, token, post_text)
+                share_payload = share_resp.json() if share_resp is not None else {}
+                if isinstance(share_payload, dict):
+                    share_link = str(share_payload.get("shareLink") or "").strip()
+            except Exception as e:
+                logger.warning(f"MediaPost metadata create-link failed: post_id={post_text}, error={e}")
+        else:
+            logger.info(
+                "MediaPost metadata create-link skipped by config: post_id={}",
+                post_text,
+            )
 
         canonical_post_id = post_text
         if share_link:
@@ -239,8 +250,9 @@ class MediaPostReverse:
                     if len(content) > 300:
                         content = f"{content[:300]}...(len={len(content)})"
                     logger.error(
-                        "MediaPostReverse: Media post create failed, "
-                        f"status={response.status_code}, body={content or '-'}",
+                        "MediaPostReverse: Media post create failed, status={}, body={}",
+                        response.status_code,
+                        content or '-',
                         extra={"error_type": "UpstreamException"},
                     )
                     raise UpstreamException(
@@ -274,6 +286,194 @@ class MediaPostReverse:
             )
             raise UpstreamException(
                 message=f"MediaPostReverse: Media post create failed, {str(e)}",
+                details={"status": 502, "error": str(e)},
+            )
+
+    @staticmethod
+    async def get(session: AsyncSession, token: str, post_id: str) -> Any:
+        """获取媒体 post 元信息。"""
+        try:
+            base_proxy = get_config("proxy.base_proxy_url")
+            proxies = {"http": base_proxy, "https": base_proxy} if base_proxy else None
+            proxy_url = base_proxy
+            headers = build_headers(
+                cookie_token=token,
+                content_type="application/json",
+                origin="https://grok.com",
+                referer="https://grok.com",
+            )
+            payload = {"id": str(post_id or "").strip()}
+            timeout = get_config("video.timeout")
+            browser = get_config("proxy.browser")
+
+            async def _do_request():
+                try:
+                    response = await session.post(
+                        MEDIA_POST_GET_API,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                        proxies=proxies,
+                        impersonate=browser,
+                    )
+                except Exception as first_err:
+                    logger.warning(
+                        "MediaPostReverse get primary request failed, fallback direct: "
+                        f"error={first_err}"
+                    )
+                    try:
+                        response = await session.post(
+                            MEDIA_POST_GET_API,
+                            headers=headers,
+                            json=payload,
+                            timeout=timeout,
+                        )
+                    except Exception as second_err:
+                        logger.warning(
+                            "MediaPostReverse get direct curl request failed, "
+                            f"fallback urllib: error={second_err}"
+                        )
+                        response = await MediaPostReverse._urllib_post(
+                            url=MEDIA_POST_GET_API,
+                            headers=headers,
+                            payload=payload,
+                            timeout=timeout,
+                            proxy_url=proxy_url,
+                        )
+
+                if response.status_code != 200:
+                    content = ""
+                    try:
+                        content = (response.text or "").strip().replace("\n", " ")
+                    except Exception:
+                        pass
+                    if len(content) > 300:
+                        content = f"{content[:300]}...(len={len(content)})"
+                    logger.error(
+                        "MediaPostReverse: Media post get failed, status={}, body={}",
+                        response.status_code,
+                        content or '-',
+                        extra={"error_type": "UpstreamException"},
+                    )
+                    raise UpstreamException(
+                        message=f"MediaPostReverse: Media post get failed, {response.status_code}",
+                        details={"status": response.status_code, "body": content},
+                    )
+
+                return response
+
+            return await retry_on_status(_do_request)
+
+        except Exception as e:
+            if isinstance(e, UpstreamException):
+                raise
+            logger.error(
+                f"MediaPostReverse: Media post get failed, {str(e)}",
+                extra={"error_type": type(e).__name__},
+            )
+            raise UpstreamException(
+                message=f"MediaPostReverse: Media post get failed, {str(e)}",
+                details={"status": 502, "error": str(e)},
+            )
+
+    @staticmethod
+    async def create_link(
+        session: AsyncSession,
+        token: str,
+        post_id: str,
+        source: str = "post-page",
+        platform: str = "web",
+    ) -> Any:
+        """为媒体 post 创建 share link。"""
+        try:
+            base_proxy = get_config("proxy.base_proxy_url")
+            proxies = {"http": base_proxy, "https": base_proxy} if base_proxy else None
+            proxy_url = base_proxy
+            headers = build_headers(
+                cookie_token=token,
+                content_type="application/json",
+                origin="https://grok.com",
+                referer=f"https://grok.com/imagine/post/{post_id}",
+            )
+            payload = {
+                "postId": str(post_id or "").strip(),
+                "source": str(source or "post-page").strip() or "post-page",
+                "platform": str(platform or "web").strip() or "web",
+            }
+            timeout = get_config("video.timeout")
+            browser = get_config("proxy.browser")
+            logger.info(
+                "MediaPost create-link request prepared: "
+                f"post_id={payload['postId']}, source={payload['source']}, platform={payload['platform']}"
+            )
+
+            async def _do_request():
+                try:
+                    response = await session.post(
+                        MEDIA_POST_CREATE_LINK_API,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                        proxies=proxies,
+                        impersonate=browser,
+                    )
+                except Exception as first_err:
+                    logger.warning(
+                        "MediaPostReverse create-link primary request failed, fallback direct: "
+                        f"error={first_err}"
+                    )
+                    try:
+                        response = await session.post(
+                            MEDIA_POST_CREATE_LINK_API,
+                            headers=headers,
+                            json=payload,
+                            timeout=timeout,
+                        )
+                    except Exception as second_err:
+                        logger.warning(
+                            "MediaPostReverse create-link direct curl request failed, "
+                            f"fallback urllib: error={second_err}"
+                        )
+                        response = await MediaPostReverse._urllib_post(
+                            url=MEDIA_POST_CREATE_LINK_API,
+                            headers=headers,
+                            payload=payload,
+                            timeout=timeout,
+                            proxy_url=proxy_url,
+                        )
+
+                if response.status_code != 200:
+                    content = ""
+                    try:
+                        content = (response.text or "").strip().replace("\n", " ")
+                    except Exception:
+                        pass
+                    if len(content) > 300:
+                        content = f"{content[:300]}...(len={len(content)})"
+                    logger.error(
+                        "MediaPostReverse: Media post create-link failed, status={}, body={}",
+                        response.status_code,
+                        content or '-',
+                        extra={"error_type": "UpstreamException"},
+                    )
+                    raise UpstreamException(
+                        message=f"MediaPostReverse: Media post create-link failed, {response.status_code}",
+                        details={"status": response.status_code, "body": content},
+                    )
+
+                return response
+
+            return await retry_on_status(_do_request)
+
+        except Exception as e:
+            if isinstance(e, UpstreamException):
+                raise
+            logger.error(
+                f"MediaPostReverse: Media post create-link failed, {str(e)}",
+                extra={"error_type": type(e).__name__},
+            )
+            raise UpstreamException(
+                message=f"MediaPostReverse: Media post create-link failed, {str(e)}",
                 details={"status": 502, "error": str(e)},
             )
 

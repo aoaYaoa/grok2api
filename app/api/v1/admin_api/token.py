@@ -39,6 +39,21 @@ def _log_nsfw_enable_payload(api_name: str, data: dict) -> None:
     logger.info(f"{api_name} request payload: {payload}")
 
 
+def _collect_target_tokens(data: dict, mgr) -> list[str]:
+    tokens = []
+    if isinstance(data.get("token"), str) and data["token"].strip():
+        tokens.append(data["token"].strip())
+    if isinstance(data.get("tokens"), list):
+        tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
+
+    if not tokens:
+        for pool_name, pool in mgr.pools.items():
+            for info in pool.list():
+                raw = info.token[4:] if info.token.startswith("sso=") else info.token
+                tokens.append(raw)
+    return list(dict.fromkeys([t for t in tokens if t]))
+
+
 @router.get("/tokens", dependencies=[Depends(verify_app_key)])
 async def get_tokens():
     """获取所有 Token"""
@@ -281,29 +296,16 @@ async def enable_nsfw(data: dict):
     try:
         _log_nsfw_enable_payload("tokens/nsfw/enable", data)
         mgr = await get_token_manager()
-
-        tokens = []
-        if isinstance(data.get("token"), str) and data["token"].strip():
-            tokens.append(data["token"].strip())
-        if isinstance(data.get("tokens"), list):
-            tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-        if not tokens:
-            for pool_name, pool in mgr.pools.items():
-                for info in pool.list():
-                    raw = (
-                        info.token[4:] if info.token.startswith("sso=") else info.token
-                    )
-                    tokens.append(raw)
+        enabled = bool(data.get("enabled", True))
+        tokens = _collect_target_tokens(data, mgr)
 
         if not tokens:
             raise HTTPException(status_code=400, detail="No tokens available")
 
-        unique_tokens = list(dict.fromkeys(tokens))
-
         raw_results = await NSFWService.batch(
-            unique_tokens,
+            tokens,
             mgr,
+            enabled=enabled,
         )
 
         results = {}
@@ -322,7 +324,7 @@ async def enable_nsfw(data: dict):
         response = {
             "status": "success",
             "summary": {
-                "total": len(unique_tokens),
+                "total": len(tokens),
                 "ok": ok_count,
                 "fail": fail_count,
             },
@@ -343,25 +345,13 @@ async def enable_nsfw_async(data: dict):
     """批量开启 NSFW (Unhinged) 模式（异步批量 + SSE 进度）"""
     _log_nsfw_enable_payload("tokens/nsfw/enable/async", data)
     mgr = await get_token_manager()
-
-    tokens = []
-    if isinstance(data.get("token"), str) and data["token"].strip():
-        tokens.append(data["token"].strip())
-    if isinstance(data.get("tokens"), list):
-        tokens.extend([str(t).strip() for t in data["tokens"] if str(t).strip()])
-
-    if not tokens:
-        for pool_name, pool in mgr.pools.items():
-            for info in pool.list():
-                raw = info.token[4:] if info.token.startswith("sso=") else info.token
-                tokens.append(raw)
+    enabled = bool(data.get("enabled", True))
+    tokens = _collect_target_tokens(data, mgr)
 
     if not tokens:
         raise HTTPException(status_code=400, detail="No tokens available")
 
-    unique_tokens = list(dict.fromkeys(tokens))
-
-    task = create_task(len(unique_tokens))
+    task = create_task(len(tokens))
 
     async def _run():
         try:
@@ -371,8 +361,9 @@ async def enable_nsfw_async(data: dict):
                 task.record(ok)
 
             raw_results = await NSFWService.batch(
-                unique_tokens,
+                tokens,
                 mgr,
+                enabled=enabled,
                 on_item=_on_item,
                 should_cancel=lambda: task.cancelled,
             )
@@ -398,7 +389,7 @@ async def enable_nsfw_async(data: dict):
             result = {
                 "status": "success",
                 "summary": {
-                    "total": len(unique_tokens),
+                    "total": len(tokens),
                     "ok": ok_count,
                     "fail": fail_count,
                 },
@@ -417,5 +408,5 @@ async def enable_nsfw_async(data: dict):
     return {
         "status": "success",
         "task_id": task.id,
-        "total": len(unique_tokens),
+        "total": len(tokens),
     }

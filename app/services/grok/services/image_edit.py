@@ -31,6 +31,7 @@ from app.services.grok.utils.process import (
 from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.services.chat import GrokChatService
+from app.services.grok.services.model import ModelService
 from app.services.grok.services.video import VideoService
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.reverse.media_post import MediaPostReverse
@@ -102,8 +103,6 @@ async def _try_log_image_share_link(
 def _is_upload_rejected_error(exc: Exception) -> bool:
     """判断是否为上游审核导致的上传拒绝。"""
     msg = str(exc or "").lower()
-    if "content moderated" in msg or "content-moderated" in msg:
-        return True
     if '"code":3' in msg or "'code': 3" in msg:
         return True
 
@@ -112,15 +111,31 @@ def _is_upload_rejected_error(exc: Exception) -> bool:
         status = details.get("status")
         body = str(details.get("body") or "").lower()
         err = str(details.get("error") or "").lower()
-        if "content moderated" in body or "content-moderated" in body:
-            return True
         if '"code":3' in body or "'code': 3" in body:
             return True
         # 某些链路只返回 400 + '"code"' 关键词，按拒绝处理。
-        if status == 400 and ('"code"' in err or "moderated" in err):
+        if status == 400 and '"code"' in err:
             return True
 
     return False
+
+
+def _is_content_moderated_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    if "content moderated" in msg or "content-moderated" in msg:
+        return True
+
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        hint = str(details.get("hint") or "").lower()
+        body = str(details.get("body") or "").lower()
+        if "content moderated" in hint or "content-moderated" in hint:
+            return True
+        if "content moderated" in body or "content-moderated" in body:
+            return True
+
+    code = str(getattr(exc, "code", "") or "").lower()
+    return code == "content_moderated"
 
 
 def _is_upload_network_error(exc: Exception) -> bool:
@@ -160,12 +175,44 @@ def _normalize_fallback_image_url(url: str) -> str:
     return f"https://assets.grok.com/{raw}"
 
 
-def _is_retryable_upload_app_error(exc: Exception) -> bool:
-    if not isinstance(exc, AppException):
-        return False
-    if exc.status_code < 500:
-        return False
-    return exc.code in {"upload_network_error", "upload_failed"}
+def _build_parent_source_candidates(parent_post_id: str, source_image_url: str) -> List[str]:
+    """构建 parentPostId 编辑可复用的图片源候选列表。"""
+    candidates: List[str] = []
+
+    raw = str(source_image_url or "").strip()
+    if raw:
+        candidates.append(_normalize_fallback_image_url(raw))
+
+    parent = str(parent_post_id or "").strip()
+    if parent:
+        candidates.extend(
+            [
+                f"https://imagine-public.x.ai/imagine-public/share-images/{parent}.png",
+                f"https://imagine-public.x.ai/imagine-public/share-images/{parent}.jpg",
+                f"https://imagine-public.x.ai/imagine-public/share-images/{parent}.jpeg",
+                f"https://imagine-public.x.ai/imagine-public/images/{parent}.png",
+                f"https://imagine-public.x.ai/imagine-public/images/{parent}.jpg",
+                f"https://imagine-public.x.ai/imagine-public/images/{parent}.jpeg",
+            ]
+        )
+
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for item in candidates:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _should_skip_parent_precreate(image_ref: str) -> bool:
+    """公开分享图直接交给 app-chat 预处理，不在本地显式 create post。"""
+    raw = str(image_ref or "").strip().lower()
+    if "imagine-public.x.ai/imagine-public/share-images/" in raw:
+        return True
+    return False
 
 
 def _normalize_asset_url(file_uri: str) -> str:
@@ -346,39 +393,28 @@ class ImageEditService:
                     f"图片上传完成，共 {len(image_urls)} 张",
                     count=len(image_urls),
                 )
-                use_reference_merge_mode = len(image_urls) >= 2
-                parent_post_id = ""
-                if use_reference_merge_mode:
-                    await self._emit_progress(
-                        progress_cb,
-                        "pre_create_skipped",
-                        36,
-                        "多参考图模式，跳过媒体帖子创建",
-                        count=len(image_urls),
-                    )
-                else:
-                    await self._emit_progress(
-                        progress_cb,
-                        "pre_create_start",
-                        36,
-                        "正在创建媒体帖子",
-                    )
-                    parent_post_id = await self._get_parent_post_id(
-                        current_token, image_urls
-                    )
-                    await self._emit_progress(
-                        progress_cb,
-                        "pre_create_done",
-                        42,
-                        "媒体帖子创建完成",
-                        parent_post_id=parent_post_id or "",
-                    )
+                await self._emit_progress(
+                    progress_cb,
+                    "pre_create_start",
+                    36,
+                    "正在创建媒体帖子",
+                )
+                parent_post_id = await self._get_parent_post_id(
+                    current_token, image_urls
+                )
+                await self._emit_progress(
+                    progress_cb,
+                    "pre_create_done",
+                    42,
+                    "媒体帖子创建完成",
+                    parent_post_id=parent_post_id or "",
+                )
 
                 model_config_override = {
                     "modelMap": {
                         "imageEditModel": "imagine",
                         "imageEditModelConfig": {
-                            "imageReferences": image_urls[:1],
+                            "imageReferences": image_urls,
                         },
                     }
                 }
@@ -394,7 +430,7 @@ class ImageEditService:
                         token=current_token,
                         message=prompt,
                         model=model_info.grok_model,
-                        mode=getattr(model_info, "model_mode", None),
+                        mode=None,
                         stream=True,
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
@@ -414,6 +450,7 @@ class ImageEditService:
                             current_token,
                             model_info.model_id,
                         ),
+                        token_used=current_token,
                     )
 
                 await self._emit_progress(
@@ -451,12 +488,19 @@ class ImageEditService:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to record image edit usage: {e}")
-                return ImageEditResult(stream=False, data=images_out)
+                return ImageEditResult(
+                    stream=False,
+                    data=images_out,
+                    token_used=current_token,
+                )
 
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(current_token)
+                    await token_mgr.mark_rate_limited(
+                        current_token,
+                        quota_mode=ModelService.quota_mode_for_model(model_info.model_id),
+                    )
                     await self._emit_progress(
                         progress_cb,
                         "rate_limited",
@@ -465,21 +509,6 @@ class ImageEditService:
                     )
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
-                        f"trying next token (attempt {attempt + 1}/{max_token_retries})"
-                    )
-                    continue
-                raise
-            except AppException as e:
-                last_error = e
-                if _is_retryable_upload_app_error(e) and attempt + 1 < max_token_retries:
-                    await self._emit_progress(
-                        progress_cb,
-                        "upload_retry_next_token",
-                        18,
-                        "图片上传失败，正在切换令牌重试",
-                    )
-                    logger.warning(
-                        f"Token {current_token[:10]}... upload failed with code={e.code}, "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
@@ -536,18 +565,10 @@ class ImageEditService:
                 "已匹配编辑令牌",
             )
             try:
-                raw_source_image_url = (source_image_url or "").strip()
-                image_ref = (
-                    f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
+                source_candidates = _build_parent_source_candidates(
+                    parent_post_id, source_image_url
                 )
-                fallback_upload_image_ref = raw_source_image_url or image_ref
-                if raw_source_image_url and raw_source_image_url != image_ref:
-                    logger.info(
-                        "Image edit(parentPostId) source image normalized to imagine-public: "
-                        f"parent_post_id={parent_post_id}, "
-                        f"raw_source_image_url={raw_source_image_url}, "
-                        f"normalized_source_image_url={image_ref}"
-                    )
+                image_ref = source_candidates[0] if source_candidates else ""
                 effective_parent_post_id = parent_post_id
                 await self._emit_progress(
                     progress_cb,
@@ -556,37 +577,58 @@ class ImageEditService:
                     "正在创建媒体帖子",
                     parent_post_id=parent_post_id,
                 )
-                try:
-                    # 与 nsfw 的 parentPostId 链路保持一致：先预创建 media post
-                    # 这样上游在 imagine-image-edit 校验 parentPostId 时更稳定。
-                    image_post_id = await VideoService().create_image_post(
-                        current_token, image_ref
-                    )
-                    if image_post_id:
-                        effective_parent_post_id = image_post_id
+                if _should_skip_parent_precreate(image_ref):
                     logger.info(
-                        "Image edit(parentPostId) pre-create media post done: "
-                        f"parent_post_id={parent_post_id}, "
-                        f"image_post_id={effective_parent_post_id}, media_url={image_ref}"
+                        "Image edit(parentPostId) skip pre-create for public share image: "
+                        f"parent_post_id={parent_post_id}, media_url={image_ref}"
                     )
                     await self._emit_progress(
                         progress_cb,
-                        "pre_create_done",
-                        34,
-                        "媒体帖子创建完成",
-                        image_post_id=effective_parent_post_id,
+                        "pre_create_skipped",
+                        26,
+                        "已识别公开分享图，跳过媒体帖子创建",
                     )
-                except Exception as e:
-                    logger.warning(
-                        "Image edit(parentPostId) pre-create media post failed, continue anyway: "
-                        f"parent_post_id={parent_post_id}, media_url={image_ref}, error={e}"
-                    )
-                    await self._emit_progress(
-                        progress_cb,
-                        "pre_create_failed",
-                        28,
-                        "媒体帖子创建失败，继续请求",
-                    )
+                else:
+                    try:
+                        # 同账号原图仍保留预创建逻辑，提升 assets/content 链路稳定性。
+                        image_post_id = ""
+                        precreate_errors: List[str] = []
+                        for candidate in source_candidates:
+                            try:
+                                image_post_id = await VideoService().create_image_post(
+                                    current_token, candidate
+                                )
+                                if image_post_id:
+                                    image_ref = candidate
+                                    effective_parent_post_id = image_post_id
+                                    break
+                            except Exception as candidate_error:
+                                precreate_errors.append(str(candidate_error))
+                        if not image_post_id and precreate_errors:
+                            raise UpstreamException(precreate_errors[-1])
+                        logger.info(
+                            "Image edit(parentPostId) pre-create media post done: "
+                            f"parent_post_id={parent_post_id}, "
+                            f"image_post_id={effective_parent_post_id}, media_url={image_ref}"
+                        )
+                        await self._emit_progress(
+                            progress_cb,
+                            "pre_create_done",
+                            34,
+                            "媒体帖子创建完成",
+                            image_post_id=effective_parent_post_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Image edit(parentPostId) pre-create media post failed, continue anyway: "
+                            f"parent_post_id={parent_post_id}, media_url={image_ref}, error={e}"
+                        )
+                        await self._emit_progress(
+                            progress_cb,
+                            "pre_create_failed",
+                            28,
+                            "媒体帖子创建失败，继续请求",
+                        )
 
                 model_config_override = {
                     "modelMap": {
@@ -604,7 +646,7 @@ class ImageEditService:
                         token=current_token,
                         message=prompt,
                         model=model_info.grok_model,
-                        mode=getattr(model_info, "model_mode", None),
+                        mode=None,
                         stream=True,
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
@@ -624,6 +666,7 @@ class ImageEditService:
                             current_token,
                             model_info.model_id,
                         ),
+                        token_used=current_token,
                     )
 
                 await self._emit_progress(
@@ -633,72 +676,22 @@ class ImageEditService:
                     "已提交编辑请求",
                     parent_post_id=effective_parent_post_id,
                 )
-                try:
-                    images_out = await self._collect_images(
-                        token=current_token,
-                        prompt=prompt,
-                        model_info=model_info,
-                        response_format=response_format,
-                        tool_overrides=tool_overrides,
-                        model_config_override=model_config_override,
-                        return_all_images=return_all_images,
-                        progress_cb=progress_cb,
-                    )
-                except UpstreamException as collect_error:
-                    collect_details = collect_error.details or {}
-                    if isinstance(collect_details, dict) and collect_details.get("error") == "empty_result":
-                        logger.warning(
-                            "Image edit(parentPostId) upstream returned empty_result, falling back to upload mode: "
-                            f"parent_post_id={parent_post_id}, media_url={image_ref}, details={collect_details}"
-                        )
-                        await self._emit_progress(
-                            progress_cb,
-                            "fallback_to_upload",
-                            52,
-                            "parentPostId 编辑无结果，回退到单图编辑",
-                        )
-                        return await self.edit(
-                            token_mgr=token_mgr,
-                            token=current_token,
-                            model_info=model_info,
-                            prompt=prompt,
-                            images=[fallback_upload_image_ref],
-                            n=1,
-                            response_format=response_format,
-                            stream=False,
-                            return_all_images=return_all_images,
-                            progress_cb=progress_cb,
-                        )
-                    raise
+                images_out = await self._collect_images(
+                    token=current_token,
+                    prompt=prompt,
+                    model_info=model_info,
+                    response_format=response_format,
+                    tool_overrides=tool_overrides,
+                    model_config_override=model_config_override,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
                 await self._emit_progress(
                     progress_cb,
                     "collect_done",
                     92,
                     f"已收到 {len(images_out)} 张结果",
                 )
-                if not images_out:
-                    logger.warning(
-                        "Image edit(parentPostId) returned no results, falling back to upload mode: "
-                        f"parent_post_id={parent_post_id}, media_url={image_ref}"
-                    )
-                    await self._emit_progress(
-                        progress_cb,
-                        "fallback_to_upload",
-                        52,
-                        "parentPostId 编辑无结果，回退到单图编辑",
-                    )
-                    return await self.edit(
-                        token_mgr=token_mgr,
-                        token=current_token,
-                        model_info=model_info,
-                        prompt=prompt,
-                        images=[fallback_upload_image_ref],
-                        n=1,
-                        response_format=response_format,
-                        stream=False,
-                        return_all_images=return_all_images,
-                        progress_cb=progress_cb,
-                    )
                 try:
                     effort = (
                         EffortType.HIGH
@@ -712,12 +705,19 @@ class ImageEditService:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to record image edit(parentPostId) usage: {e}")
-                return ImageEditResult(stream=False, data=images_out)
+                return ImageEditResult(
+                    stream=False,
+                    data=images_out,
+                    token_used=current_token,
+                )
 
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(current_token)
+                    await token_mgr.mark_rate_limited(
+                        current_token,
+                        quota_mode=ModelService.quota_mode_for_model(model_info.model_id),
+                    )
                     await self._emit_progress(
                         progress_cb,
                         "rate_limited",
@@ -754,6 +754,13 @@ class ImageEditService:
                             f"https://assets.grok.com/{file_uri.lstrip('/')}"
                         )
         except Exception as e:
+            if _is_content_moderated_error(e):
+                raise AppException(
+                    message="图片内容触发审核限制，无法上传。请更换图片后重试。",
+                    error_type=ErrorType.INVALID_REQUEST.value,
+                    code="content_moderated",
+                    status_code=400,
+                )
             if _is_upload_rejected_error(e):
                 raise AppException(
                     message="图片上传被拒绝，请更换图片后重试",
@@ -793,6 +800,7 @@ class ImageEditService:
     ) -> List[dict[str, str]]:
         prepared: List[dict[str, str]] = []
         upload_service = UploadService()
+        primary_parent_consumed = False
         try:
             for item in reference_items:
                 raw_source = str(
@@ -815,13 +823,23 @@ class ImageEditService:
                 attachment_id = ""
                 resolved_url = ""
                 resolved_id = ""
+                current_parent_post_id = str(item.get("parent_post_id") or "").strip()
                 should_upload_for_attachment = _needs_image_edit_reference_upload(
                     item, raw_source
                 )
+                if current_parent_post_id:
+                    if not primary_parent_consumed:
+                        primary_parent_consumed = True
+                        should_upload_for_attachment = False
+                    else:
+                        should_upload_for_attachment = True
                 if not should_upload_for_attachment:
                     normalized_raw = _normalize_asset_url(raw_source)
-                    if normalized_raw and not _is_assets_content_url(normalized_raw) and "imagine-public.x.ai/" not in normalized_raw:
-                        should_upload_for_attachment = True
+                    if normalized_raw and not _is_assets_content_url(normalized_raw):
+                        if current_parent_post_id and primary_parent_consumed:
+                            should_upload_for_attachment = False
+                        else:
+                            should_upload_for_attachment = True
                 if should_upload_for_attachment:
                     file_id, file_uri = await upload_service.upload_file(raw_source, token)
                     resolved_url = _normalize_asset_url(file_uri)
@@ -829,10 +847,7 @@ class ImageEditService:
                         resolved_url
                     )
                     attachment_id = str(file_id or "").strip() or resolved_id
-                    if raw_source.startswith("http://") or raw_source.startswith("https://"):
-                        request_url = raw_source
-                    else:
-                        request_url = resolved_url
+                    request_url = resolved_url
                     mention_id = resolved_id or mention_id
                 else:
                     if raw_source.startswith("/users/") or raw_source.startswith("users/"):
@@ -842,11 +857,7 @@ class ImageEditService:
                     resolved_url = _normalize_asset_url(raw_source)
                     resolved_id = _extract_image_post_id(resolved_url)
                     mention_id = mention_id or resolved_id
-                    # imagine-public URLs should not be used as fileAttachments
-                    if "imagine-public.x.ai/" in raw_source:
-                        attachment_id = ""
-                    else:
-                        attachment_id = resolved_id
+                    attachment_id = ""
                 prepared.append(
                     {
                         "source_url": raw_source,
@@ -856,7 +867,7 @@ class ImageEditService:
                         "resolved_id": resolved_id,
                         "mention_id": mention_id,
                         "attachment_id": attachment_id,
-                        "parent_post_id": str(item.get("parent_post_id") or "").strip(),
+                        "parent_post_id": current_parent_post_id if not should_upload_for_attachment else "",
                         "mention_alias": mention_alias,
                     }
                 )
@@ -954,16 +965,19 @@ class ImageEditService:
                         status_code=400,
                     )
 
-                use_reference_merge_mode = len(request_urls) >= 2
+                parent_ids = [
+                    str(item.get("parent_post_id") or "").strip()
+                    for item in prepared_refs
+                    if str(item.get("parent_post_id") or "").strip()
+                ]
+                unique_parent_ids = list(dict.fromkeys(parent_ids))
                 effective_parent_post_id = ""
-                if not use_reference_merge_mode:
+                # 多张不同 parentPostId 的参考图不能再强行指定单个 parentPostId，
+                # 否则上游会把它视为互相冲突的编辑上下文并直接返回 400。
+                if len(unique_parent_ids) == 1:
+                    effective_parent_post_id = unique_parent_ids[0]
+                elif not unique_parent_ids:
                     effective_parent_post_id = str(root_parent_post_id or "").strip()
-                    if not effective_parent_post_id:
-                        first_parent = str(
-                            prepared_refs[0].get("parent_post_id") or ""
-                        ).strip()
-                        if first_parent:
-                            effective_parent_post_id = first_parent
                     if not effective_parent_post_id:
                         effective_parent_post_id = await VideoService().create_image_post(
                             current_token, request_urls[0]
@@ -973,17 +987,18 @@ class ImageEditService:
                     progress_cb, "chat_request_start", 42, "已提交编辑请求"
                 )
                 tool_overrides = {"imageGen": True}
-                image_edit_config = {
-                    "imageReferences": request_urls[:1],
-                }
-                if effective_parent_post_id:
-                    image_edit_config["parentPostId"] = effective_parent_post_id
                 model_config_override = {
                     "modelMap": {
                         "imageEditModel": "imagine",
-                        "imageEditModelConfig": image_edit_config,
+                        "imageEditModelConfig": {
+                            "imageReferences": request_urls,
+                        },
                     }
                 }
+                if effective_parent_post_id:
+                    model_config_override["modelMap"]["imageEditModelConfig"][
+                        "parentPostId"
+                    ] = effective_parent_post_id
                 _log_final_image_edit_payload(
                     prompt_text=prompt_text,
                     file_attachments=file_attachments,
@@ -996,7 +1011,7 @@ class ImageEditService:
                         token=current_token,
                         message=prompt_text,
                         model=model_info.grok_model,
-                        mode=getattr(model_info, "model_mode", None),
+                        mode=None,
                         stream=True,
                         file_attachments=file_attachments,
                         tool_overrides=tool_overrides,
@@ -1010,53 +1025,17 @@ class ImageEditService:
                         token_used=current_token,
                     )
 
-                try:
-                    images_out = await self._collect_images(
-                        token=current_token,
-                        prompt=prompt_text,
-                        model_info=model_info,
-                        response_format=response_format,
-                        tool_overrides=tool_overrides,
-                        model_config_override=model_config_override,
-                        file_attachments=file_attachments,
-                        return_all_images=return_all_images,
-                        progress_cb=progress_cb,
-                    )
-                except UpstreamException as e:
-                    details = getattr(e, "details", None)
-                    has_parent = any(
-                        str(item.get("parent_post_id") or "").strip()
-                        for item in prepared_refs
-                    )
-                    fallback_sources = [
-                        str(item.get("source_url") or "").strip()
-                        for item in prepared_refs
-                        if str(item.get("source_url") or "").strip()
-                    ]
-                    if (
-                        isinstance(details, dict)
-                        and details.get("error") == "empty_result"
-                        and len(request_urls) >= 2
-                        and not has_parent
-                        and fallback_sources
-                    ):
-                        logger.warning(
-                            "Image edit empty result, fallback to upload mode: "
-                            f"count={len(fallback_sources)}, token={current_token[:10]}..."
-                        )
-                        return await self.edit(
-                            token_mgr=token_mgr,
-                            token=current_token,
-                            model_info=model_info,
-                            prompt=prompt,
-                            images=fallback_sources,
-                            n=1,
-                            response_format=response_format,
-                            stream=stream,
-                            return_all_images=return_all_images,
-                            progress_cb=progress_cb,
-                        )
-                    raise
+                images_out = await self._collect_images(
+                    token=current_token,
+                    prompt=prompt_text,
+                    model_info=model_info,
+                    response_format=response_format,
+                    tool_overrides=tool_overrides,
+                    model_config_override=model_config_override,
+                    file_attachments=file_attachments,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
                 try:
                     await token_mgr.consume(current_token, EffortType.HIGH)
                 except Exception as e:
@@ -1069,8 +1048,11 @@ class ImageEditService:
             except Exception as e:
                 last_error = e
                 is_rl = rate_limited(e)
+                is_content_moderated = _is_content_moderated_error(e)
                 is_upload_rejected = _is_upload_rejected_error(e)
                 is_upload_network = _is_upload_network_error(e)
+                if is_content_moderated:
+                    raise
                 if not (is_rl or is_upload_rejected or is_upload_network):
                     raise
                 if attempt >= max_token_retries - 1:
@@ -1128,42 +1110,12 @@ class ImageEditService:
         return_all_images: bool = False,
         progress_cb: Callable[[str, dict], Any] | None = None,
     ) -> List[str]:
-        image_edit_config = ((model_config_override or {}).get("modelMap") or {}).get(
-            "imageEditModelConfig"
-        ) or {}
-        reference_count = len(image_edit_config.get("imageReferences") or [])
-        collect_state = {
-            "chat_connected": False,
-            "image_count": 0,
-            "last_event": "",
-            "stream_errors": [],
-        }
-
-        async def tracked_progress_cb(event: str, payload: dict):
-            collect_state["last_event"] = str(event or "").strip()
-            if event == "chat_connected":
-                collect_state["chat_connected"] = True
-            elif event == "image_downloaded":
-                try:
-                    count = int((payload or {}).get("count") or 0)
-                except Exception:
-                    count = 0
-                collect_state["image_count"] = max(collect_state["image_count"], count)
-            elif event == "stream_errors":
-                errors = (payload or {}).get("errors")
-                if isinstance(errors, list):
-                    collect_state["stream_errors"] = errors
-            if progress_cb:
-                result = progress_cb(event, payload)
-                if asyncio.iscoroutine(result):
-                    await result
-
         async def _call_edit():
             response = await GrokChatService().chat(
                 token=token,
                 message=prompt,
                 model=model_info.grok_model,
-                mode=getattr(model_info, "model_mode", None),
+                mode=None,
                 stream=True,
                 file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
@@ -1174,34 +1126,26 @@ class ImageEditService:
                 model_info.model_id,
                 token,
                 response_format=response_format,
-                progress_cb=tracked_progress_cb,
+                progress_cb=progress_cb,
+                max_images=None if return_all_images else 1,
             )
             return await processor.process(response)
 
         all_images = await _call_edit()
 
         if not all_images:
-            details = {
-                "error": "empty_result",
-                "chat_connected": collect_state["chat_connected"],
-                "image_count": 0,
-                "last_event": collect_state["last_event"],
-                "reference_count": reference_count,
-                "stream_errors": collect_state["stream_errors"],
-            }
-            message = (
-                "Image edit upstream connected but returned no image URLs"
-                if collect_state["chat_connected"]
-                else "Image edit upstream ended before any image URL was returned"
+            raise UpstreamException(
+                "Image edit returned no results", details={"error": "empty_result"}
             )
-            logger.warning(
-                "Image edit returned no results: "
-                f"message={message}, details={details}"
-            )
-            raise UpstreamException(message, details=details)
-        if return_all_images:
-            return all_images
-        return [all_images[0]]
+        share_items = []
+        if token:
+            for image_url in all_images:
+                post_id = _extract_image_post_id(image_url)
+                if post_id and all(post_id != exist_id for exist_id, _ in share_items):
+                    share_items.append((post_id, image_url))
+            for post_id, image_url in share_items:
+                await _try_log_image_share_link(token, post_id, local_url=image_url)
+        return all_images
 
 
 class ImageStreamProcessor(BaseProcessor):
@@ -1327,6 +1271,9 @@ class ImageStreamProcessor(BaseProcessor):
                         },
                     },
                 )
+                post_id = _extract_image_post_id(b64)
+                if post_id and self.token:
+                    await _try_log_image_share_link(self.token, post_id, local_url=b64)
         except asyncio.CancelledError:
             logger.debug("Image stream cancelled by client")
         except StreamIdleTimeoutError as e:
@@ -1372,12 +1319,14 @@ class ImageCollectProcessor(BaseProcessor):
         token: str = "",
         response_format: str = "b64_json",
         progress_cb: Callable[[str, dict], Any] | None = None,
+        max_images: int | None = None,
     ):
         if response_format == "base64":
             response_format = "b64_json"
         super().__init__(model, token)
         self.response_format = response_format
         self.progress_cb = progress_cb
+        self.max_images = max_images if isinstance(max_images, int) and max_images > 0 else None
 
     async def _emit_progress(
         self, event: str, progress: int, message: str, **extra: Any
@@ -1399,30 +1348,6 @@ class ImageCollectProcessor(BaseProcessor):
         images = []
         idle_timeout = get_config("image.stream_timeout")
         chat_connected_emitted = False
-        stream_errors: list[Any] = []
-
-        async def _emit_stream_errors(new_errors: list[Any]) -> None:
-            if not new_errors or not self.progress_cb:
-                return
-            payload = {"count": len(new_errors), "errors": new_errors}
-            result = self.progress_cb("stream_errors", payload)
-            if asyncio.iscoroutine(result):
-                await result
-
-        def _append_stream_errors(value: Any) -> list[Any]:
-            if not value:
-                return []
-            added: list[Any] = []
-            if isinstance(value, list):
-                candidates = value
-            else:
-                candidates = [value]
-            for item in candidates:
-                if item in stream_errors:
-                    continue
-                stream_errors.append(item)
-                added.append(item)
-            return added
 
         try:
             async for line in _with_idle_timeout(response, idle_timeout, self.model):
@@ -1443,14 +1368,7 @@ class ImageCollectProcessor(BaseProcessor):
                         "模型连接成功，正在生成图片",
                     )
 
-                added = _append_stream_errors(resp.get("streamErrors"))
-                if added:
-                    await _emit_stream_errors(stream_errors)
-
                 if mr := resp.get("modelResponse"):
-                    added = _append_stream_errors(mr.get("streamErrors"))
-                    if added:
-                        await _emit_stream_errors(stream_errors)
                     if urls := _collect_images(mr):
                         for url in urls:
                             if self.response_format == "url":
@@ -1471,6 +1389,8 @@ class ImageCollectProcessor(BaseProcessor):
                                         f"已下载第 {len(images)} 张图片",
                                         count=len(images),
                                     )
+                                    if self.max_images and len(images) >= self.max_images:
+                                        return images
                                 continue
                             try:
                                 dl_service = self._get_dl()
@@ -1490,6 +1410,8 @@ class ImageCollectProcessor(BaseProcessor):
                                         f"已下载第 {len(images)} 张图片",
                                         count=len(images),
                                     )
+                                    if self.max_images and len(images) >= self.max_images:
+                                        return images
                             except Exception as e:
                                 logger.warning(
                                     f"Failed to convert image to base64, falling back to URL: {e}"
@@ -1504,6 +1426,8 @@ class ImageCollectProcessor(BaseProcessor):
                                         f"已下载第 {len(images)} 张图片",
                                         count=len(images),
                                     )
+                                    if self.max_images and len(images) >= self.max_images:
+                                        return images
 
         except asyncio.CancelledError:
             logger.debug("Image collect cancelled by client")

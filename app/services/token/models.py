@@ -9,14 +9,15 @@ Token 数据模型
 """
 
 from enum import Enum
-from typing import Optional, List
-from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 
 # 默认配额
 BASIC__DEFAULT_QUOTA = 80
 SUPER_DEFAULT_QUOTA = 140
+HEAVY_DEFAULT_QUOTA = 400
 
 # 失败阈值
 FAIL_THRESHOLD = 5
@@ -44,12 +45,77 @@ EFFORT_COST = {
 }
 
 
+class QuotaWindow(BaseModel):
+    """单模型额度窗口"""
+
+    remaining: int = 0
+    total: int = 0
+    window_seconds: Optional[int] = None
+    reset_at: Optional[int] = None
+    synced_at: Optional[int] = None
+    source: Optional[str] = None
+
+
+class TokenQuotaSet(BaseModel):
+    """按模型拆分的额度集合"""
+
+    auto: QuotaWindow = Field(default_factory=QuotaWindow)
+    fast: QuotaWindow = Field(default_factory=QuotaWindow)
+    expert: QuotaWindow = Field(default_factory=QuotaWindow)
+    heavy: Optional[QuotaWindow] = None
+    grok_4_3: Optional[QuotaWindow] = None
+
+    def get_mode(self, mode: str) -> Optional[QuotaWindow]:
+        return getattr(self, mode, None)
+
+    def mode_remaining(self, mode: str) -> int:
+        window = self.get_mode(mode)
+        return int(window.remaining) if window else 0
+
+    def primary_remaining(self) -> int:
+        return self.mode_remaining("auto")
+
+    def total_remaining(self) -> int:
+        return (
+            self.mode_remaining("auto")
+            + self.mode_remaining("fast")
+            + self.mode_remaining("expert")
+            + self.mode_remaining("heavy")
+            + self.mode_remaining("grok_4_3")
+        )
+
+    def set_mode(self, mode: str, remaining: int, total: Optional[int] = None, *, window_seconds: Optional[int] = None, reset_at: Optional[int] = None, synced_at: Optional[int] = None, source: Optional[str] = None) -> None:
+        payload = QuotaWindow(
+            remaining=max(0, int(remaining)),
+            total=max(0, int(total if total is not None else remaining)),
+            window_seconds=window_seconds,
+            reset_at=reset_at,
+            synced_at=synced_at,
+            source=source,
+        )
+        setattr(self, mode, payload)
+
+
+def default_quota_set(default_quota: int, *, heavy_supported: bool = False, grok_4_3_supported: bool = False) -> TokenQuotaSet:
+    """根据池类型构造默认额度集合"""
+    quota = TokenQuotaSet(
+        auto=QuotaWindow(remaining=default_quota, total=default_quota),
+        fast=QuotaWindow(remaining=default_quota, total=default_quota),
+        expert=QuotaWindow(remaining=default_quota, total=default_quota),
+    )
+    if heavy_supported:
+        quota.heavy = QuotaWindow(remaining=20, total=20, window_seconds=7200)
+    if grok_4_3_supported:
+        quota.grok_4_3 = QuotaWindow(remaining=default_quota, total=default_quota)
+    return quota
+
+
 class TokenInfo(BaseModel):
     """Token 信息"""
 
     token: str
     status: TokenStatus = TokenStatus.ACTIVE
-    quota: int = BASIC__DEFAULT_QUOTA
+    quota: int | TokenQuotaSet = BASIC__DEFAULT_QUOTA
 
     # 统计
     created_at: int = Field(
@@ -71,9 +137,56 @@ class TokenInfo(BaseModel):
     note: str = ""
     last_asset_clear_at: Optional[int] = None
 
+    @field_validator("quota", mode="before")
+    @classmethod
+    def _normalize_quota(cls, value):
+        if isinstance(value, TokenQuotaSet):
+            return value
+        if isinstance(value, dict):
+            if any(k in value for k in ("auto", "fast", "expert", "heavy", "grok_4_3")):
+                return value
+            if "remaining" in value or "total" in value:
+                remaining = int(value.get("remaining", 0))
+                total = int(value.get("total", remaining))
+                return {
+                    "auto": {"remaining": remaining, "total": total},
+                    "fast": {"remaining": remaining, "total": total},
+                    "expert": {"remaining": remaining, "total": total},
+                }
+        if value is None:
+            value = BASIC__DEFAULT_QUOTA
+        quota = max(0, int(value))
+        return {
+            "auto": {"remaining": quota, "total": quota},
+            "fast": {"remaining": quota, "total": quota},
+            "expert": {"remaining": quota, "total": quota},
+        }
+
+    def quota_set(self) -> TokenQuotaSet:
+        if isinstance(self.quota, TokenQuotaSet):
+            return self.quota
+        if isinstance(self.quota, dict):
+            self.quota = TokenQuotaSet.model_validate(self.quota)
+            return self.quota
+        self.quota = default_quota_set(int(self.quota))
+        return self.quota
+
+    def primary_quota(self) -> int:
+        return self.quota_set().primary_remaining()
+
+    def mode_quota(self, mode: str = "auto") -> int:
+        return self.quota_set().mode_remaining(mode)
+
+    def total_quota(self) -> int:
+        return self.quota_set().total_remaining()
+
     def is_available(self) -> bool:
         """检查是否可用（状态正常且配额 > 0）"""
-        return self.status == TokenStatus.ACTIVE and self.quota > 0
+        return self.status == TokenStatus.ACTIVE and self.primary_quota() > 0
+
+    def is_mode_available(self, mode: str = "auto") -> bool:
+        """检查指定额度窗口是否可用。"""
+        return self.status == TokenStatus.ACTIVE and self.mode_quota(mode) > 0
 
     def consume(self, effort: EffortType = EffortType.LOW) -> int:
         """
@@ -86,16 +199,18 @@ class TokenInfo(BaseModel):
             实际扣除的配额
         """
         cost = EFFORT_COST[effort]
-        actual_cost = min(cost, self.quota)
+        quota_set = self.quota_set()
+        current = quota_set.primary_remaining()
+        actual_cost = min(cost, current)
 
         self.last_used_at = int(datetime.now().timestamp() * 1000)
         self.use_count += actual_cost  # 使用 actual_cost 避免配额不足时过度计数
-        self.quota = max(0, self.quota - actual_cost)
+        quota_set.set_mode("auto", current - actual_cost, quota_set.auto.total)
 
         # 注意：不在这里清零 fail_count，只有 record_success() 才清零
         # 这样可以避免失败后调用 consume 导致失败计数被重置
 
-        if self.quota == 0:
+        if self.primary_quota() == 0:
             self.status = TokenStatus.COOLING
         elif self.status == TokenStatus.COOLING:
             # 只从 COOLING 恢复，不从 EXPIRED 恢复
@@ -103,18 +218,41 @@ class TokenInfo(BaseModel):
 
         return actual_cost
 
-    def update_quota(self, new_quota: int):
+    def update_quota(
+        self,
+        new_quota: int,
+        *,
+        mode: str = "auto",
+        total: Optional[int] = None,
+        window_seconds: Optional[int] = None,
+        reset_at: Optional[int] = None,
+        synced_at: Optional[int] = None,
+        source: Optional[str] = None,
+    ):
         """
         更新配额（用于 API 同步）
 
         Args:
             new_quota: 新的配额值
         """
-        self.quota = max(0, new_quota)
+        quota_set = self.quota_set()
+        old_total = None
+        current_window = quota_set.get_mode(mode)
+        if current_window:
+            old_total = current_window.total
+        quota_set.set_mode(
+            mode,
+            new_quota,
+            total if total is not None else old_total,
+            window_seconds=window_seconds,
+            reset_at=reset_at,
+            synced_at=synced_at,
+            source=source,
+        )
 
-        if self.quota == 0:
+        if self.primary_quota() == 0:
             self.status = TokenStatus.COOLING
-        elif self.quota > 0 and self.status in [
+        elif self.primary_quota() > 0 and self.status in [
             TokenStatus.COOLING,
             TokenStatus.EXPIRED,
         ]:
@@ -123,7 +261,14 @@ class TokenInfo(BaseModel):
     def reset(self, default_quota: Optional[int] = None):
         """重置配额到默认值"""
         quota = BASIC__DEFAULT_QUOTA if default_quota is None else default_quota
-        self.quota = max(0, int(quota))
+        quota = max(0, int(quota))
+        has_heavy = self.quota_set().heavy is not None
+        has_grok_4_3 = self.quota_set().grok_4_3 is not None
+        self.quota = default_quota_set(
+            quota,
+            heavy_supported=has_heavy,
+            grok_4_3_supported=has_grok_4_3,
+        )
         self.status = TokenStatus.ACTIVE
         self.fail_count = 0
         self.last_fail_reason = None
@@ -157,7 +302,7 @@ class TokenInfo(BaseModel):
             self.use_count += 1
             self.last_used_at = int(datetime.now().timestamp() * 1000)
 
-        if self.quota == 0:
+        if self.primary_quota() == 0:
             self.status = TokenStatus.COOLING
         else:
             self.status = TokenStatus.ACTIVE

@@ -866,8 +866,8 @@
 
   async function loadModels() {
     if (!modelSelect) return;
-    const fallback = ['grok-4.1-fast', 'grok-4', 'grok-3', 'grok-3-mini', 'grok-3-thinking', 'grok-4.20-beta'];
-    const preferred = 'grok-4.20-beta';
+    const fallback = ['grok-4.5', 'grok-4.5-fast', 'grok-4.5-expert', 'grok-4.1-fast', 'grok-4', 'grok-3', 'grok-3-mini', 'grok-3-thinking'];
+    const preferred = 'grok-4.5';
     let list = fallback;
 
     try {
@@ -1577,6 +1577,5 @@
   loadModels();
   bindEvents();
 })();
-
 
 

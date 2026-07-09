@@ -109,16 +109,18 @@ class AssetsDownloadReverse:
             headers = build_headers(
                 cookie_token=token,
                 content_type=content_type,
-                origin="https://assets.grok.com",
+                origin="https://grok.com",
                 referer="https://grok.com/",
             )
-            ## Align with browser download navigation headers
+            # 官网以跨站 fetch 读取文件，服务端保存时使用相同的请求形态。
             headers["Cache-Control"] = "no-cache"
             headers["Pragma"] = "no-cache"
-            headers["Priority"] = "u=0, i"
-            headers["Sec-Fetch-Mode"] = "navigate"
-            headers["Sec-Fetch-User"] = "?1"
-            headers["Upgrade-Insecure-Requests"] = "1"
+            headers["Priority"] = "u=1, i"
+            headers["Sec-Fetch-Dest"] = "empty"
+            headers["Sec-Fetch-Mode"] = "cors"
+            headers["Sec-Fetch-Site"] = "same-site"
+            for key in ("Content-Type", "Sec-Fetch-User", "Upgrade-Insecure-Requests"):
+                headers.pop(key, None)
 
             # Curl Config
             timeout = get_config("asset.download_timeout")

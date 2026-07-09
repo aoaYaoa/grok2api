@@ -32,14 +32,12 @@ class AssetsListReverse:
         """
         try:
             # Get proxies
-            base_proxy = get_config("proxy.base_proxy_url") or ""
-            assert_proxy = get_config("proxy.asset_proxy_url") or ""
+            base_proxy = get_config("proxy.base_proxy_url")
+            assert_proxy = get_config("proxy.asset_proxy_url")
             if assert_proxy:
                 proxies = {"http": assert_proxy, "https": assert_proxy}
-            elif base_proxy:
-                proxies = {"http": base_proxy, "https": base_proxy}
             else:
-                proxies = None
+                proxies = {"http": base_proxy, "https": base_proxy}
 
             # Build headers
             headers = build_headers(

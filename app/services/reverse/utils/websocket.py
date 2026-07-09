@@ -6,8 +6,10 @@ import ssl
 import certifi
 import aiohttp
 from aiohttp_socks import ProxyConnector
+from types import SimpleNamespace
 from typing import Mapping, Optional
 from urllib.parse import urlparse
+from curl_cffi.requests import AsyncSession, CurlWsFlag
 
 from app.core.logger import logger
 from app.core.config import get_config
@@ -87,6 +89,41 @@ class WebSocketConnection:
         await self.close()
 
 
+class CurlWebSocketConnection:
+    """aiohttp-compatible wrapper around curl_cffi AsyncWebSocket."""
+
+    def __init__(self, session: AsyncSession, ws) -> None:
+        self.session = session
+        self.ws = ws
+
+    async def close(self) -> None:
+        if not self.ws.closed:
+            await self.ws.close()
+        await self.session.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def send_json(self, payload) -> None:
+        await self.ws.send_json(payload)
+
+    async def receive(self):
+        data, flags = await self.ws.recv()
+        if flags & CurlWsFlag.CLOSE:
+            return SimpleNamespace(type=aiohttp.WSMsgType.CLOSED, data=None)
+        if data is None:
+            return SimpleNamespace(type=aiohttp.WSMsgType.CLOSED, data=None)
+        if flags & CurlWsFlag.TEXT:
+            return SimpleNamespace(
+                type=aiohttp.WSMsgType.TEXT,
+                data=data.decode("utf-8", errors="replace"),
+            )
+        return SimpleNamespace(type=aiohttp.WSMsgType.BINARY, data=data)
+
+
 class WebSocketClient:
     """WebSocket client with proxy support."""
 
@@ -134,9 +171,28 @@ class WebSocketClient:
                 **extra_kwargs,
             )
             return WebSocketConnection(session, ws)
-        except Exception:
+        except Exception as aiohttp_error:
             await session.close()
+            logger.warning(f"aiohttp websocket connect failed, trying curl_cffi: {aiohttp_error}")
+
+        curl_session = AsyncSession()
+        try:
+            ws = await curl_session.ws_connect(
+                url,
+                headers=dict(headers or {}),
+                proxy=proxy,
+                timeout=total_timeout,
+                impersonate=get_config("proxy.browser") or "chrome136",
+            )
+            return CurlWebSocketConnection(curl_session, ws)
+        except Exception:
+            await curl_session.close()
             raise
 
 
-__all__ = ["WebSocketClient", "WebSocketConnection", "resolve_proxy"]
+__all__ = [
+    "WebSocketClient",
+    "WebSocketConnection",
+    "CurlWebSocketConnection",
+    "resolve_proxy",
+]

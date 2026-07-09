@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
 
 import orjson
+from curl_cffi.requests import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -22,6 +23,7 @@ from app.api.v1.image import resolve_aspect_ratio
 from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
+from app.services.reverse.media_post import MediaPostReverse
 from app.services.token.manager import get_token_manager
 
 router = APIRouter()
@@ -30,9 +32,6 @@ IMAGINE_SESSION_TTL = 600
 _IMAGINE_SESSIONS: dict[str, dict] = {}
 _IMAGINE_SESSIONS_LOCK = asyncio.Lock()
 _RATIO_ALLOWED = {"16:9", "9:16", "3:2", "2:3", "1:1"}
-IMAGINE_IMAGE_TOKEN_TTL = 7200
-_IMAGINE_IMAGE_TOKENS: dict[str, dict] = {}
-_IMAGINE_IMAGE_TOKENS_LOCK = asyncio.Lock()
 
 
 def _validate_parent_post_id(value: str) -> str:
@@ -46,6 +45,71 @@ def _validate_parent_post_id(value: str) -> str:
 
 def _build_imagine_public_url(parent_post_id: str) -> str:
     return f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
+
+
+async def _pick_imagine_parent_token(token_mgr, model_id: str, parent_post_id: str) -> str | None:
+    """图片 parentPostId 编辑统一使用当前请求可用 token。"""
+    quota_mode = ModelService.quota_mode_for_model(model_id)
+    for pool_name in ModelService.pool_candidates_for_model(model_id):
+        token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
+        if token:
+            logger.info(
+                "Imagine edit selected pool token: "
+                f"parent_post_id={parent_post_id}, pool={pool_name}, token={_mask_token(token)}"
+            )
+            return token
+    return None
+
+
+def _is_local_proxy_image_url(url: str) -> bool:
+    raw = str(url or "").strip().lower()
+    return (
+        "/v1/files/image/" in raw
+        or raw.startswith("http://127.0.0.1:")
+        or raw.startswith("http://localhost:")
+        or raw.startswith("https://127.0.0.1:")
+        or raw.startswith("https://localhost:")
+    )
+
+
+async def _fetch_media_post_info(token: str, parent_post_id: str) -> dict[str, Any]:
+    post_id = _extract_parent_post_id_from_url(parent_post_id)
+    if not post_id or not token:
+        return {}
+    try:
+        async with AsyncSession() as session:
+            response = await MediaPostReverse.get(session, token, post_id)
+            data = response.json() if hasattr(response, "json") else {}
+        return data.get("post", {}) if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(
+            "Imagine edit media_post/get failed: "
+            f"parent_post_id={post_id}, error={e}"
+        )
+        return {}
+
+
+async def _canonicalize_parent_source_image_url(
+    token: str,
+    parent_post_id: str,
+    source_image_url: str = "",
+) -> str:
+    raw = str(source_image_url or "").strip()
+    if raw and "imagine-public.x.ai/imagine-public/share-images/" in raw:
+        return raw
+    if raw.startswith("http://") or raw.startswith("https://"):
+        if not _is_local_proxy_image_url(raw):
+            return raw
+    elif raw and not raw.startswith("/users/") and not raw.startswith("users/"):
+        return raw
+    post = await _fetch_media_post_info(token, parent_post_id)
+    media_url = str(post.get("mediaUrl") or "").strip()
+    if media_url:
+        return media_url
+    thumb_url = str(post.get("thumbnailImageUrl") or "").strip()
+    if thumb_url:
+        return thumb_url
+    return raw or _build_imagine_public_url(parent_post_id)
 
 
 def _extract_parent_post_id_from_url(url: str) -> str:
@@ -78,30 +142,6 @@ def _to_assets_url(path: str) -> str:
     return f"https://assets.grok.com{raw}"
 
 
-def _to_local_image_file_url(path: str) -> str:
-    raw = str(path or "").strip()
-    if not raw:
-        return ""
-
-    if raw.startswith("http://") or raw.startswith("https://"):
-        parsed = urlparse(raw)
-        raw = parsed.path or ""
-
-    marker = "/v1/files/image/"
-    if marker in raw:
-        suffix = raw.split(marker, 1)[1]
-        local_path = f"/v1/files/image/{suffix.lstrip('/')}"
-    elif raw.startswith("/users/") or raw.startswith("users/"):
-        local_path = f"/v1/files/image/{raw.lstrip('/')}"
-    else:
-        return ""
-
-    app_url = str(get_config("app.app_url") or "").strip().rstrip("/")
-    if app_url.startswith("http://") or app_url.startswith("https://"):
-        return f"{app_url}{local_path}"
-    return local_path
-
-
 def _resolve_source_image_url(
     image_url: str,
     parent_post_id: str = "",
@@ -113,21 +153,22 @@ def _resolve_source_image_url(
             parsed = urlparse(raw)
             host = (parsed.netloc or "").lower()
             path = parsed.path or ""
-            local_url = _to_local_image_file_url(path)
-            if "assets.grok.com" in host and local_url:
-                return local_url
-            if marker := "/v1/files/image/":
-                if marker in path:
-                    return _to_local_image_file_url(path) or raw
-            if path.startswith("/users/") and local_url:
-                return local_url
+            if "assets.grok.com" in host and path:
+                return _to_assets_url(path)
             if "imagine-public.x.ai" in host:
                 return raw
+            marker = "/v1/files/image/"
+            if marker in path:
+                suffix = path.split(marker, 1)[1]
+                return _to_assets_url(suffix)
+            if path.startswith("/users/"):
+                return _to_assets_url(path)
             return raw
         if raw.startswith("/v1/files/image/"):
-            return _to_local_image_file_url(raw) or raw
+            suffix = raw.split("/v1/files/image/", 1)[1]
+            return _to_assets_url(suffix)
         if raw.startswith("/users/") or raw.startswith("users/"):
-            return _to_local_image_file_url(raw) or _to_assets_url(raw)
+            return _to_assets_url(raw)
         if raw.startswith("/imagine-public/images/"):
             return f"https://imagine-public.x.ai{raw}"
 
@@ -135,22 +176,6 @@ def _resolve_source_image_url(
     if parsed_parent:
         return _build_imagine_public_url(parsed_parent)
     return ""
-
-
-async def _canonicalize_parent_source_image_url(
-    token: str,
-    parent_post_id: str,
-    source_image_url: str = "",
-) -> str:
-    """为 parentPostId 场景生成稳定的 source_image_url。"""
-    raw_url = str(source_image_url or "").strip()
-    if raw_url:
-        return _resolve_source_image_url(
-            image_url=raw_url,
-            parent_post_id=parent_post_id,
-            fallback_source_image_url=raw_url,
-        )
-    return _build_imagine_public_url(parent_post_id)
 
 
 def _mask_token(token: str) -> str:
@@ -335,76 +360,6 @@ async def _clean_sessions(now: float) -> None:
         _IMAGINE_SESSIONS.pop(key, None)
 
 
-async def _clean_image_tokens(now: float) -> None:
-    expired = [
-        key
-        for key, info in _IMAGINE_IMAGE_TOKENS.items()
-        if now - float(info.get("created_at") or 0) > IMAGINE_IMAGE_TOKEN_TTL
-    ]
-    for key in expired:
-        _IMAGINE_IMAGE_TOKENS.pop(key, None)
-
-
-async def _bind_image_token(parent_post_id: str, token: str) -> None:
-    image_id = _extract_parent_post_id_from_url(parent_post_id)
-    token_text = str(token or "").strip()
-    if not image_id or not token_text:
-        return
-    now = time.time()
-    async with _IMAGINE_IMAGE_TOKENS_LOCK:
-        await _clean_image_tokens(now)
-        _IMAGINE_IMAGE_TOKENS[image_id] = {
-            "token": token_text,
-            "created_at": now,
-        }
-
-    try:
-        from app.services.grok.utils.asset_token_map import AssetTokenMap
-
-        token_map = await AssetTokenMap.get_instance()
-        await token_map.save_mapping(image_id, token_text)
-    except Exception as e:
-        logger.warning(
-            "Imagine image token persist failed: "
-            f"parent_post_id={image_id}, error={e}"
-        )
-
-
-async def _get_bound_image_token(parent_post_id: str) -> Optional[str]:
-    image_id = _extract_parent_post_id_from_url(parent_post_id)
-    if not image_id:
-        return None
-    now = time.time()
-    async with _IMAGINE_IMAGE_TOKENS_LOCK:
-        await _clean_image_tokens(now)
-        info = _IMAGINE_IMAGE_TOKENS.get(image_id)
-        if info:
-            token = str(info.get("token") or "").strip()
-            if token:
-                return token
-
-    try:
-        from app.services.grok.utils.asset_token_map import AssetTokenMap
-
-        token_map = await AssetTokenMap.get_instance()
-        token = str(await token_map.get_token(image_id) or "").strip()
-        if token:
-            async with _IMAGINE_IMAGE_TOKENS_LOCK:
-                await _clean_image_tokens(now)
-                _IMAGINE_IMAGE_TOKENS[image_id] = {
-                    "token": token,
-                    "created_at": now,
-                }
-            return token
-    except Exception as e:
-        logger.warning(
-            "Imagine image token restore failed: "
-            f"parent_post_id={image_id}, error={e}"
-        )
-
-    return None
-
-
 def _normalize_imagine_ratio(value: Optional[str]) -> str:
     """统一解析 imagine 比例参数，兼容 ratio 与 size 两种写法。"""
     raw = str(value or "").strip()
@@ -414,6 +369,10 @@ def _normalize_imagine_ratio(value: Optional[str]) -> str:
         return raw
     mapped = resolve_aspect_ratio(raw)
     return mapped if mapped in _RATIO_ALLOWED else "2:3"
+
+
+def _should_return_all_edit_images() -> bool:
+    return not bool(get_config("image.edit_return_first_image_immediately", False))
 
 
 def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
@@ -444,7 +403,12 @@ def _parse_sse_chunk(chunk: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> str:
+async def _new_session(
+    prompt: str,
+    aspect_ratio: str,
+    nsfw: Optional[bool],
+    pro: Optional[bool],
+) -> str:
     task_id = uuid.uuid4().hex
     now = time.time()
     async with _IMAGINE_SESSIONS_LOCK:
@@ -453,6 +417,7 @@ async def _new_session(prompt: str, aspect_ratio: str, nsfw: Optional[bool]) -> 
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "nsfw": nsfw,
+            "pro": pro,
             "created_at": now,
         }
     return task_id
@@ -527,19 +492,32 @@ async def public_imagine_ws(websocket: WebSocket):
         except Exception:
             return False
 
-    async def _stop_run():
+    async def _stop_run(force_cancel: bool = False):
         nonlocal run_task
         stop_event.set()
-        if run_task and not run_task.done():
+        if force_cancel and run_task and not run_task.done():
             run_task.cancel()
             try:
                 await run_task
             except Exception:
                 pass
-        run_task = None
-        stop_event.clear()
+            run_task = None
+            stop_event.clear()
+            return
+        if run_task is None:
+            stop_event.clear()
+            return
+        if run_task and run_task.done():
+            run_task = None
+            stop_event.clear()
 
-    async def _run(prompt: str, aspect_ratio: str, nsfw: Optional[bool]):
+    async def _run(
+        prompt: str,
+        aspect_ratio: str,
+        nsfw: Optional[bool],
+        pro: Optional[bool],
+        imagine_task_id: Optional[str],
+    ):
         model_id = "grok-imagine-1.0"
         model_info = ModelService.get(model_id)
         if not model_info or not model_info.is_image:
@@ -561,18 +539,30 @@ async def public_imagine_ws(websocket: WebSocket):
                 "status": "running",
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
+                "pro": bool(pro),
                 "run_id": run_id,
             }
         )
 
-        while not stop_event.is_set():
+        while True:
+            if stop_event.is_set():
+                break
+            if imagine_task_id:
+                session_alive = await _get_session(imagine_task_id)
+                if not session_alive:
+                    logger.info(
+                        "Imagine WS stop after current batch: "
+                        f"task_id={imagine_task_id}, run_id={run_id}"
+                    )
+                    break
             try:
                 await token_mgr.reload_if_stale()
                 token = None
+                quota_mode = ModelService.quota_mode_for_model(model_info.model_id)
                 for pool_name in ModelService.pool_candidates_for_model(
                     model_info.model_id
                 ):
-                    token = token_mgr.get_token(pool_name)
+                    token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
                     if token:
                         break
 
@@ -598,6 +588,7 @@ async def public_imagine_ws(websocket: WebSocket):
                     aspect_ratio=aspect_ratio,
                     stream=True,
                     enable_nsfw=nsfw,
+                    enable_pro=pro,
                 )
                 if result.stream:
                     async for chunk in result.data:
@@ -606,11 +597,6 @@ async def public_imagine_ws(websocket: WebSocket):
                             continue
                         if isinstance(payload, dict):
                             payload.setdefault("run_id", run_id)
-                            parent_post_id = _extract_parent_post_id_from_payload(
-                                payload
-                            )
-                            if parent_post_id:
-                                await _bind_image_token(parent_post_id, token)
                         await _send(payload)
                 else:
                     images = [img for img in result.data if img and img != "error"]
@@ -684,8 +670,13 @@ async def public_imagine_ws(websocket: WebSocket):
                 nsfw = payload.get("nsfw")
                 if nsfw is not None:
                     nsfw = bool(nsfw)
+                pro = payload.get("pro")
+                if pro is not None:
+                    pro = bool(pro)
                 await _stop_run()
-                run_task = asyncio.create_task(_run(prompt, aspect_ratio, nsfw))
+                run_task = asyncio.create_task(
+                    _run(prompt, aspect_ratio, nsfw, pro, session_id)
+                )
             elif action == "stop":
                 await _stop_run()
             else:
@@ -702,7 +693,7 @@ async def public_imagine_ws(websocket: WebSocket):
     except Exception as e:
         logger.warning(f"WebSocket error: {e}")
     finally:
-        await _stop_run()
+        await _stop_run(force_cancel=True)
 
         try:
             from starlette.websockets import WebSocketState
@@ -742,6 +733,7 @@ async def public_imagine_sse(
         prompt = str(session.get("prompt") or "").strip()
         ratio = _normalize_imagine_ratio(session.get("aspect_ratio"))
         nsfw = session.get("nsfw")
+        pro = session.get("pro")
     else:
         prompt = (prompt or "").strip()
         if not prompt:
@@ -750,6 +742,9 @@ async def public_imagine_sse(
         nsfw = request.query_params.get("nsfw")
         if nsfw is not None:
             nsfw = str(nsfw).lower() in ("1", "true", "yes", "on")
+        pro = request.query_params.get("pro")
+        if pro is not None:
+            pro = str(pro).lower() in ("1", "true", "yes", "on")
 
     async def event_stream():
         try:
@@ -766,7 +761,7 @@ async def public_imagine_sse(
             run_id = uuid.uuid4().hex
 
             yield (
-                f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'run_id': run_id}).decode()}\n\n"
+                f"data: {orjson.dumps({'type': 'status', 'status': 'running', 'prompt': prompt, 'aspect_ratio': ratio, 'pro': bool(pro), 'run_id': run_id}).decode()}\n\n"
             )
 
             while True:
@@ -784,10 +779,11 @@ async def public_imagine_sse(
                 try:
                     await token_mgr.reload_if_stale()
                     token = None
+                    quota_mode = ModelService.quota_mode_for_model(model_info.model_id)
                     for pool_name in ModelService.pool_candidates_for_model(
                         model_info.model_id
                     ):
-                        token = token_mgr.get_token(pool_name)
+                        token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
                         if token:
                             break
 
@@ -809,6 +805,7 @@ async def public_imagine_sse(
                         aspect_ratio=ratio,
                         stream=True,
                         enable_nsfw=nsfw,
+                        enable_pro=pro,
                     )
                     if result.stream:
                         async for chunk in result.data:
@@ -817,11 +814,6 @@ async def public_imagine_sse(
                                 continue
                             if isinstance(payload, dict):
                                 payload.setdefault("run_id", run_id)
-                                parent_post_id = _extract_parent_post_id_from_payload(
-                                    payload
-                                )
-                                if parent_post_id:
-                                    await _bind_image_token(parent_post_id, token)
                             yield f"data: {orjson.dumps(payload).decode()}\n\n"
                     else:
                         images = [img for img in result.data if img and img != "error"]
@@ -873,24 +865,11 @@ async def public_imagine_config():
     }
 
 
-@router.get("/imagine/parent-post", dependencies=[Depends(verify_public_key)])
-async def public_imagine_parent_post(parent_post_id: str = Query(...)):
-    parent_post_id = _validate_parent_post_id(parent_post_id)
-    source_image_url = _build_imagine_public_url(parent_post_id)
-    return {
-        "parent_post_id": parent_post_id,
-        "source_image_url": source_image_url,
-        "current_source_image_url": source_image_url,
-        "media_url": source_image_url,
-        "thumbnail_image_url": source_image_url,
-        "image_url": source_image_url,
-    }
-
-
 class ImagineStartRequest(BaseModel):
     prompt: str
     aspect_ratio: Optional[str] = "2:3"
     nsfw: Optional[bool] = None
+    pro: Optional[bool] = False
 
 
 @router.post("/imagine/start", dependencies=[Depends(verify_public_key)])
@@ -899,8 +878,8 @@ async def public_imagine_start(data: ImagineStartRequest):
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     ratio = _normalize_imagine_ratio(data.aspect_ratio)
-    task_id = await _new_session(prompt, ratio, data.nsfw)
-    return {"task_id": task_id, "aspect_ratio": ratio}
+    task_id = await _new_session(prompt, ratio, data.nsfw, data.pro)
+    return {"task_id": task_id, "aspect_ratio": ratio, "pro": bool(data.pro)}
 
 
 class ImagineEditRequest(BaseModel):
@@ -908,6 +887,37 @@ class ImagineEditRequest(BaseModel):
     parent_post_id: str
     source_image_url: Optional[str] = None
     stream: Optional[bool] = False
+
+
+@router.get("/imagine/parent-post", dependencies=[Depends(verify_public_key)])
+async def public_imagine_parent_post(parent_post_id: str = Query(..., description="图片 parentPostId")):
+    resolved_parent_post_id = _validate_parent_post_id(parent_post_id)
+    model_id = "grok-imagine-1.0-edit"
+    token_mgr = await get_token_manager()
+    await token_mgr.reload_if_stale()
+    token = await _pick_imagine_parent_token(token_mgr, model_id, resolved_parent_post_id)
+    if not token:
+        raise HTTPException(
+            status_code=429,
+            detail="No available tokens. Please try again later.",
+        )
+    post = await _fetch_media_post_info(token, resolved_parent_post_id)
+    media_url = str(post.get("mediaUrl") or "").strip()
+    thumbnail_url = str(post.get("thumbnailImageUrl") or "").strip()
+    source_image_url = await _canonicalize_parent_source_image_url(
+        token,
+        resolved_parent_post_id,
+        media_url or thumbnail_url,
+    )
+    return {
+        "parent_post_id": resolved_parent_post_id,
+        "media_url": media_url,
+        "thumbnail_image_url": thumbnail_url,
+        "source_image_url": source_image_url,
+        "mime_type": str(post.get("mimeType") or "").strip(),
+        "original_post_id": str(post.get("originalPostId") or "").strip(),
+        "original_ref_type": str(post.get("originalRefType") or "").strip(),
+    }
 
 
 @router.post("/imagine/edit", dependencies=[Depends(verify_public_key)])
@@ -932,28 +942,15 @@ async def public_imagine_edit(data: ImagineEditRequest, request: Request):
 
     token_mgr = await get_token_manager()
     await token_mgr.reload_if_stale()
-    token = await _get_bound_image_token(parent_post_id)
-    if token:
-        pool_name = token_mgr.get_pool_name_for_token(token) or "-"
-        logger.info(
-            "Imagine edit token bound hit: "
-            f"parent_post_id={parent_post_id}, pool={pool_name}, token={_mask_token(token)}"
-        )
-    else:
-        for pool_name in ModelService.pool_candidates_for_model(model_id):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
-        if token:
-            logger.info(
-                "Imagine edit token bound miss, fallback pool token: "
-                f"parent_post_id={parent_post_id}, token={_mask_token(token)}"
-            )
+    token = await _pick_imagine_parent_token(token_mgr, model_id, parent_post_id)
     if not token:
         raise HTTPException(
             status_code=429,
             detail="No available tokens. Please try again later.",
         )
+    source_image_url = await _canonicalize_parent_source_image_url(
+        token, parent_post_id, source_image_url
+    )
 
     async def _run_once(
         progress_cb=None,
@@ -975,14 +972,13 @@ async def public_imagine_edit(data: ImagineEditRequest, request: Request):
             raise HTTPException(status_code=502, detail="Image edit returned no results")
 
         image_url = str(images[0])
+        token_used = str(getattr(result, "token_used", "") or token)
         generated_parent_post_id = _extract_parent_post_id_from_url(image_url)
         current_parent_post_id = generated_parent_post_id or parent_post_id
-        if current_parent_post_id:
-            await _bind_image_token(current_parent_post_id, token)
-        current_source_image_url = _resolve_source_image_url(
-            image_url=image_url,
-            parent_post_id=current_parent_post_id,
-            fallback_source_image_url=source_image_url,
+        current_source_image_url = await _canonicalize_parent_source_image_url(
+            token_used,
+            current_parent_post_id,
+            image_url,
         )
         elapsed_ms = int((time.time() - started_at) * 1000)
         return {
@@ -1154,17 +1150,12 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
 
     token = None
     if use_parent_mode:
-        token = await _get_bound_image_token(parent_post_id)
-        if token:
-            pool_name = token_mgr.get_pool_name_for_token(token) or "-"
-            logger.info(
-                "Imagine workbench token bound hit: "
-                f"parent_post_id={parent_post_id}, pool={pool_name}, token={_mask_token(token)}"
-            )
+        token = await _pick_imagine_parent_token(token_mgr, model_id, parent_post_id)
 
     if not token:
+        quota_mode = ModelService.quota_mode_for_model(model_id)
         for pool_name in ModelService.pool_candidates_for_model(model_id):
-            token = token_mgr.get_token(pool_name)
+            token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
             if token:
                 break
     if not token:
@@ -1172,7 +1163,6 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
             status_code=429,
             detail="No available tokens. Please try again later.",
         )
-
     reference_items = _normalize_reference_items(data.reference_items)
 
     if use_parent_mode:
@@ -1181,6 +1171,7 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
         )
     else:
         source_image_url = str(data.source_image_url or "").strip()
+    return_all_images = _should_return_all_edit_images()
 
     async def _run_once(progress_cb=None):
         started_at = time.time()
@@ -1209,44 +1200,60 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
                 for index, image_ref in enumerate(image_inputs)
             ]
 
-        # 单图 parent_post 模式直接走 edit_with_parent_post（会通过 create_image_post 转换）
-        single_parent_mode = (
-            use_parent_mode
-            and len(effective_reference_items) == 1
-            and str(effective_reference_items[0].get("parent_post_id") or "").strip()
-            and not any(
-                raw.startswith("data:image/") or raw.startswith("http://127.0.0.1") or raw.startswith("http://localhost")
-                for raw in [str(effective_reference_items[0].get("source_image_url") or "").strip()]
-                if raw
+        if effective_reference_items:
+            first_ref = effective_reference_items[0] if effective_reference_items else {}
+            only_single_parent_ref = (
+                len(effective_reference_items) == 1
+                and bool(str(first_ref.get("parent_post_id") or "").strip())
             )
-        )
-        if effective_reference_items and not single_parent_mode:
-            for item in effective_reference_items:
-                ref_parent = _extract_parent_post_id_from_url(str(item.get("parent_post_id") or ""))
-                if ref_parent and not str(item.get("source_image_url") or "").strip():
-                    item["parent_post_id"] = ref_parent
-                    item["source_image_url"] = await _canonicalize_parent_source_image_url(
-                        token,
-                        ref_parent,
-                        str(item.get("image_url") or "").strip(),
-                    )
-                    if not str(item.get("image_url") or "").strip():
-                        item["image_url"] = item["source_image_url"]
+            if only_single_parent_ref:
+                single_parent_post_id = str(first_ref.get("parent_post_id") or "").strip()
+                single_source_image_url = str(
+                    first_ref.get("source_image_url")
+                    or first_ref.get("image_url")
+                    or current_source_image_url_input
+                    or ""
+                ).strip()
+                result = await edit_service.edit_with_parent_post(
+                    token_mgr=token_mgr,
+                    token=token,
+                    model_info=model_info,
+                    prompt=prompt,
+                    parent_post_id=single_parent_post_id,
+                    source_image_url=single_source_image_url,
+                    response_format="url",
+                    stream=False,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
+                mode = "parent_post"
+            else:
+                for item in effective_reference_items:
+                    ref_parent = _extract_parent_post_id_from_url(str(item.get("parent_post_id") or ""))
+                    if ref_parent and not str(item.get("source_image_url") or "").strip():
+                        item["parent_post_id"] = ref_parent
+                        item["source_image_url"] = await _canonicalize_parent_source_image_url(
+                            token,
+                            ref_parent,
+                            str(item.get("image_url") or "").strip(),
+                        )
+                        if not str(item.get("image_url") or "").strip():
+                            item["image_url"] = item["source_image_url"]
 
-            result = await edit_service.edit_with_reference_items(
-                token_mgr=token_mgr,
-                token=token,
-                model_info=model_info,
-                prompt=prompt,
-                reference_items=effective_reference_items,
-                root_parent_post_id=parent_post_id if use_parent_mode else "",
-                response_format="url",
-                stream=False,
-                return_all_images=True,
-                progress_cb=progress_cb,
-            )
-            mode = "parent_post" if use_parent_mode else "upload"
-        elif use_parent_mode or single_parent_mode:
+                result = await edit_service.edit_with_reference_items(
+                    token_mgr=token_mgr,
+                    token=token,
+                    model_info=model_info,
+                    prompt=prompt,
+                    reference_items=effective_reference_items,
+                    root_parent_post_id=parent_post_id if use_parent_mode else "",
+                    response_format="url",
+                    stream=False,
+                    return_all_images=return_all_images,
+                    progress_cb=progress_cb,
+                )
+                mode = "parent_post" if use_parent_mode else "upload"
+        elif use_parent_mode:
             if current_source_image_url_input and not (
                 current_source_image_url_input.startswith("http://")
                 or current_source_image_url_input.startswith("https://")
@@ -1263,7 +1270,7 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
                 source_image_url=current_source_image_url_input,
                 response_format="url",
                 stream=False,
-                return_all_images=True,
+                return_all_images=return_all_images,
                 progress_cb=progress_cb,
             )
             mode = "parent_post"
@@ -1281,7 +1288,7 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
                 n=1,
                 response_format="url",
                 stream=False,
-                return_all_images=True,
+                return_all_images=return_all_images,
                 progress_cb=progress_cb,
             )
             mode = "upload"
@@ -1295,14 +1302,13 @@ async def public_imagine_workbench_edit(data: ImagineWorkbenchEditRequest, reque
             raise HTTPException(status_code=502, detail="Image edit returned no results")
 
         image_url = normalized_images[0]
+        token_used = str(getattr(result, "token_used", "") or token)
         generated_parent_post_id = _extract_parent_post_id_from_url(image_url)
         current_parent_post_id = generated_parent_post_id or parent_post_id
-        if current_parent_post_id:
-            await _bind_image_token(current_parent_post_id, token)
-        current_source_image_url = _resolve_source_image_url(
-            image_url=image_url,
-            parent_post_id=current_parent_post_id,
-            fallback_source_image_url=source_image_url,
+        current_source_image_url = await _canonicalize_parent_source_image_url(
+            token_used,
+            current_parent_post_id,
+            image_url,
         )
         elapsed_ms = int((time.time() - started_at) * 1000)
 

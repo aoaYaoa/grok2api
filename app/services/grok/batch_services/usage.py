@@ -71,6 +71,9 @@ class UsageService:
     ) -> Dict[str, Dict[str, Any]]:
         batch_size = get_config("usage.batch_size")
         async def _refresh_one(t: str):
+            synced = await mgr.sync_usage_windows(t, is_usage=False)
+            if synced:
+                return True
             return await mgr.sync_usage(t, consume_on_fail=False, is_usage=False)
 
         return await run_batch(

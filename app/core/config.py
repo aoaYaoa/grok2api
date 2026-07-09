@@ -50,6 +50,8 @@ def _migrate_deprecated_config(
         "grok.thinking": "app.thinking",
         "grok.dynamic_statsig": "app.dynamic_statsig",
         "grok.filter_tags": "app.filter_tags",
+        "chat.capture_enabled": "app.chat_capture_enabled",
+        "chat.capture_file": "app.chat_capture_file",
         "grok.timeout": "voice.timeout",
         "grok.base_proxy_url": "proxy.base_proxy_url",
         "grok.asset_proxy_url": "proxy.asset_proxy_url",
@@ -154,13 +156,17 @@ def _migrate_deprecated_config(
         "thinking": "thinking",
         "dynamic_statsig": "dynamic_statsig",
         "filter_tags": "filter_tags",
+        "reuse_grok_conversation": "continue_conversation",
+        "capture_enabled": "chat_capture_enabled",
+        "capture_file": "chat_capture_file",
     }
     chat_section = config.get("chat")
     if isinstance(chat_section, dict):
         app_section = result.setdefault("app", {})
         for old_key, new_key in legacy_chat_map.items():
-            if old_key in chat_section and new_key not in app_section:
-                app_section[new_key] = chat_section[old_key]
+            if old_key in chat_section:
+                if new_key not in app_section:
+                    app_section[new_key] = chat_section[old_key]
                 if isinstance(result.get("chat"), dict):
                     result["chat"].pop(old_key, None)
                 migrated_count += 1
@@ -168,57 +174,20 @@ def _migrate_deprecated_config(
                     f"Migrated config: chat.{old_key} -> app.{new_key} = {chat_section[old_key]}"
                 )
 
+    app_section = result.setdefault("app", {})
+    if "reuse_grok_conversation" in app_section:
+        if "continue_conversation" not in app_section:
+            app_section["continue_conversation"] = app_section["reuse_grok_conversation"]
+        app_section.pop("reuse_grok_conversation", None)
+        migrated_count += 1
+        logger.debug("Migrated config: app.reuse_grok_conversation -> app.continue_conversation")
+
     if migrated_count > 0:
         logger.info(
             f"Migrated {migrated_count} config items from deprecated/legacy sections"
         )
 
     return result, deprecated_sections
-
-
-def _prune_unknown_config(
-    config: Dict[str, Any], defaults: Dict[str, Any]
-) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Remove unknown config sections/keys that are not present in defaults.
-
-    Returns:
-        (pruned_config, removed_items)
-    """
-    if not isinstance(config, dict):
-        return {}, {"__root__": config}
-
-    pruned: Dict[str, Any] = {}
-    removed: Dict[str, Any] = {}
-
-    for section, value in config.items():
-        if section not in defaults:
-            removed[section] = value
-            continue
-
-        default_section = defaults.get(section)
-        if isinstance(default_section, dict) and isinstance(value, dict):
-            allowed_keys = set(default_section.keys())
-            kept = {k: v for k, v in value.items() if k in allowed_keys}
-            extra = {k: v for k, v in value.items() if k not in allowed_keys}
-            if extra:
-                removed[section] = extra
-            if kept:
-                pruned[section] = kept
-        else:
-            pruned[section] = value
-
-    return pruned, removed
-
-
-def _summarize_removed(removed: Dict[str, Any]) -> Dict[str, list]:
-    summary: Dict[str, list] = {}
-    for section, value in removed.items():
-        if isinstance(value, dict):
-            summary[section] = list(value.keys())
-        else:
-            summary[section] = ["<section>"]
-    return summary
 
 
 def _load_defaults() -> Dict[str, Any]:
@@ -291,41 +260,22 @@ class Config:
                     f"Cleaned deprecated config sections: {deprecated_sections}"
                 )
 
-            config_data, removed_items = _prune_unknown_config(
-                config_data, self._defaults
-            )
-            if removed_items:
-                logger.info(
-                    "Removed unknown config items: {}",
-                    _summarize_removed(removed_items),
-                )
-
             merged = _deep_merge(self._defaults, config_data)
 
             # 自动回填缺失配置到存储
             # 或迁移了配置后需要更新
-            # 保护：当远程存储返回 None 且本地也没有可迁移配置时，不覆盖远程配置，避免误重置。
-            has_local_seed = bool(config_data)
-            allow_bootstrap_empty_remote = (not from_remote) and has_local_seed
             should_persist = (
-                allow_bootstrap_empty_remote
-                or (merged != config_data and bool(config_data))
-                or deprecated_sections
-                or removed_items
+                (not from_remote) or (merged != config_data) or deprecated_sections
             )
             if should_persist:
                 async with storage.acquire_lock("config_save", timeout=10):
                     await storage.save_config(merged)
-                if not from_remote and has_local_seed:
+                if not from_remote:
                     logger.info(
                         f"Initialized remote storage ({storage.__class__.__name__}) with config baseline."
                     )
                 if deprecated_sections:
                     logger.info("Configuration automatically migrated and cleaned.")
-            elif not from_remote and not has_local_seed:
-                logger.warning(
-                    "Skip persisting defaults: empty config source detected, keep runtime merged config only."
-                )
 
             self._config = merged
         except Exception as e:
@@ -356,16 +306,39 @@ class Config:
         storage = get_storage()
         async with storage.acquire_lock("config_save", timeout=10):
             self._ensure_defaults()
+            previous = deepcopy(self._config or {})
             base = _deep_merge(self._defaults, self._config or {})
             merged = _deep_merge(base, new_config or {})
-            merged, removed_items = _prune_unknown_config(merged, self._defaults)
-            if removed_items:
-                logger.info(
-                    "Removed unknown config items on update: {}",
-                    _summarize_removed(removed_items),
-                )
+            merged, _ = _migrate_deprecated_config(merged, set(self._defaults.keys()))
             await storage.save_config(merged)
             self._config = merged
+        self._apply_runtime_updates(previous, self._config)
+
+    def _apply_runtime_updates(self, previous: Dict[str, Any], current: Dict[str, Any]):
+        """配置变更后立即应用可热更新的运行时设置。"""
+        prev_app = previous.get("app") if isinstance(previous, dict) else {}
+        curr_app = current.get("app") if isinstance(current, dict) else {}
+        prev_app = prev_app if isinstance(prev_app, dict) else {}
+        curr_app = curr_app if isinstance(curr_app, dict) else {}
+
+        log_related_keys = {
+            "app_log_enabled",
+            "chat_capture_enabled",
+            "chat_capture_file",
+        }
+        if any(prev_app.get(key) != curr_app.get(key) for key in log_related_keys):
+            try:
+                from app.core.logger import setup_logging
+                import os
+
+                setup_logging(
+                    level=os.getenv("LOG_LEVEL", "INFO"),
+                    json_console=False,
+                    file_logging=bool(curr_app.get("app_log_enabled", True)),
+                )
+                logger.info("Applied runtime log configuration update.")
+            except Exception as e:
+                logger.warning(f"Failed to hot-apply log configuration: {e}")
 
 
 # 全局配置实例

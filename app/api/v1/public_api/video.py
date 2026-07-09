@@ -5,9 +5,8 @@ import uuid
 from typing import Optional, List, Dict, Any
 
 import orjson
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.auth import verify_public_key
@@ -15,7 +14,6 @@ from app.core.logger import logger
 from app.core.exceptions import AppException
 from app.services.grok.services.video import VideoService
 from app.services.grok.services.model import ModelService
-from app.api.v1.public_api import imagine as imagine_public_api
 from app.services.grok.utils.cache import CacheService
 
 router = APIRouter()
@@ -23,9 +21,6 @@ router = APIRouter()
 VIDEO_SESSION_TTL = 600
 _VIDEO_SESSIONS: dict[str, dict] = {}
 _VIDEO_SESSIONS_LOCK = asyncio.Lock()
-_PARENT_POST_SSE_LOCKS: dict[str, asyncio.Lock] = {}
-_VENDOR_CACHE: dict[str, bytes] = {}
-_VENDOR_LOCK = asyncio.Lock()
 
 _VIDEO_RATIO_MAP = {
     "1280x720": "16:9",
@@ -38,28 +33,6 @@ _VIDEO_RATIO_MAP = {
     "3:2": "3:2",
     "2:3": "2:3",
     "1:1": "1:1",
-}
-
-_FFMPEG_VENDOR_SOURCES = {
-    "ffmpeg-core.js": [
-        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js",
-        "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js",
-    ],
-    "ffmpeg-core.wasm": [
-        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm",
-        "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm",
-    ],
-    # 某些版本没有 worker 文件，允许返回 404 由前端自动降级。
-    "ffmpeg-core.worker.js": [
-        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.worker.js",
-        "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.worker.js",
-    ],
-}
-
-_VENDOR_CONTENT_TYPE = {
-    "ffmpeg-core.js": "application/javascript; charset=utf-8",
-    "ffmpeg-core.worker.js": "application/javascript; charset=utf-8",
-    "ffmpeg-core.wasm": "application/wasm",
 }
 
 
@@ -108,146 +81,6 @@ def _extract_parent_post_id_from_url(url: str) -> str:
     matches = re.findall(r"([0-9a-fA-F-]{32,36})", text)
     return matches[-1] if matches else ""
 
-
-def _build_imagine_public_url(parent_post_id: str) -> str:
-    return f"https://imagine-public.x.ai/imagine-public/images/{parent_post_id}.jpg"
-
-
-def _resolve_parent_source_image_url(parent_post_id: str, source_image_url: Optional[str]) -> Optional[str]:
-    explicit = str(source_image_url or "").strip() or None
-    if explicit:
-        return explicit
-    parent_id = str(parent_post_id or "").strip()
-    if not parent_id:
-        return explicit
-    return _build_imagine_public_url(parent_id)
-
-
-def _mask_token(token: str) -> str:
-    raw = str(token or "").replace("sso=", "")
-    if len(raw) <= 12:
-        return raw or "-"
-    return f"{raw[:6]}...{raw[-6:]}"
-
-
-def _get_parent_post_sse_lock(parent_post_id: str) -> asyncio.Lock:
-    parent_id = str(parent_post_id or "").strip()
-    if not parent_id:
-        return asyncio.Lock()
-    lock = _PARENT_POST_SSE_LOCKS.get(parent_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _PARENT_POST_SSE_LOCKS[parent_id] = lock
-    return lock
-
-
-def _drain_stream_task(task: asyncio.Task[Any]) -> None:
-    try:
-        task.result()
-    except (asyncio.CancelledError, StopAsyncIteration):
-        pass
-    except Exception:
-        pass
-
-
-async def _close_async_iterator(iterator: Any, timeout: float = 0.2) -> None:
-    aclose = getattr(iterator, "aclose", None)
-    if not callable(aclose):
-        return
-    try:
-        close_task = asyncio.create_task(aclose())
-        close_task.add_done_callback(_drain_stream_task)
-        done, _ = await asyncio.wait(
-            {close_task},
-            timeout=max(0.0, timeout),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if close_task not in done:
-            close_task.cancel()
-    except Exception:
-        pass
-
-
-async def _with_sse_keepalive(stream: Any, interval_seconds: float = 15.0):
-    interval_seconds = max(0.01, float(interval_seconds or 15.0))
-    iterator = stream.__aiter__()
-    pending: asyncio.Task[Any] | None = None
-
-    try:
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(iterator.__anext__())
-                pending.add_done_callback(_drain_stream_task)
-
-            done, _ = await asyncio.wait(
-                {pending},
-                timeout=interval_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if pending in done:
-                try:
-                    chunk = pending.result()
-                except StopAsyncIteration:
-                    break
-                pending = None
-                yield chunk
-                continue
-
-            yield ": keepalive\n\n"
-    finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-        await _close_async_iterator(iterator)
-
-
-async def _stream_collected_video_result(
-    result_coro: Any,
-    *,
-    request: Request,
-    task_id: str,
-    keepalive_interval: float = 15.0,
-):
-    pending = asyncio.create_task(result_coro)
-    pending.add_done_callback(_drain_stream_task)
-
-    try:
-        while True:
-            done, _ = await asyncio.wait(
-                {pending},
-                timeout=max(0.01, float(keepalive_interval or 15.0)),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if pending in done:
-                result = pending.result()
-                yield f"data: {orjson.dumps(result).decode()}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            if await request.is_disconnected():
-                logger.info(f"Public video client disconnected: {task_id}")
-                pending.cancel()
-                return
-            if task_id not in _VIDEO_SESSIONS:
-                logger.info(f"Public video task stopped by user: {task_id}")
-                pending.cancel()
-                return
-            yield ": keepalive\n\n"
-    finally:
-        if not pending.done():
-            pending.cancel()
-
-
-async def _collect_parent_post_video_result(
-    model_id: str,
-    messages: List[Dict[str, Any]],
-    completion_kwargs: Dict[str, Any],
-    parent_post_id: str,
-):
-    async with _get_parent_post_sse_lock(parent_post_id):
-        return await VideoService.completions(model_id, messages, **completion_kwargs)
-
-
-
 async def _clean_sessions(now: float) -> None:
     expired = [
         key
@@ -267,9 +100,8 @@ async def _new_session(
     image_url: Optional[str],
     parent_post_id: Optional[str],
     source_image_url: Optional[str],
-    reference_items: Optional[List[Dict[str, str]]] = None,
-    nsfw: Optional[bool] = None,
-    reasoning_effort: Optional[str] = None,
+    reference_items: Optional[List[Dict[str, str]]],
+    reasoning_effort: Optional[str],
     single_image_mode: str = "frame",
     # 视频延长相关
     is_video_extension: bool = False,
@@ -293,7 +125,6 @@ async def _new_session(
             "parent_post_id": parent_post_id,
             "source_image_url": source_image_url,
             "reference_items": reference_items or [],
-            "nsfw": bool(nsfw if nsfw is not None else True),
             "reasoning_effort": reasoning_effort,
             "single_image_mode": single_image_mode,
             "is_video_extension": is_video_extension,
@@ -384,17 +215,6 @@ def _normalize_string_list(values: Optional[List[str]]) -> List[str]:
 def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
 
-    def _normalize_parent_item(
-        parent_post_id: str,
-        image_url: str,
-        source_image_url: str,
-    ) -> tuple[str, str, str]:
-        if parent_post_id and image_url:
-            if not source_image_url:
-                source_image_url = image_url
-            image_url = ""
-        return parent_post_id, image_url, source_image_url
-
     for raw in data.reference_items or []:
         if not isinstance(raw, dict):
             continue
@@ -406,9 +226,6 @@ def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
             _validate_image_url(image_url)
         if source_image_url:
             _validate_image_url(source_image_url)
-        parent_post_id, image_url, source_image_url = _normalize_parent_item(
-            parent_post_id, image_url, source_image_url
-        )
         if parent_post_id or image_url or source_image_url:
             items.append(
                 {
@@ -437,9 +254,6 @@ def _build_reference_items(data: "VideoStartRequest") -> List[Dict[str, str]]:
         _validate_image_url(single_image_url)
     if single_source_image_url:
         _validate_image_url(single_source_image_url)
-    single_parent, single_image_url, single_source_image_url = _normalize_parent_item(
-        single_parent, single_image_url, single_source_image_url
-    )
     if single_parent or single_image_url or single_source_image_url:
         items.insert(
             0,
@@ -483,7 +297,6 @@ class VideoStartRequest(BaseModel):
     image_url: Optional[str] = None
     parent_post_id: Optional[str] = None
     source_image_url: Optional[str] = None
-    nsfw: Optional[bool] = None
     image_references: Optional[List[str]] = None
     parent_post_ids: Optional[List[str]] = None
     source_image_urls: Optional[List[str]] = None
@@ -518,9 +331,9 @@ async def public_video_start(data: VideoStartRequest):
         )
 
     video_length = int(data.video_length or 6)
-    if video_length < 6 or video_length > 30:
+    if video_length not in (6, 10, 15):
         raise HTTPException(
-            status_code=400, detail="video_length must be between 6 and 30 seconds"
+            status_code=400, detail="video_length must be 6, 10, or 15 seconds"
         )
 
     resolution_name = str(data.resolution_name or "480p")
@@ -549,20 +362,19 @@ async def public_video_start(data: VideoStartRequest):
         raise HTTPException(status_code=400, detail="最多支持 7 张参考图")
     parent_post_refs = [item for item in reference_items if item.get("parent_post_id")]
     parent_post_id = str(parent_post_refs[0].get("parent_post_id") or "").strip() if parent_post_refs else ""
+    # 带 parent_post_id 的参考项按“基于已有 post 引用”处理，不再同时抽取 image_url，
+    # 避免单个 reference_item 既有 parent_post_id 又有 image_url 时被误判为冲突参数。
+    pure_image_refs = [item for item in reference_items if not item.get("parent_post_id")]
     image_url = (
-        str(reference_items[0].get("image_url") or "").strip() or None
-        if reference_items
+        str(pure_image_refs[0].get("image_url") or "").strip() or None
+        if pure_image_refs
         else None
     )
     source_image_url = (
-        str(reference_items[0].get("source_image_url") or "").strip() or None
-        if reference_items
+        str(pure_image_refs[0].get("source_image_url") or "").strip() or None
+        if pure_image_refs
         else None
     )
-    if parent_post_id:
-        source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
-    elif source_image_url:
-        _validate_image_url(source_image_url)
 
     # 视频延长参数解析
     is_video_extension = bool(data.is_video_extension)
@@ -579,21 +391,16 @@ async def public_video_start(data: VideoStartRequest):
                 status_code=400,
                 detail="extend_post_id is required for video extension",
             )
-        if video_extension_start_time is None or video_extension_start_time < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="video_extension_start_time must be a non-negative number",
-            )
-        
-        # 官方服务端对延长视频容易触发风控，在此强制固定并发为1
-        concurrent = 1
+        if video_extension_start_time is None or video_extension_start_time <= 0:
+            video_extension_start_time = 6.0
 
         logger.info(
             "Public video extension request: "
             f"extend_post_id={extend_post_id}, "
             f"start_time={video_extension_start_time}, "
             f"original_post_id={original_post_id}, "
-            f"file_attachment_id={file_attachment_id}"
+            f"file_attachment_id={file_attachment_id}, "
+            f"concurrent={concurrent}"
         )
     else:
         if parent_post_id and image_url and len(reference_items) <= 1:
@@ -605,8 +412,6 @@ async def public_video_start(data: VideoStartRequest):
                 status_code=400,
                 detail="Prompt cannot be empty when no image_url/parent_post_id is provided",
             )
-
-    nsfw = True if data.nsfw is None else bool(data.nsfw)
 
     reasoning_effort = (data.reasoning_effort or "").strip() or None
     if reasoning_effort:
@@ -642,9 +447,8 @@ async def public_video_start(data: VideoStartRequest):
             image_url,
             parent_post_id,
             source_image_url,
-            reference_items=reference_items,
-            nsfw=data.nsfw,
-            reasoning_effort=reasoning_effort,
+            reference_items,
+            reasoning_effort,
             single_image_mode=single_image_mode,
             is_video_extension=is_video_extension,
             extend_post_id=extend_post_id,
@@ -683,39 +487,11 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
     parent_post_id = str(session.get("parent_post_id") or "").strip()
     source_image_url = str(session.get("source_image_url") or "").strip() or None
     reference_items = session.get("reference_items") or []
-    if parent_post_id:
-        source_image_url = _resolve_parent_source_image_url(parent_post_id, source_image_url)
     reasoning_effort = session.get("reasoning_effort")
-    nsfw = bool(session.get("nsfw", True))
     single_image_mode = str(session.get("single_image_mode") or "frame").strip() or "frame"
-    is_video_extension = bool(session.get("is_video_extension"))
-    extend_post_id = str(session.get("extend_post_id") or "").strip() or None
-    video_extension_start_time = session.get("video_extension_start_time")
-    original_post_id = str(session.get("original_post_id") or "").strip() or None
-    file_attachment_id = str(session.get("file_attachment_id") or "").strip() or None
-    stitch_with_extend = bool(session.get("stitch_with_extend", True))
 
     async def event_stream():
         try:
-            preferred_token = None
-            if parent_post_id:
-                try:
-                    preferred_token = await imagine_public_api._get_bound_image_token(
-                        parent_post_id
-                    )
-                except Exception:
-                    preferred_token = None
-                if preferred_token:
-                    logger.info(
-                        "Public video token bound hit: "
-                        f"parent_post_id={parent_post_id}, token={_mask_token(preferred_token)}"
-                    )
-                else:
-                    logger.info(
-                        "Public video token bound miss: "
-                        f"parent_post_id={parent_post_id}"
-                    )
-
             model_id = "grok-imagine-1.0-video"
             model_info = ModelService.get(model_id)
             if not model_info or not model_info.is_video:
@@ -740,45 +516,35 @@ async def public_video_sse(request: Request, task_id: str = Query("")):
             else:
                 messages = [{"role": "user", "content": prompt}]
 
-            completion_kwargs = {
-                "stream": True,
-                "reasoning_effort": reasoning_effort,
-                "aspect_ratio": aspect_ratio,
-                "video_length": video_length,
-                "resolution": resolution_name,
-                "preset": preset,
-                "parent_post_id": parent_post_id or None,
-                "extend_post_id": extend_post_id if is_video_extension else None,
-                "video_extension_start_time": video_extension_start_time if is_video_extension else None,
-                "original_post_id": original_post_id if is_video_extension else None,
-                "file_attachment_id": file_attachment_id if is_video_extension else None,
-                "stitch_with_extend": stitch_with_extend,
-                "source_image_url": source_image_url,
-                "reference_items": reference_items,
-                "preferred_token": preferred_token,
-                "nsfw": nsfw,
-                "single_image_mode": single_image_mode,
-            }
+            # 从 session 取得视频延长参数
+            is_video_extension = bool(session.get("is_video_extension"))
+            extend_post_id = str(session.get("extend_post_id") or "").strip() or None
+            video_extension_start_time = session.get("video_extension_start_time")
+            original_post_id = str(session.get("original_post_id") or "").strip() or None
+            file_attachment_id = str(session.get("file_attachment_id") or "").strip() or None
+            stitch_with_extend = bool(session.get("stitch_with_extend", True))
 
-            should_collect_parent_post = bool(parent_post_id and not is_video_extension)
-            if should_collect_parent_post:
-                completion_kwargs["stream"] = False
-                async for chunk in _stream_collected_video_result(
-                    _collect_parent_post_video_result(
-                        model_id,
-                        messages,
-                        completion_kwargs,
-                        parent_post_id,
-                    ),
-                    request=request,
-                    task_id=task_id,
-                ):
-                    yield chunk
-                return
+            stream = await VideoService.completions(
+                model_id,
+                messages,
+                stream=True,
+                reasoning_effort=reasoning_effort,
+                aspect_ratio=aspect_ratio,
+                video_length=video_length,
+                resolution=resolution_name,
+                preset=preset,
+                parent_post_id=parent_post_id or None,
+                extend_post_id=extend_post_id if is_video_extension else None,
+                video_extension_start_time=video_extension_start_time if is_video_extension else None,
+                original_post_id=original_post_id if is_video_extension else None,
+                file_attachment_id=file_attachment_id if is_video_extension else None,
+                stitch_with_extend=stitch_with_extend,
+                source_image_url=source_image_url,
+                reference_items=reference_items,
+                single_image_mode=single_image_mode,
+            )
 
-            stream = await VideoService.completions(model_id, messages, **completion_kwargs)
-
-            async for chunk in _with_sse_keepalive(stream):
+            async for chunk in stream:
                 if await request.is_disconnected():
                     logger.info(f"Public video client disconnected: {task_id}")
                     break
@@ -809,56 +575,6 @@ class VideoStopRequest(BaseModel):
 async def public_video_stop(data: VideoStopRequest):
     removed = await _drop_sessions(data.task_ids or [])
     return {"status": "success", "removed": removed}
-
-
-@router.get("/video/vendor/{filename}")
-async def public_video_vendor(filename: str):
-    filename = str(filename or "").strip()
-    if filename not in _FFMPEG_VENDOR_SOURCES:
-        raise HTTPException(status_code=404, detail="vendor asset not found")
-
-    async with _VENDOR_LOCK:
-        cached = _VENDOR_CACHE.get(filename)
-    if cached:
-        return Response(
-            content=cached,
-            media_type=_VENDOR_CONTENT_TYPE.get(filename, "application/octet-stream"),
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
-
-    timeout = httpx.Timeout(connect=8.0, read=60.0, write=30.0, pool=8.0)
-    last_error = None
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for url in _FFMPEG_VENDOR_SOURCES[filename]:
-            try:
-                resp = await client.get(url, follow_redirects=True)
-                if resp.status_code == 200 and resp.content:
-                    content = bytes(resp.content)
-                    async with _VENDOR_LOCK:
-                        _VENDOR_CACHE[filename] = content
-                    logger.info(
-                        f"Video vendor proxy loaded: {filename} <- {url} ({len(content)} bytes)"
-                    )
-                    return Response(
-                        content=content,
-                        media_type=_VENDOR_CONTENT_TYPE.get(
-                            filename, "application/octet-stream"
-                        ),
-                        headers={"Cache-Control": "public, max-age=86400"},
-                    )
-                last_error = f"status={resp.status_code}"
-            except Exception as e:
-                last_error = str(e)
-
-    if filename == "ffmpeg-core.worker.js":
-        raise HTTPException(
-            status_code=404,
-            detail="optional worker asset not found",
-        )
-    raise HTTPException(
-        status_code=502,
-        detail=f"vendor fetch failed: {filename}, error={last_error or 'unknown'}",
-    )
 
 
 @router.get("/video/cache/list", dependencies=[Depends(verify_public_key)])

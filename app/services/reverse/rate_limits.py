@@ -14,12 +14,25 @@ from app.services.reverse.utils.retry import retry_on_status
 
 RATE_LIMITS_API = "https://grok.com/rest/rate-limits"
 
+MODE_NAME_BY_KEY = {
+    "auto": "auto",
+    "fast": "fast",
+    "expert": "expert",
+    "heavy": "heavy",
+    "grok_4_3": "grok-420-computer-use-sa",
+}
+
 
 class RateLimitsReverse:
     """/rest/rate-limits reverse interface."""
 
     @staticmethod
-    async def request(session: AsyncSession, token: str) -> Any:
+    async def request(
+        session: AsyncSession,
+        token: str,
+        *,
+        model_name: str = "auto",
+    ) -> Any:
         """Fetch rate limits from Grok.
 
         Args:
@@ -45,7 +58,7 @@ class RateLimitsReverse:
             # Build payload
             payload = {
                 "requestKind": "DEFAULT",
-                "modelName": "grok-4-1-thinking-1129",
+                "modelName": model_name,
             }
 
             # Curl Config
@@ -97,4 +110,36 @@ class RateLimitsReverse:
             )
 
 
-__all__ = ["RateLimitsReverse"]
+async def fetch_quota_windows(
+    session: AsyncSession,
+    token: str,
+    *,
+    mode_keys: tuple[str, ...],
+) -> dict[str, dict]:
+    """逐模型获取额度窗口，兼容旧版 TokenManager。"""
+    windows: dict[str, dict] = {}
+    for mode_key in mode_keys:
+        model_name = MODE_NAME_BY_KEY.get(mode_key)
+        if not model_name:
+            continue
+        response = await RateLimitsReverse.request(
+            session,
+            token,
+            model_name=model_name,
+        )
+        data = response.json()
+        remaining = data.get("remainingTokens")
+        if remaining is None:
+            remaining = data.get("remainingQueries")
+        total = data.get("totalTokens")
+        if total is None:
+            total = data.get("totalQueries")
+        windows[mode_key] = {
+            "remaining": int(remaining or 0),
+            "total": int(total if total is not None else remaining or 0),
+            "window_seconds": data.get("windowSizeSeconds"),
+        }
+    return windows
+
+
+__all__ = ["RateLimitsReverse", "fetch_quota_windows", "MODE_NAME_BY_KEY"]

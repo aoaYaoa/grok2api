@@ -1,6 +1,7 @@
 """定时调度：周期性刷新 cf_clearance（集成到 grok2api 进程内）"""
 
 import asyncio
+import time
 
 from loguru import logger
 
@@ -8,6 +9,14 @@ from .config import get_refresh_interval, get_flaresolverr_url, is_enabled
 from .solver import solve_cf_challenge
 
 _task: asyncio.Task | None = None
+_last_cf_refresh_at: float = 0.0
+
+
+def seconds_since_cf_refresh() -> float | None:
+    """返回距离上次 cf_refresh 成功刷新的秒数；未刷新过则返回 None。"""
+    if _last_cf_refresh_at <= 0:
+        return None
+    return max(time.time() - _last_cf_refresh_at, 0.0)
 
 
 async def _update_app_config(
@@ -41,6 +50,7 @@ async def _update_app_config(
 
 async def refresh_once() -> bool:
     """执行一次刷新流程"""
+    global _last_cf_refresh_at
     logger.info("=" * 50)
     logger.info("开始刷新 cf_clearance...")
 
@@ -57,6 +67,7 @@ async def refresh_once() -> bool:
     )
 
     if success:
+        _last_cf_refresh_at = time.time()
         logger.info("刷新完成")
     else:
         logger.error("刷新失败: 更新配置失败")

@@ -9,8 +9,9 @@ import hashlib
 import io
 import mimetypes
 import re
+import zipfile
 from pathlib import Path
-from typing import AsyncIterator, Optional, Tuple
+from typing import Any, AsyncIterator, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiofiles
@@ -22,22 +23,6 @@ from app.core.logger import logger
 from app.core.storage import DATA_DIR
 from app.services.reverse.assets_upload import AssetsUploadReverse
 from app.services.grok.utils.locks import _get_upload_semaphore, _file_lock
-
-
-DEFAULT_UPLOAD_TIMEOUT = 60.0
-
-
-def _safe_upload_timeout_seconds() -> float:
-    raw_timeout = get_config("asset.upload_timeout", DEFAULT_UPLOAD_TIMEOUT)
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        return DEFAULT_UPLOAD_TIMEOUT
-    return timeout if timeout > 0 else DEFAULT_UPLOAD_TIMEOUT
-
-
-def _safe_upload_lock_timeout() -> int:
-    return max(1, int(_safe_upload_timeout_seconds()))
 
 
 class UploadService:
@@ -166,6 +151,39 @@ class UploadService:
             raise ValidationException(f"Image inspect failed: {e}")
 
     @staticmethod
+    def _zip_single_file(filename: str, b64: str) -> Tuple[str, str, str]:
+        """把触发防护的视频放进压缩包，保持文件本体不转码。"""
+        try:
+            raw = base64.b64decode(re.sub(r"\s+", "", b64), validate=True)
+        except Exception:
+            raise ValidationException("Invalid file base64 content")
+        safe_name = (filename or "file").replace("\\", "-").replace("/", "-")
+        zip_name = f"{safe_name.rsplit('.', 1)[0] or 'file'}.zip"
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(safe_name or "file", raw)
+        return zip_name, base64.b64encode(out.getvalue()).decode(), "application/x-zip-compressed"
+
+    @staticmethod
+    def _extract_upstream_rejection_hint(exc: Exception) -> str:
+        text_parts = [str(exc or "")]
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            text_parts.extend(
+                [
+                    str(details.get("hint") or ""),
+                    str(details.get("body") or ""),
+                    str(details.get("error") or ""),
+                ]
+            )
+        merged = " | ".join(part for part in text_parts if part).lower()
+        if "content is moderated" in merged or "content-moderated" in merged:
+            return "Content is moderated [WKE=file:content-moderated]"
+        if "just a moment" in merged or "cf-challenge" in merged or "cloudflare" in merged:
+            return "Cloudflare challenge page"
+        return ""
+
+    @staticmethod
     def _is_url(value: str) -> bool:
         """Check if the value is a URL."""
         try:
@@ -180,6 +198,48 @@ class UploadService:
     def _infer_mime(filename: str, fallback: str = "application/octet-stream") -> str:
         mime, _ = mimetypes.guess_type(filename)
         return mime or fallback
+
+    @staticmethod
+    def _is_loopback_host(hostname: str) -> bool:
+        host = str(hostname or "").strip().lower()
+        return host in {"127.0.0.1", "localhost", "::1"}
+
+    @staticmethod
+    def _resolve_internal_file_ref(url: str) -> Optional[Tuple[str, str]]:
+        """识别本站 /v1/files 路径，直接回源本地缓存文件。"""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return None
+
+        path = str(parsed.path or "").strip()
+        if not path.startswith("/v1/files/"):
+            return None
+
+        parts = path.strip("/").split("/", 3)
+        if len(parts) < 4:
+            return None
+
+        app_url = str(get_config("app.app_url") or "").strip()
+        app_host = ""
+        if app_url:
+            try:
+                app_host = str(urlparse(app_url).hostname or "").strip().lower()
+            except Exception:
+                app_host = ""
+
+        req_host = str(parsed.hostname or "").strip().lower()
+        if req_host and not (
+            UploadService._is_loopback_host(req_host)
+            or (app_host and req_host == app_host)
+        ):
+            return None
+
+        local_type = parts[2]
+        name = parts[3].replace("/", "-")
+        if not local_type or not name:
+            return None
+        return local_type, name
 
     @staticmethod
     async def _encode_b64_stream(chunks: AsyncIterator[bytes]) -> str:
@@ -220,7 +280,7 @@ class UploadService:
 
         local_path = local_dir / name
         lock_name = f"ul_local_{hashlib.sha1(str(local_path).encode()).hexdigest()[:16]}"
-        lock_timeout = _safe_upload_lock_timeout()
+        lock_timeout = max(1, int(get_config("asset.upload_timeout")))
         async with _file_lock(lock_name, timeout=lock_timeout):
             if not local_path.exists():
                 raise ValidationException(f"Local file not found: {local_path}")
@@ -243,20 +303,22 @@ class UploadService:
         """Fetch URL content and return (filename, base64, mime)."""
         try:
             if self._is_url(url):
-                parsed = urlparse(url)
-                if parsed.path.startswith("/v1/files/"):
-                    parts = parsed.path.strip("/").split("/", 3)
-                    if len(parts) >= 4:
-                        local_type = parts[2]
-                        name = parts[3].replace("/", "-")
-                        return await self._read_local_file(local_type, name)
+                internal_ref = self._resolve_internal_file_ref(url)
+                if internal_ref:
+                    local_type, name = internal_ref
+                    logger.debug(
+                        "Upload parse_b64 resolved internal file URL locally: type={}, name={}",
+                        local_type,
+                        name,
+                    )
+                    return await self._read_local_file(local_type, name)
 
             lock_name = f"ul_url_{hashlib.sha1(url.encode()).hexdigest()[:16]}"
-            timeout = _safe_upload_timeout_seconds()
+            timeout = float(get_config("asset.upload_timeout"))
             proxy_url = get_config("proxy.base_proxy_url")
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
-            lock_timeout = _safe_upload_lock_timeout()
+            lock_timeout = max(1, int(get_config("asset.upload_timeout")))
             async with _file_lock(lock_name, timeout=lock_timeout):
                 session = await self.create()
                 response = await session.get(
@@ -291,11 +353,15 @@ class UploadService:
         except Exception as e:
             if isinstance(e, AppException):
                 raise
-            logger.error(f"Fetch failed: {url} - {e}")
+            logger.error("Fetch failed: {} - {}", url, str(e))
             raise UpstreamException(f"Fetch failed: {str(e)}", details={"url": url})
 
     @staticmethod
-    def format_b64(data_uri: str) -> Tuple[str, str, str]:
+    def format_b64(
+        data_uri: str,
+        filename: str | None = None,
+        mime_override: str | None = None,
+    ) -> Tuple[str, str, str]:
         """Format data URI to (filename, base64, mime)."""
         if not data_uri.startswith("data:"):
             raise ValidationException("Invalid file input: not a data URI")
@@ -308,15 +374,41 @@ class UploadService:
         if ";base64" not in header:
             raise ValidationException("Invalid data URI: missing base64 marker")
 
-        mime = header[5:].split(";", 1)[0] or "application/octet-stream"
+        mime = (mime_override if mime_override is not None else header[5:].split(";", 1)[0]).strip()
         b64 = re.sub(r"\s+", "", b64)
-        if not mime or not b64:
+        if not b64:
             raise ValidationException("Invalid data URI: empty content")
-        ext = mime.split("/")[-1] if "/" in mime else "bin"
-        return f"file.{ext}", b64, mime
+        ext = mime.split("/")[-1] if mime and "/" in mime else "bin"
+        return filename or f"file.{ext}", b64, mime
 
-    async def check_format(self, file_input: str) -> Tuple[str, str, str]:
+    async def check_format(self, file_input: Any) -> Tuple[str, str, str]:
         """Check file input format and return (filename, base64, mime)."""
+        if isinstance(file_input, dict):
+            data = str(
+                file_input.get("data")
+                or file_input.get("file_data")
+                or file_input.get("url")
+                or ""
+            ).strip()
+            filename = str(
+                file_input.get("filename")
+                or file_input.get("name")
+                or ""
+            ).strip() or None
+            mime = str(
+                file_input.get("mime_type")
+                or file_input.get("mime")
+                or ""
+            ).strip() or None
+            if not data:
+                raise ValidationException("Invalid file input: empty content")
+            if self._is_url(data):
+                resolved_name, b64, resolved_mime = await self.parse_b64(data)
+                return filename or resolved_name, b64, mime or resolved_mime
+            if data.startswith("data:"):
+                return self.format_b64(data, filename=filename, mime_override=mime)
+            raise ValidationException("Invalid file input: must be URL or base64")
+
         if not isinstance(file_input, str) or not file_input.strip():
             raise ValidationException("Invalid file input: empty content")
 
@@ -328,7 +420,7 @@ class UploadService:
 
         raise ValidationException("Invalid file input: must be URL or base64")
 
-    async def upload_file(self, file_input: str, token: str) -> Tuple[str, str]:
+    async def upload_file(self, file_input: Any, token: str) -> Tuple[str, str]:
         """
         Upload file to Grok.
 
@@ -375,6 +467,50 @@ class UploadService:
                 status = None
                 if e.details and "status" in e.details:
                     status = e.details.get("status")
+                body = (e.details or {}).get("body", "")
+                hint = (e.details or {}).get("hint", "")
+                normalized_hint = self._extract_upstream_rejection_hint(e) or hint
+                logger.warning(
+                    "Upload upstream rejected: "
+                    "filename={}, status={}, hint={}, body={}",
+                    filename,
+                    status,
+                    normalized_hint or "-",
+                    body or "-",
+                )
+                if normalized_hint == "Content is moderated [WKE=file:content-moderated]":
+                    raise ValidationException(
+                        message="图片内容触发审核限制，无法上传。请更换图片后重试。",
+                        param="image",
+                        code="content_moderated",
+                    )
+                if (
+                    normalized_hint == "Cloudflare challenge page"
+                    and str(mime or "").lower().startswith("video/")
+                ):
+                    zip_name, zip_b64, zip_mime = self._zip_single_file(filename, b64)
+                    logger.warning(
+                        "Upload video fallback zip retry: "
+                        "filename={}, zip_name={}, original_mime={}, zip_len={}",
+                        filename,
+                        zip_name,
+                        mime,
+                        len(zip_b64),
+                    )
+                    response = await AssetsUploadReverse.request(
+                        session,
+                        token,
+                        zip_name,
+                        zip_mime,
+                        zip_b64,
+                    )
+                    result = response.json()
+                    file_id = result.get("fileMetadataId", "")
+                    file_uri = result.get("fileUri", "")
+                    logger.info(
+                        f"Upload success after video zip fallback: {zip_name} -> {file_id}"
+                    )
+                    return file_id, file_uri
                 if mime != "image/jpeg" or status not in (400, 403):
                     raise
 
@@ -399,8 +535,11 @@ class UploadService:
                         b64_retry = self._reencode_jpeg_with_profile(b64, **profile)
                         logger.warning(
                             "Upload image fallback re-encode retry: "
-                            f"attempt={idx}, status={status}, profile={profile}, "
-                            f"out_len={len(b64_retry)}"
+                            "attempt={}, status={}, profile={}, out_len={}",
+                            idx,
+                            status,
+                            profile,
+                            len(b64_retry),
                         )
                         response = await AssetsUploadReverse.request(
                             session,

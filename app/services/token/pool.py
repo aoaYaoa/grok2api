@@ -28,7 +28,7 @@ class TokenPool:
         """获取 Token"""
         return self._tokens.get(token_str)
 
-    def select(self, exclude: set = None, preferred_tags: Optional[List[str]] = None) -> Optional[TokenInfo]:
+    def select(self, exclude: set = None, quota_mode: str = "auto") -> Optional[TokenInfo]:
         """
         选择一个可用 Token
         策略:
@@ -40,27 +40,18 @@ class TokenPool:
         available = [
             t
             for t in self._tokens.values()
-            if t.status == TokenStatus.ACTIVE and t.quota > 0
+            if t.status == TokenStatus.ACTIVE and t.mode_quota(quota_mode) > 0
             and (not exclude or t.token not in exclude)
         ]
 
         if not available:
             return None
 
-        preferred = [tag.strip().lower() for tag in (preferred_tags or []) if str(tag).strip()]
-        if preferred:
-            tagged = [
-                t for t in available
-                if {str(tag).strip().lower() for tag in (t.tags or [])} & set(preferred)
-            ]
-            if tagged:
-                available = tagged
-
         # 找到最大额度
-        max_quota = max(t.quota for t in available)
+        max_quota = max(t.mode_quota(quota_mode) for t in available)
 
         # 筛选最大额度
-        candidates = [t for t in available if t.quota == max_quota]
+        candidates = [t for t in available if t.mode_quota(quota_mode) == max_quota]
 
         # 随机选择
         return random.choice(candidates)
@@ -78,7 +69,7 @@ class TokenPool:
         stats = TokenPoolStats(total=len(self._tokens))
 
         for token in self._tokens.values():
-            stats.total_quota += token.quota
+            stats.total_quota += token.primary_quota()
 
             if token.status == TokenStatus.ACTIVE:
                 stats.active += 1

@@ -5,25 +5,85 @@ Grok image services.
 import asyncio
 import base64
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Union
 
 import orjson
+from curl_cffi.requests import AsyncSession
 
 from app.core.config import get_config
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
 from app.core.exceptions import AppException, ErrorType, UpstreamException
+from app.services.grok.services.model import ModelService
 from app.services.grok.utils.process import BaseProcessor
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.token import EffortType
+from app.services.reverse.media_post import MediaPostReverse
 from app.services.reverse.ws_imagine import ImagineWebSocketReverse
 
 
 image_service = ImagineWebSocketReverse()
+
+
+def _extract_image_post_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for pattern in (
+        r"/generated/([0-9a-fA-F-]{32,36})(?:/|$)",
+        r"/users/[^/]+/([0-9a-fA-F-]{32,36})(?:/content|/|$)",
+        r"/imagine-public/(?:share-images|images)/([0-9a-fA-F-]{32,36})(?:\.[a-z]+|/|$)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    matches = re.findall(r"([0-9a-fA-F-]{32,36})", text)
+    return matches[-1] if matches else ""
+
+
+async def _try_log_image_share_link(
+    token: str,
+    post_id: str,
+    *,
+    local_url: str = "",
+) -> None:
+    token_text = str(token or "").strip()
+    post_text = str(post_id or "").strip()
+    if not token_text or not post_text:
+        return
+    try:
+        logger.info(f"Image create-link attempt: post_id={post_text}")
+        async with AsyncSession() as session:
+            metadata = await MediaPostReverse.capture_metadata(
+                session,
+                token_text,
+                post_text,
+                media_type="image",
+                local_url=local_url,
+            )
+        share_link = str(metadata.get("share_link") or "").strip()
+        metadata_path = str(metadata.get("metadata_path") or "").strip()
+        if share_link:
+            logger.info(
+                "Image create-link success: "
+                f"post_id={post_text}, share_link={share_link}, metadata_path={metadata_path or '-'}"
+            )
+        else:
+            logger.info(
+                "Image create-link completed without shareLink: "
+                f"post_id={post_text}, metadata_path={metadata_path or '-'}"
+            )
+    except Exception as e:
+        details = getattr(e, "details", None)
+        logger.warning(
+            "Image create-link failed: "
+            f"post_id={post_text}, error={e}, details={details}"
+        )
 
 
 @dataclass
@@ -49,6 +109,7 @@ class ImageGenerationService:
         aspect_ratio: str,
         stream: bool,
         enable_nsfw: Optional[bool] = None,
+        enable_pro: Optional[bool] = None,
     ) -> ImageGenerationResult:
         max_token_retries = int(get_config("retry.max_retry"))
         tried_tokens: set[str] = set()
@@ -85,6 +146,7 @@ class ImageGenerationService:
                             size=size,
                             aspect_ratio=aspect_ratio,
                             enable_nsfw=enable_nsfw,
+                            enable_pro=enable_pro,
                         )
                         async for chunk in result.data:
                             yielded = True
@@ -95,7 +157,10 @@ class ImageGenerationService:
                         if rate_limited(e):
                             if yielded:
                                 raise
-                            await token_mgr.mark_rate_limited(current_token)
+                            await token_mgr.mark_rate_limited(
+                                current_token,
+                                quota_mode=ModelService.quota_mode_for_model(model_info.model_id),
+                            )
                             logger.warning(
                                 f"Token {current_token[:10]}... rate limited (429), "
                                 f"trying next token (attempt {attempt + 1}/{max_token_retries})"
@@ -140,11 +205,15 @@ class ImageGenerationService:
                     response_format=response_format,
                     aspect_ratio=aspect_ratio,
                     enable_nsfw=enable_nsfw,
+                    enable_pro=enable_pro,
                 )
             except UpstreamException as e:
                 last_error = e
                 if rate_limited(e):
-                    await token_mgr.mark_rate_limited(current_token)
+                    await token_mgr.mark_rate_limited(
+                        current_token,
+                        quota_mode=ModelService.quota_mode_for_model(model_info.model_id),
+                    )
                     logger.warning(
                         f"Token {current_token[:10]}... rate limited (429), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
@@ -173,15 +242,18 @@ class ImageGenerationService:
         size: str,
         aspect_ratio: str,
         enable_nsfw: Optional[bool] = None,
+        enable_pro: Optional[bool] = None,
     ) -> ImageGenerationResult:
         if enable_nsfw is None:
             enable_nsfw = bool(get_config("image.nsfw"))
+        enable_pro = bool(enable_pro)
         upstream = image_service.stream(
             token=token,
             prompt=prompt,
             aspect_ratio=aspect_ratio,
             n=n,
             enable_nsfw=enable_nsfw,
+            enable_pro=enable_pro,
         )
         processor = ImageWSStreamProcessor(
             model_info.model_id,
@@ -209,9 +281,11 @@ class ImageGenerationService:
         response_format: str,
         aspect_ratio: str,
         enable_nsfw: Optional[bool] = None,
+        enable_pro: Optional[bool] = None,
     ) -> ImageGenerationResult:
         if enable_nsfw is None:
             enable_nsfw = bool(get_config("image.nsfw"))
+        enable_pro = bool(enable_pro)
         all_images: List[str] = []
         seen = set()
         expected_per_call = 6
@@ -224,6 +298,7 @@ class ImageGenerationService:
                 aspect_ratio=aspect_ratio,
                 n=call_target,
                 enable_nsfw=enable_nsfw,
+                enable_pro=enable_pro,
             )
             processor = ImageWSCollectProcessor(
                 model_info.model_id,
@@ -248,16 +323,11 @@ class ImageGenerationService:
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             added_in_round = 0
-            filtered_png = 0
-
             for batch in results:
                 if isinstance(batch, Exception):
                     logger.warning(f"WS batch failed: {batch}")
                     continue
                 for img in batch:
-                    if self._is_blocked_png_image(img):
-                        filtered_png += 1
-                        continue
                     if img not in seen:
                         seen.add(img)
                         all_images.append(img)
@@ -271,17 +341,17 @@ class ImageGenerationService:
                 "WS collect round: "
                 f"{round_idx}/{max_collect_rounds}, "
                 f"target={n}, collected={len(all_images)}, "
-                f"added={added_in_round}, filtered_png={filtered_png}"
+                f"added={added_in_round}"
             )
 
             if len(all_images) >= n:
                 break
-            if added_in_round == 0 and filtered_png > 0 and round_idx >= 3:
-                logger.warning(
-                    "WS collect appears blocked by png-only results, stop early: "
-                    f"target={n}, collected={len(all_images)}"
-                )
-                break
+
+        if not all_images:
+            raise UpstreamException(
+                "No final image received from upstream",
+                details={"error_code": "blocked_no_final_image"},
+            )
 
         try:
             await token_mgr.consume(token, self._get_effort(model_info))
@@ -298,19 +368,6 @@ class ImageGenerationService:
         return ImageGenerationResult(
             stream=False, data=selected, usage_override=usage_override
         )
-
-    @staticmethod
-    def _is_blocked_png_image(image: str) -> bool:
-        value = str(image or "").strip().lower()
-        if not value:
-            return True
-        if value.startswith("data:image/png;base64,"):
-            return True
-        if value.startswith("ivborw0kggo"):
-            return True
-        if ".png" in value:
-            return True
-        return False
 
     @staticmethod
     def _get_effort(model_info: Any) -> EffortType:
@@ -432,22 +489,10 @@ class ImageWSBaseProcessor(BaseProcessor):
                     ext=item.get("ext"),
                 )
                 
-                # [NEW] 当图像生成存盘时，保存其 tokenId 用以后续延长关联
-                if res and image_id and getattr(self, "token", None):
-                    from app.services.grok.utils.asset_token_map import AssetTokenMap
-                    token_map = await AssetTokenMap.get_instance()
-                    await token_map.save_mapping(image_id, self.token)
-                    
                 return res
                 
             res = self._strip_base64(item.get("blob", ""))
             
-            # [NEW] Base64 响应下同样强绑定
-            if res and image_id and getattr(self, "token", None):
-                from app.services.grok.utils.asset_token_map import AssetTokenMap
-                token_map = await AssetTokenMap.get_instance()
-                await token_map.save_mapping(image_id, self.token)
-                
             return res
         except Exception as e:
             logger.warning(f"Image output failed: {e}")
@@ -628,6 +673,8 @@ class ImageWSStreamProcessor(ImageWSBaseProcessor):
                     },
                 },
             )
+            if image_id and self.token:
+                await _try_log_image_share_link(self.token, image_id, local_url=output)
 
 
 class ImageWSCollectProcessor(ImageWSBaseProcessor):
@@ -641,6 +688,7 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
 
     async def process(self, response: AsyncIterable[dict]) -> List[str]:
         images: Dict[str, Dict] = {}
+        saw_any_image = False
 
         async for item in response:
             if item.get("type") == "error":
@@ -648,10 +696,19 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
                 raise UpstreamException(message, details=item)
             if item.get("type") != "image":
                 continue
+            saw_any_image = True
             image_id = item.get("image_id")
             if not image_id:
                 continue
+            if not item.get("is_final"):
+                continue
             images[image_id] = self._pick_best(images.get(image_id), item)
+
+        if saw_any_image and not images:
+            raise UpstreamException(
+                "No final image received from upstream",
+                details={"error_code": "blocked_no_final_image"},
+            )
 
         selected = sorted(
             images.values(),
@@ -662,10 +719,18 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
             selected = selected[: self.n]
 
         results: List[str] = []
+        share_items: List[tuple[str, str]] = []
         for item in selected:
-            output = await self._to_output(item.get("image_id", ""), item)
+            image_id = str(item.get("image_id", "") or "").strip()
+            output = await self._to_output(image_id, item)
             if output:
                 results.append(output)
+                if image_id:
+                    share_items.append((image_id, output))
+
+        if self.token:
+            for post_id, output in share_items:
+                await _try_log_image_share_link(self.token, post_id, local_url=output)
 
         return results
 

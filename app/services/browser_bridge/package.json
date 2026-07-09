@@ -1,0 +1,11 @@
+{
+  "name": "grok2api-cloakbrowser-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Embedded CloakBrowser chat bridge for grok2api",
+  "main": "server.cjs",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "playwright": "^1.54.2"
+  }
+}

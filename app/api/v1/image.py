@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Union
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -64,24 +64,24 @@ class ImageGenerationRequest(BaseModel):
     """图片生成请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="图片描述")
-    model: Optional[str] = Field("grok-imagine-1.0", description="模型名称")
+    model: Optional[str] = Field("grok-imagine-image", description="模型名称")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field(
         "1024x1024",
         description="图片尺寸: 1280x720, 720x1280, 1792x1024, 1024x1792, 1024x1024",
     )
     quality: Optional[str] = Field("standard", description="图片质量 (暂不支持)")
+    pro: Optional[bool] = Field(False, description="质量模式")
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
-    nsfw: Optional[bool] = Field(None, description="是否启用 NSFW")
 
 
 class ImageEditRequest(BaseModel):
     """图片编辑请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="编辑描述")
-    model: Optional[str] = Field("grok-imagine-1.0-edit", description="模型名称")
+    model: Optional[str] = Field("grok-imagine-image-edit", description="模型名称")
     image: Optional[Union[str, List[str]]] = Field(None, description="待编辑图片文件")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field(
@@ -149,16 +149,8 @@ def _validate_common_request(
 
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
-    if request.model != "grok-imagine-1.0":
-        raise ValidationException(
-            message="The model `grok-imagine-1.0` is required for image generation.",
-            param="model",
-            code="model_not_supported",
-        )
-    # 验证模型 - 通过 is_image 检查
     model_info = ModelService.get(request.model)
     if not model_info or not model_info.is_image:
-        # 获取支持的图片模型列表
         image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
         raise ValidationException(
             message=(
@@ -196,14 +188,42 @@ def resolve_aspect_ratio(size: str) -> str:
     return SIZE_TO_ASPECT.get(size) or "2:3"
 
 
+def _should_force_non_streaming(raw_request: Request) -> bool:
+    """
+    对 OpenAI 兼容图片接口默认降级为非流式 JSON。
+
+    当前图片流使用的是自定义 `image_generation.partial_image/completed` 事件，
+    不符合 OpenAI 标准 chunk 结构。像 Cherry Studio 这类客户端会把每个 SSE
+    `data:` 块按 `choices/error` 结构校验，因此会触发 TypeValidationError。
+
+    为保证兼容性，这两个 OpenAI 风格 endpoint 默认忽略 `stream=true`。
+    只有显式传入私有请求头 `X-Grok2API-Image-Stream: 1` 时，才启用旧的自定义 SSE。
+    """
+    stream_opt_in = str(
+        raw_request.headers.get("x-grok2api-image-stream") or ""
+    ).strip().lower()
+    return stream_opt_in not in {"1", "true", "yes", "on"}
+
+
+def _normalize_openai_image_stream_flag(
+    stream_value: Optional[bool], raw_request: Request, route_name: str
+) -> bool:
+    """
+    OpenAI 兼容图片接口默认关闭自定义 SSE。
+
+    这些 endpoint 对外声明为 OpenAI 风格，但当前流式事件不是 OpenAI 标准 chunk。
+    因此默认统一降级为非流式 JSON，只给明确 opt-in 的自有前端保留旧行为。
+    """
+    if not bool(stream_value):
+        return False
+    if _should_force_non_streaming(raw_request):
+        logger.info(f"{route_name} fallback to non-streaming JSON")
+        return False
+    return True
+
+
 def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
     """验证图片编辑请求参数"""
-    if request.model != "grok-imagine-1.0-edit":
-        raise ValidationException(
-            message=("The model `grok-imagine-1.0-edit` is required for image edits."),
-            param="model",
-            code="model_not_supported",
-        )
     model_info = ModelService.get(request.model)
     if not model_info or not model_info.is_image_edit:
         edit_models = [m.model_id for m in ModelService.MODELS if m.is_image_edit]
@@ -240,10 +260,11 @@ async def _get_token(model: str):
     """获取可用 token"""
     token_mgr = await get_token_manager()
     await token_mgr.reload_if_stale()
+    quota_mode = ModelService.quota_mode_for_model(model)
 
     token = None
     for pool_name in ModelService.pool_candidates_for_model(model):
-        token = token_mgr.get_token(pool_name)
+        token = token_mgr.get_token(pool_name, quota_mode=quota_mode)
         if token:
             break
 
@@ -259,7 +280,7 @@ async def _get_token(model: str):
 
 
 @router.post("/images/generations")
-async def create_image(request: ImageGenerationRequest):
+async def create_image(request: ImageGenerationRequest, raw_request: Request):
     """
     Image Generation API
 
@@ -271,15 +292,12 @@ async def create_image(request: ImageGenerationRequest):
     - {"created": ..., "data": [{"b64_json": "..."}], "usage": {...}}
     """
     try:
-        # stream 默认为 false
-        if request.stream is None:
-            request.stream = False
+        request.stream = _normalize_openai_image_stream_flag(
+            request.stream, raw_request, "Images API"
+        )
 
         if request.response_format is None:
             request.response_format = resolve_response_format(None)
-
-        if request.nsfw is None:
-            request.nsfw = True
 
         # 参数验证
         validate_generation_request(request)
@@ -306,7 +324,7 @@ async def create_image(request: ImageGenerationRequest):
             size=request.size,
             aspect_ratio=aspect_ratio,
             stream=bool(request.stream),
-            enable_nsfw=request.nsfw,
+            enable_pro=bool(request.pro),
         )
 
         if result.stream:
@@ -347,10 +365,11 @@ async def create_image(request: ImageGenerationRequest):
 
 @router.post("/images/edits")
 async def edit_image(
+    raw_request: Request,
     prompt: str = Form(...),
     image: Optional[List[UploadFile]] = File(None),
     image_bracket: Optional[List[UploadFile]] = File(None, alias="image[]"),
-    model: Optional[str] = Form("grok-imagine-1.0-edit"),
+    model: Optional[str] = Form("grok-imagine-image-edit"),
     n: int = Form(1),
     size: str = Form("1024x1024"),
     quality: str = Form("standard"),
@@ -392,8 +411,9 @@ async def edit_image(
                 raise ValidationException(message=msg, param=param, code=code)
             raise ValidationException(message="Invalid request", code="invalid_value")
 
-        if edit_request.stream is None:
-            edit_request.stream = False
+        edit_request.stream = _normalize_openai_image_stream_flag(
+            edit_request.stream, raw_request, "Image edits"
+        )
 
         # 兼容两种多文件字段：image / image[]
         upload_images: List[UploadFile] = []

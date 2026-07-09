@@ -28,6 +28,13 @@ class CacheService:
     def _allowed_exts(self, media_type: str):
         return IMAGE_EXTS if media_type == "image" else VIDEO_EXTS
 
+    def _matches_media_type(self, media_type: str, file_path) -> bool:
+        if not file_path.is_file():
+            return False
+        if file_path.suffix.lower() not in self._allowed_exts(media_type):
+            return False
+        return True
+
     def _media_meta_dir(self):
         return DATA_DIR / "tmp" / "media-meta"
 
@@ -87,10 +94,7 @@ class CacheService:
         if not cache_dir.exists():
             return {"count": 0, "size_mb": 0.0}
 
-        allowed = self._allowed_exts(media_type)
-        files = [
-            f for f in cache_dir.glob("*") if f.is_file() and f.suffix.lower() in allowed
-        ]
+        files = [f for f in cache_dir.glob("*") if self._matches_media_type(media_type, f)]
         total_size = sum(f.stat().st_size for f in files)
         return {"count": len(files), "size_mb": round(total_size / 1024 / 1024, 2)}
 
@@ -101,10 +105,7 @@ class CacheService:
         if not cache_dir.exists():
             return {"total": 0, "page": page, "page_size": page_size, "items": []}
 
-        allowed = self._allowed_exts(media_type)
-        files = [
-            f for f in cache_dir.glob("*") if f.is_file() and f.suffix.lower() in allowed
-        ]
+        files = [f for f in cache_dir.glob("*") if self._matches_media_type(media_type, f)]
 
         items = []
         for f in files:
@@ -130,6 +131,8 @@ class CacheService:
 
         for item in paged:
             item["view_url"] = f"/v1/files/{media_type}/{item['name']}"
+            if media_type == "image":
+                item["preview_url"] = item["view_url"]
             if media_type != "video":
                 continue
             post_id = self._extract_post_id_from_name(item["name"])
@@ -190,7 +193,7 @@ class CacheService:
         cache_dir = self._cache_dir(media_type)
         file_path = cache_dir / name.replace("/", "-")
 
-        if file_path.exists():
+        if file_path.exists() and self._matches_media_type(media_type, file_path):
             try:
                 file_path.unlink()
                 return {"deleted": True}
@@ -203,7 +206,7 @@ class CacheService:
         if not cache_dir.exists():
             return {"count": 0, "size_mb": 0.0}
 
-        files = list(cache_dir.glob("*"))
+        files = [f for f in cache_dir.glob("*") if self._matches_media_type(media_type, f)]
         total_size = sum(f.stat().st_size for f in files if f.is_file())
         count = 0
 

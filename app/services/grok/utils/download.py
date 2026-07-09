@@ -25,6 +25,19 @@ from app.services.reverse.assets_download import AssetsDownloadReverse
 from app.services.reverse.utils.headers import build_headers
 from app.services.grok.utils.locks import _get_download_semaphore, _file_lock
 
+_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".zip": "application/zip",
+    ".pdf": "application/pdf",
+}
+
 
 class DownloadService:
     """Assets download service."""
@@ -34,8 +47,10 @@ class DownloadService:
         base_dir = DATA_DIR / "tmp"
         self.image_dir = base_dir / "image"
         self.video_dir = base_dir / "video"
+        self.file_dir = base_dir / "file"
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self.video_dir.mkdir(parents=True, exist_ok=True)
+        self.file_dir.mkdir(parents=True, exist_ok=True)
         self._cleanup_running = False
 
     async def create(self) -> AsyncSession:
@@ -53,12 +68,7 @@ class DownloadService:
     async def resolve_url(
         self, path_or_url: str, token: str, media_type: str = "image"
     ) -> str:
-        if self._is_public_share_url(path_or_url):
-            app_url = get_config("app.app_url")
-            filename = self._public_cache_filename(path_or_url, media_type)
-            if app_url:
-                await self.download_file(path_or_url, token, media_type)
-                return f"{app_url.rstrip('/')}/v1/files/{media_type}/{filename}"
+        if self._is_public_direct_url(path_or_url):
             return path_or_url
 
         asset_url = path_or_url
@@ -80,6 +90,30 @@ class DownloadService:
         return asset_url
 
     @staticmethod
+    def _route_media_type(media_type: str) -> str:
+        value = str(media_type or "").strip().lower()
+        if value in {"image", "video", "file"}:
+            return value
+        return "file"
+
+    def _cache_dir_for_media(self, media_type: str) -> Path:
+        value = self._route_media_type(media_type)
+        if value == "image":
+            return self.image_dir
+        if value == "video":
+            return self.video_dir
+        return self.file_dir
+
+    async def cache_asset_url(
+        self, path_or_url: str, token: str, media_type: str = "file"
+    ) -> str:
+        """保存 Grok 返回文件，并返回本站下载地址。"""
+        await self.download_file(path_or_url, token, media_type)
+        path = self._normalize_path(path_or_url)
+        route = self._route_media_type(media_type)
+        return f"/v1/files/{route}{path}"
+
+    @staticmethod
     def _is_public_share_url(url: str) -> bool:
         text = str(url or "").strip().lower()
         return (
@@ -88,10 +122,27 @@ class DownloadService:
         )
 
     @staticmethod
+    def _is_grok_asset_url(url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        return host == "assets.grok.com"
+
+    @staticmethod
     def _is_localhost_url(url: str) -> bool:
         parsed = urlparse(str(url or "").strip())
         host = (parsed.hostname or "").lower()
         return host in {"localhost", "127.0.0.1", "::1"}
+
+    @classmethod
+    def _is_public_direct_url(cls, url: str) -> bool:
+        text = str(url or "").strip()
+        if not text.startswith(("http://", "https://")):
+            return False
+        if cls._is_localhost_url(text):
+            return False
+        if cls._is_public_share_url(text):
+            return True
+        return not cls._is_grok_asset_url(text)
 
     @staticmethod
     def _public_cache_filename(file_url: str, media_type: str = "image") -> str:
@@ -116,7 +167,7 @@ class DownloadService:
     ) -> Tuple[Optional[Path], str]:
         """下载公开分享直链，避免误走 assets.grok.com 反代。"""
         started_at = time.perf_counter()
-        cache_dir = self.image_dir if media_type == "image" else self.video_dir
+        cache_dir = self._cache_dir_for_media(media_type)
         filename = self._public_cache_filename(file_url, media_type)
         cache_path = cache_dir / filename
         logger.info(
@@ -131,9 +182,13 @@ class DownloadService:
             base_proxy = (get_config("proxy.base_proxy_url") or "").strip()
             asset_proxy = (get_config("proxy.asset_proxy_url") or "").strip()
             proxy_url = asset_proxy or base_proxy
+            guessed_content_type = _CONTENT_TYPES.get(
+                Path(urlparse(file_url).path).suffix.lower()
+            )
             headers = build_headers(
                 cookie_token="",
-                content_type="video/mp4" if media_type == "video" else "image/jpeg",
+                content_type=guessed_content_type
+                or ("video/mp4" if media_type == "video" else "image/jpeg"),
                 origin="https://grok.com",
                 referer="https://grok.com/",
             )
@@ -274,28 +329,34 @@ class DownloadService:
             if not self._is_url(file_path):
                 raise AppException("Invalid file path", code="invalid_file_path")
 
-            file_path = self._normalize_path(file_path)
-            lock_name = f"dl_b64_{hashlib.sha1(file_path.encode()).hexdigest()[:16]}"
-            lock_timeout = max(1, int(get_config("asset.download_timeout")))
-            async with _get_download_semaphore():
-                async with _file_lock(lock_name, timeout=lock_timeout):
-                    session = await self.create()
-                    response = await AssetsDownloadReverse.request(
-                        session, token, file_path
-                    )
-
-            if hasattr(response, "aiter_content"):
-                data = bytearray()
-                async for chunk in response.aiter_content():
-                    if chunk:
-                        data.extend(chunk)
-                raw = bytes(data)
+            if self._is_public_direct_url(file_path):
+                raise AppException(
+                    "Third-party image does not support server-side base64 render",
+                    code="third_party_direct_url",
+                )
             else:
-                raw = response.content
+                file_path = self._normalize_path(file_path)
+                lock_name = f"dl_b64_{hashlib.sha1(file_path.encode()).hexdigest()[:16]}"
+                lock_timeout = max(1, int(get_config("asset.download_timeout")))
+                async with _get_download_semaphore():
+                    async with _file_lock(lock_name, timeout=lock_timeout):
+                        session = await self.create()
+                        response = await AssetsDownloadReverse.request(
+                            session, token, file_path
+                        )
 
-            content_type = response.headers.get(
-                "content-type", "application/octet-stream"
-            ).split(";")[0]
+                if hasattr(response, "aiter_content"):
+                    data = bytearray()
+                    async for chunk in response.aiter_content():
+                        if chunk:
+                            data.extend(chunk)
+                    raw = bytes(data)
+                else:
+                    raw = response.content
+
+                content_type = response.headers.get(
+                    "content-type", "application/octet-stream"
+                ).split(";")[0]
             data_uri = f"data:{content_type};base64,{base64.b64encode(raw).decode()}"
 
             return data_uri
@@ -329,15 +390,22 @@ class DownloadService:
         Returns:
             Tuple[Optional[Path], str]: The path of the downloaded file and the MIME type.
         """
-        if self._is_public_share_url(file_path):
-            return await self._download_public_url(file_path, media_type)
+        if self._is_public_direct_url(file_path):
+            raise AppException(
+                "Third-party direct URL should be served by browser directly",
+                code="third_party_direct_url",
+            )
 
         started_at = time.perf_counter()
         async with _get_download_semaphore():
             file_path = self._normalize_path(file_path)
-            cache_dir = self.image_dir if media_type == "image" else self.video_dir
+            media_type = self._route_media_type(media_type)
+            cache_dir = self._cache_dir_for_media(media_type)
             filename = file_path.lstrip("/").replace("/", "-")
             cache_path = cache_dir / filename
+            logger.info(
+                f"Download started: media_type={media_type}, file_path={file_path}, cache_path={cache_path}"
+            )
 
             lock_name = (
                 f"dl_{media_type}_{hashlib.sha1(str(cache_path).encode()).hexdigest()[:16]}"
@@ -346,6 +414,11 @@ class DownloadService:
             async with _file_lock(lock_name, timeout=lock_timeout):
                 session = await self.create()
                 response = await AssetsDownloadReverse.request(session, token, file_path)
+                logger.info(
+                    f"Download response received: media_type={media_type}, file_path={file_path}, "
+                    f"status={getattr(response, 'status_code', '-')}, "
+                    f"content_type={(response.headers.get('content-type', 'application/octet-stream').split(';')[0])}"
+                )
 
                 tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
                 try:
@@ -367,7 +440,16 @@ class DownloadService:
                 mime = response.headers.get(
                     "content-type", "application/octet-stream"
                 ).split(";")[0]
-                logger.info(f"Downloaded: {file_path}")
+                file_size = 0
+                try:
+                    file_size = cache_path.stat().st_size
+                except Exception:
+                    file_size = 0
+                duration_ms = (time.perf_counter() - started_at) * 1000
+                logger.info(
+                    f"Downloaded: {file_path}, media_type={media_type}, cache_path={cache_path}, "
+                    f"size_bytes={file_size}, mime={mime}, duration_ms={duration_ms:.2f}"
+                )
 
                 asyncio.create_task(self._check_limit())
 
@@ -393,7 +475,7 @@ class DownloadService:
                     total_size = 0
                     all_files: List[Tuple[Path, float, int]] = []
 
-                    for d in [self.image_dir, self.video_dir]:
+                    for d in [self.image_dir, self.video_dir, self.file_dir]:
                         if d.exists():
                             for f in d.glob("*"):
                                 if f.is_file():

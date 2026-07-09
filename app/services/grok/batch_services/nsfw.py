@@ -36,10 +36,11 @@ class NSFWService:
         tokens: list[str],
         mgr,
         *,
+        enabled: bool = True,
         on_item: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """Batch enable NSFW."""
+        """批量设置 NSFW 开关。"""
         batch_size = get_config("nsfw.batch_size")
         async def _enable(token: str):
             try:
@@ -79,17 +80,24 @@ class NSFWService:
 
                     try:
                         async with _get_nsfw_semaphore():
-                            grpc_status = await NsfwMgmtReverse.request(session, token)
+                            grpc_status = await NsfwMgmtReverse.request(
+                                session,
+                                token,
+                                enabled=enabled,
+                            )
                         success = grpc_status.code in (-1, 0)
                     except UpstreamException as e:
                         status = await _record_fail(e, "nsfw_mgmt_auth_failed")
                         return {
                             "success": False,
                             "http_status": status,
-                            "error": f"NSFW enable failed: {str(e)}",
+                            "error": f"NSFW {'enable' if enabled else 'disable'} failed: {str(e)}",
                         }
                     if success:
-                        await mgr.add_tag(token, "nsfw")
+                        if enabled:
+                            await mgr.add_tag(token, "nsfw")
+                        else:
+                            await mgr.remove_tag(token, "nsfw")
                     return {
                         "success": success,
                         "http_status": 200,

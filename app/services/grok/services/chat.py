@@ -1,4 +1,4 @@
-﻿"""
+"""
 Grok Chat 服务
 """
 
@@ -11,7 +11,7 @@ import orjson
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 
-from app.core.logger import logger
+from app.core.logger import logger, LOG_DIR
 from app.core.config import get_config
 from app.core.exceptions import (
     AppException,
@@ -25,15 +25,66 @@ from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils import process as proc_base
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.reverse.app_chat import AppChatReverse
+from app.services.reverse.browser_bridge import (
+    bridge_chat_first,
+    bridge_enabled,
+    request_browser_bridge,
+)
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.token import get_token_manager, EffortType
+from app.services.grok.utils.tool_call import (
+    build_tool_prompt,
+    parse_tool_calls,
+    parse_tool_call_block,
+    format_tool_history,
+)
 
 
 _CHAT_SEMAPHORE = None
 _CHAT_SEM_VALUE = None
 
+_QUOTA_MODE_LABELS = {
+    "auto": "Auto",
+    "fast": "Fast",
+    "expert": "Expert",
+    "heavy": "Heavy",
+    "grok_4_3": "4.3 Beta",
+}
 
-def extract_tool_text(raw: str) -> str:
+
+def _chat_upstream_mode() -> str:
+    return str(get_config("chat.upstream_mode", "http") or "http").strip().lower()
+
+
+def _describe_upstream_chat_error(exc: Exception) -> str:
+    if not isinstance(exc, UpstreamException):
+        return "请求失败，请重试。"
+    details = exc.details if isinstance(exc.details, dict) else {}
+    status = details.get("status")
+    if status == 429:
+        quota_mode = str(details.get("quota_mode") or "").strip()
+        error_code = str(details.get("error_code") or "").strip()
+        wait_seconds = details.get("quota_wait_seconds")
+        if error_code == "quota_exhausted" and quota_mode:
+            label = _QUOTA_MODE_LABELS.get(quota_mode, quota_mode)
+            if isinstance(wait_seconds, (int, float)) and wait_seconds > 0:
+                wait_seconds = int(wait_seconds)
+                hours = wait_seconds // 3600
+                minutes = (wait_seconds % 3600) // 60
+                if hours > 0:
+                    return f"{label} 模型额度已用完，请约 {hours} 小时 {minutes} 分钟后重试。"
+                if minutes > 0:
+                    return f"{label} 模型额度已用完，请约 {minutes} 分钟后重试。"
+            return f"{label} 模型额度已用完，请稍后重试。"
+        return "请求过于频繁或上游暂时限流，请稍后重试。"
+    if status == 401:
+        return "上游认证失败，请检查账号状态。"
+    if status == 403:
+        return "上游拒绝了本次请求，请稍后重试。"
+    return "请求失败，请重试。"
+
+
+def extract_tool_text(raw: str, rollout_id: str = "") -> str:
     if not raw:
         return ""
     name_match = re.search(
@@ -60,12 +111,13 @@ def extract_tool_text(raw: str) -> str:
 
     label = name
     text = args
+    prefix = f"[{rollout_id}]" if rollout_id else ""
     if name == "web_search":
-        label = "[WebSearch]"
+        label = f"{prefix}[WebSearch]"
         if isinstance(payload, dict):
             text = payload.get("query") or payload.get("q") or ""
     elif name == "search_images":
-        label = "[SearchImage]"
+        label = f"{prefix}[SearchImage]"
         if isinstance(payload, dict):
             text = (
                 payload.get("image_description")
@@ -74,7 +126,7 @@ def extract_tool_text(raw: str) -> str:
                 or ""
             )
     elif name == "chatroom_send":
-        label = "[AgentThink]"
+        label = f"{prefix}[AgentThink]"
         if isinstance(payload, dict):
             text = payload.get("message") or ""
 
@@ -86,6 +138,501 @@ def extract_tool_text(raw: str) -> str:
         return text
     # Fallback: strip tags to keep any raw text.
     return re.sub(r"<[^>]+>", "", raw, flags=re.DOTALL).strip()
+
+
+def _tool_card_to_source_group(card_id: str, card: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not card_id or not isinstance(card, dict):
+        return None
+
+    if web_search := card.get("webSearch"):
+        args = web_search.get("args") or {}
+        query = args.get("query") or args.get("q") or ""
+        return {
+            "tool_usage_card_id": card_id,
+            "kind": "web_search",
+            "query": query,
+            "results": [],
+        }
+
+    if image_search := card.get("imageSearch"):
+        args = image_search.get("args") or {}
+        query = (
+            args.get("imageDescription")
+            or args.get("image_description")
+            or args.get("query")
+            or ""
+        )
+        return {
+            "tool_usage_card_id": card_id,
+            "kind": "search_images",
+            "query": query,
+            "results": [],
+        }
+
+    return None
+
+
+def _normalize_source_results(
+    items: Any,
+    max_items: int | None = None,
+    preview_limit: int | None = None,
+) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if max_items is not None and len(normalized) >= max_items:
+            break
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("link") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        preview = str(item.get("preview") or item.get("snippet") or "").strip()
+        if preview_limit is not None and len(preview) > preview_limit:
+            preview = f"{preview[:preview_limit]}…"
+        normalized.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or "").strip(),
+                "preview": preview,
+            }
+        )
+    return normalized
+
+
+def _compact_sources_payload(payload: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+
+    compact_groups: List[Dict[str, Any]] = []
+    for group in payload.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        compact_group = {
+            "tool_usage_card_id": group.get("tool_usage_card_id") or "",
+            "kind": group.get("kind") or "",
+            "query": group.get("query") or "",
+            "results": _normalize_source_results(
+                group.get("results") or [],
+                max_items=5,
+                preview_limit=160,
+            ),
+        }
+        compact_groups.append(compact_group)
+        if len(compact_groups) >= 20:
+            break
+
+    compact_citations = []
+    for item in payload.get("citations") or []:
+        if isinstance(item, dict):
+            compact_citations.append(
+                {
+                    "url": str(item.get("url") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                }
+            )
+        if len(compact_citations) >= 40:
+            break
+
+    compact_images = []
+    for item in payload.get("images") or []:
+        if isinstance(item, dict):
+            compact_images.append(
+                {
+                    "url": str(item.get("url") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                }
+            )
+        if len(compact_images) >= 20:
+            break
+
+    compact = {
+        "groups": compact_groups,
+        "citations": compact_citations,
+        "images": compact_images,
+        "compact": True,
+    }
+    if compact["groups"] or compact["citations"] or compact["images"]:
+        return compact
+    return None
+
+
+def _extract_card_attachment_sources(card_attachments: Any) -> Dict[str, List[Dict[str, str]]]:
+    citations: List[Dict[str, str]] = []
+    images: List[Dict[str, str]] = []
+    seen_citations: set[str] = set()
+    seen_images: set[str] = set()
+
+    for raw in card_attachments or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            card = orjson.loads(raw)
+        except orjson.JSONDecodeError:
+            continue
+        if not isinstance(card, dict):
+            continue
+
+        card_type = str(card.get("type") or "")
+        if card_type == "render_inline_citation":
+            url = str(card.get("url") or "").strip()
+            if url and url not in seen_citations:
+                seen_citations.add(url)
+                citations.append(
+                    {
+                        "url": url,
+                        "title": "",
+                    }
+                )
+            continue
+
+        if card_type == "render_searched_image":
+            image = card.get("image") or {}
+            url = str(image.get("link") or image.get("original") or "").strip()
+            if url and url not in seen_images:
+                seen_images.add(url)
+                images.append(
+                    {
+                        "url": url,
+                        "title": str(image.get("title") or "").strip(),
+                        "thumbnail": str(image.get("thumbnail") or "").strip(),
+                        "original": str(image.get("original") or "").strip(),
+                    }
+                )
+
+    return {"citations": citations, "images": images}
+
+
+def extract_sources_payload(model_response: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not isinstance(model_response, dict):
+        return None
+
+    groups_by_id: Dict[str, Dict[str, Any]] = {}
+    group_order: List[str] = []
+
+    def ensure_group(card_id: str, card: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+        if not card_id:
+            return None
+        group = groups_by_id.get(card_id)
+        if group is None and isinstance(card, dict):
+            group = _tool_card_to_source_group(card_id, card)
+            if group:
+                groups_by_id[card_id] = group
+                group_order.append(card_id)
+        return group
+
+    for step in model_response.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+
+        for card in step.get("toolUsageCards") or []:
+            if not isinstance(card, dict):
+                continue
+            card_id = str(card.get("toolUsageCardId") or "").strip()
+            ensure_group(card_id, card)
+
+        for result in step.get("toolUsageResults") or []:
+            if not isinstance(result, dict):
+                continue
+            card_id = str(result.get("toolUsageCardId") or "").strip()
+            group = ensure_group(card_id)
+            if not group:
+                continue
+
+            web_results = ((result.get("webSearchResults") or {}).get("results")) or []
+            normalized = _normalize_source_results(web_results)
+            if normalized:
+                group["results"] = normalized
+
+    if not groups_by_id:
+        fallback_results = _normalize_source_results(
+            ((model_response.get("webSearchResults") or {}).get("results")) or []
+        )
+        if fallback_results:
+            groups_by_id["__fallback__"] = {
+                "tool_usage_card_id": "__fallback__",
+                "kind": "web_search",
+                "query": "",
+                "results": fallback_results,
+            }
+            group_order.append("__fallback__")
+
+    attachments = _extract_card_attachment_sources(model_response.get("cardAttachmentsJson"))
+    groups = [groups_by_id[group_id] for group_id in group_order if groups_by_id.get(group_id)]
+    payload = {
+        "groups": groups,
+        "citations": attachments["citations"],
+        "images": attachments["images"],
+    }
+    if payload["groups"] or payload["citations"] or payload["images"]:
+        return payload
+    return None
+
+
+def _extract_render_files(model_response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    files: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for card in _parse_card_attachments_json(model_response.get("cardAttachmentsJson")):
+        if not isinstance(card, dict):
+            continue
+        if str(card.get("type") or "") != "render_file":
+            continue
+        name = str(card.get("file_name") or card.get("name") or "download").strip()
+        url = str(card.get("url") or "").strip()
+        mime = str(card.get("mime_type") or "").strip()
+        content_type = str(card.get("content_type") or "").strip()
+        if not url:
+            continue
+        key = f"{name}|{url}"
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            size = int(card.get("file_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        files.append(
+            {
+                "id": str(card.get("id") or key).strip(),
+                "name": name,
+                "url": url,
+                "mime": mime,
+                "contentType": content_type,
+                "size": size,
+                "thumbnailUrl": str(card.get("thumbnail_url") or "").strip(),
+                "thumbnailDarkUrl": str(card.get("thumbnail_dark_url") or "").strip(),
+            }
+        )
+    return files
+
+
+def extract_render_payload(model_response: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not isinstance(model_response, dict) or not model_response:
+        return None
+    return {
+        "rawModelResponse": model_response,
+        "extraImages": proc_base._collect_images(model_response),
+        "files": _extract_render_files(model_response),
+    }
+
+
+def _render_file_media_type(file_info: Dict[str, Any]) -> str:
+    mime = str(file_info.get("mime") or file_info.get("mime_type") or "").lower()
+    content_type = str(
+        file_info.get("contentType") or file_info.get("content_type") or ""
+    ).lower()
+    name = str(file_info.get("name") or file_info.get("file_name") or "").lower()
+    if mime.startswith("image/") or content_type == "image":
+        return "image"
+    if mime.startswith("video/") or content_type == "video":
+        return "video"
+    if name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+        return "image"
+    if name.endswith((".mp4", ".webm", ".mov")):
+        return "video"
+    return "file"
+
+
+async def _cache_render_files(
+    render_payload: Dict[str, Any] | None,
+    token: str,
+    dl_service: Any,
+) -> Dict[str, Any] | None:
+    if not render_payload or not isinstance(render_payload, dict):
+        return render_payload
+    files = render_payload.get("files")
+    if not isinstance(files, list) or not files:
+        return render_payload
+
+    cached_files: List[Dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        cached = dict(item)
+        original_url = str(cached.get("url") or "").strip()
+        if original_url:
+            cached.setdefault("originalUrl", original_url)
+            try:
+                cached["url"] = await dl_service.cache_asset_url(
+                    original_url,
+                    token,
+                    _render_file_media_type(cached),
+                )
+                cached["cached"] = True
+            except Exception as exc:
+                cached["cached"] = False
+                logger.warning(f"Render file cache failed: {original_url} {exc}")
+        cached_files.append(cached)
+
+    render_payload = dict(render_payload)
+    render_payload["files"] = cached_files
+    return render_payload
+
+
+def _extract_stream_response(data: Any) -> Dict[str, Any] | None:
+    """安全提取流式事件中的 response，避免上游返回 null 时崩溃。"""
+    if not isinstance(data, dict):
+        return None
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return None
+    response = result.get("response")
+    if not isinstance(response, dict):
+        direct_keys = {
+            "token",
+            "modelResponse",
+            "cardAttachment",
+            "toolUsageCard",
+            "toolUsageCardId",
+            "messageTag",
+            "llmInfo",
+            "rolloutId",
+            "responseId",
+            "uiLayout",
+            "finalMetadata",
+            "progressReport",
+            "codeExecutionResult",
+            "streamingImageGenerationResponse",
+        }
+        if any(key in result for key in direct_keys):
+            return result
+        return None
+    return response
+
+
+def _parse_card_attachments_json(card_attachments: Any) -> List[Dict[str, Any]]:
+    parsed: List[Dict[str, Any]] = []
+    for raw in card_attachments or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            item = orjson.loads(raw)
+        except orjson.JSONDecodeError:
+            parsed.append({"_raw": raw})
+            continue
+        if isinstance(item, dict):
+            parsed.append(item)
+    return parsed
+
+
+def _build_capture_event(resp: Dict[str, Any], model: str, phase: str, seq: int) -> Dict[str, Any]:
+    event: Dict[str, Any] = {
+        "type": "app_chat_capture",
+        "phase": phase,
+        "seq": seq,
+        "model": model,
+        "responseId": resp.get("responseId"),
+        "rolloutId": resp.get("rolloutId"),
+        "messageTag": resp.get("messageTag"),
+        "isThinking": bool(resp.get("isThinking")),
+    }
+
+    token = resp.get("token")
+    if token is not None:
+        event["tokenPreview"] = str(token)[:300]
+
+    if llm := resp.get("llmInfo"):
+        if isinstance(llm, dict):
+            event["llmInfo"] = llm
+
+    if tool_card := resp.get("toolUsageCard"):
+        event["toolUsageCardId"] = (
+            str(resp.get("toolUsageCardId") or tool_card.get("toolUsageCardId") or "").strip()
+        )
+        event["toolUsageCard"] = tool_card
+
+    if card := resp.get("cardAttachment"):
+        if isinstance(card, dict):
+            event["cardAttachment"] = card
+            json_data = card.get("jsonData")
+            if isinstance(json_data, str) and json_data.strip():
+                try:
+                    event["cardAttachmentJsonParsed"] = orjson.loads(json_data)
+                except orjson.JSONDecodeError:
+                    event["cardAttachmentJsonParsed"] = {"_raw": json_data}
+
+    if web_search_results := resp.get("webSearchResults"):
+        event["webSearchResults"] = web_search_results
+
+    if mr := resp.get("modelResponse"):
+        if isinstance(mr, dict):
+            event["modelResponse"] = {
+                "responseId": mr.get("responseId"),
+                "message": mr.get("message"),
+                "cardAttachmentsJsonParsed": _parse_card_attachments_json(
+                    mr.get("cardAttachmentsJson")
+                ),
+                "steps": mr.get("steps"),
+                "webSearchResults": mr.get("webSearchResults"),
+                "metadata": mr.get("metadata"),
+            }
+            if sources_payload := extract_sources_payload(mr):
+                event["sourcesPayload"] = sources_payload
+            if render_payload := extract_render_payload(mr):
+                event["renderingPayload"] = render_payload
+
+    return event
+
+
+def _capture_app_chat_event(resp: Dict[str, Any], model: str, phase: str, seq: int) -> None:
+    if not get_config("app.chat_capture_enabled", get_config("chat.capture_enabled", False)):
+        return
+
+    capture_file = get_config(
+        "app.chat_capture_file",
+        get_config("chat.capture_file", str(LOG_DIR / "app_chat_capture.jsonl")),
+    ) or str(LOG_DIR / "app_chat_capture.jsonl")
+    try:
+        event = _build_capture_event(resp, model, phase, seq)
+        with open(capture_file, "ab") as f:
+            f.write(orjson.dumps(event))
+            f.write(b"\n")
+    except Exception as e:
+        logger.warning(
+            f"App chat capture write failed: {e}",
+            extra={"model": model, "error_type": type(e).__name__},
+        )
+
+
+def _clean_id(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _provider_grok_options(provider_options: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(provider_options, dict):
+        return {}
+    grok = provider_options.get("grok")
+    if isinstance(grok, dict):
+        return grok
+    return provider_options
+
+
+def _conversation_reuse_enabled(provider_options: Dict[str, Any] | None) -> bool:
+    if not get_config("app.continue_conversation", get_config("app.reuse_grok_conversation", False)):
+        return False
+    opts = _provider_grok_options(provider_options)
+    if opts.get("reuse_conversation") is False:
+        return False
+    if opts.get("reuseConversation") is False:
+        return False
+    return True
+
+
+def _sources_mode(provider_options: Dict[str, Any] | None) -> str:
+    opts = _provider_grok_options(provider_options)
+    value = str(opts.get("sources_mode") or opts.get("sourcesMode") or "compact").strip().lower()
+    return "full" if value == "full" else "compact"
+
+
+def _latest_user_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    system_messages = [
+        msg for msg in messages or [] if isinstance(msg, dict) and msg.get("role") == "system"
+    ]
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return system_messages + [msg]
+    return messages
 
 
 def _get_chat_semaphore() -> asyncio.Semaphore:
@@ -101,10 +648,18 @@ class MessageExtractor:
     """消息内容提取器"""
 
     @staticmethod
-    def extract(messages: List[Dict[str, Any]]) -> tuple[str, List[str], List[str]]:
+    def extract(
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]] = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: bool = True,
+    ) -> tuple[str, List[Any], List[str]]:
         """从 OpenAI 消息格式提取内容，返回 (text, file_attachments, image_attachments)"""
+        if tools:
+            messages = format_tool_history(messages)
+
         texts = []
-        file_attachments: List[str] = []
+        file_attachments: List[Any] = []
         image_attachments: List[str] = []
         extracted = []
 
@@ -115,7 +670,90 @@ class MessageExtractor:
 
             if isinstance(content, str):
                 if content.strip():
-                    parts.append(content)
+                    text_to_add = content
+                    if role == "tool" and len(text_to_add) > 3000:
+                        text_to_add = (
+                            text_to_add[:1500] 
+                            + "\n\n... [Output Truncated for Conciseness] ...\n\n" 
+                            + text_to_add[-1000:]
+                        )
+                    parts.append(text_to_add)
+            elif isinstance(content, dict):
+                content = [content]
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type", "")
+
+                    if item_type == "text":
+                        if text := item.get("text", "").strip():
+                            parts.append(text)
+
+                    elif item_type == "image_url":
+                        image_data = item.get("image_url", {})
+                        url = image_data.get("url", "")
+                        file_id = _clean_id(
+                            image_data.get("grok_file_id")
+                            or image_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename"),
+                                    "mime_type": item.get("mime"),
+                                    "size": item.get("size"),
+                                }
+                            )
+                        elif url:
+                            image_attachments.append(
+                                {
+                                    "data": url,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename") or "image",
+                                    "mime_type": item.get("mime") or "image/jpeg",
+                                    "size": item.get("size"),
+                                }
+                            )
+
+                    elif item_type == "input_audio":
+                        audio_data = item.get("input_audio", {})
+                        data = audio_data.get("data", "")
+                        if data:
+                            file_attachments.append(data)
+
+                    elif item_type == "file":
+                        file_data = item.get("file", {})
+                        raw = file_data.get("file_data", "")
+                        file_id = _clean_id(
+                            file_data.get("grok_file_id")
+                            or file_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
+                        elif raw:
+                            file_attachments.append(
+                                {
+                                    "data": raw,
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                    "attachmentId": item.get("attachmentId"),
+                                }
+                            )
             elif isinstance(content, list):
                 for item in content:
                     item_type = item.get("type", "")
@@ -127,8 +765,32 @@ class MessageExtractor:
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
                         url = image_data.get("url", "")
-                        if url:
-                            image_attachments.append(url)
+                        file_id = _clean_id(
+                            image_data.get("grok_file_id")
+                            or image_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename"),
+                                    "mime_type": item.get("mime"),
+                                    "size": item.get("size"),
+                                }
+                            )
+                        elif url:
+                            image_attachments.append(
+                                {
+                                    "data": url,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename") or "image",
+                                    "mime_type": item.get("mime") or "image/jpeg",
+                                    "size": item.get("size"),
+                                }
+                            )
 
                     elif item_type == "input_audio":
                         audio_data = item.get("input_audio", {})
@@ -139,11 +801,63 @@ class MessageExtractor:
                     elif item_type == "file":
                         file_data = item.get("file", {})
                         raw = file_data.get("file_data", "")
-                        if raw:
-                            file_attachments.append(raw)
+                        file_id = _clean_id(
+                            file_data.get("grok_file_id")
+                            or file_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
+                        elif raw:
+                            file_attachments.append(
+                                {
+                                    "data": raw,
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                    "attachmentId": item.get("attachmentId"),
+                                }
+                            )
+
+            tool_calls = msg.get("tool_calls")
+            if role == "assistant" and not parts and isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function", {})
+                    if not isinstance(fn, dict):
+                        fn = {}
+                    name = fn.get("name") or call.get("name") or "tool"
+                    arguments = fn.get("arguments", "")
+                    if isinstance(arguments, (dict, list)):
+                        try:
+                            arguments = orjson.dumps(arguments).decode()
+                        except Exception:
+                            arguments = str(arguments)
+                    if not isinstance(arguments, str):
+                        arguments = str(arguments)
+                    arguments = arguments.strip()
+                    parts.append(f"[tool_call] {name} {arguments}".strip())
 
             if parts:
-                extracted.append({"role": role, "text": "\n".join(parts)})
+                role_label = role
+                if role == "tool":
+                    name = msg.get("name")
+                    if isinstance(name, str) and name.strip():
+                        role_label = f"--- Action Result: {name.strip()} ---"
+                        full_text = "\n".join(parts)
+                        if "exited with code" in full_text and "code 0" not in full_text:
+                            role_label += " [FAILED]"
+                extracted.append({"role": role_label, "text": "\n".join(parts)})
 
         # 找到最后一条 user 消息
         last_user_index = next(
@@ -160,7 +874,36 @@ class MessageExtractor:
             text = item["text"]
             texts.append(text if i == last_user_index else f"{role}: {text}")
 
-        return "\n\n".join(texts), file_attachments, image_attachments
+        combined = "\n\n".join(texts)
+
+        if (not combined.strip()) and (file_attachments or image_attachments):
+            combined = "Refer to the following content:"
+
+        if tools:
+            tool_prompt = build_tool_prompt(tools, tool_choice, parallel_tool_calls)
+            if tool_prompt:
+                # 注入 Few-Shot 引导以避免模型惯性，强化 Tool Calling 回语。
+                few_shot = (
+                    "\n\n--- CRITICAL: TOOL CALL REQUIREMENT ---\n"
+                    "Example:\n"
+                    "User: test.txt 里面有什么内容？\n"
+                    "Assistant: <tool_call>{\"name\": \"read\", \"arguments\": {\"path\": \"test.txt\"}}</tool_call>\n"
+                    "User: 【System Notification: Tool Execution Result - read】\nhello world\n"
+                    "Assistant: test.txt 的内容是 hello world。\n"
+                    "--- END EXAMPLE ---\n\n"
+                    "Important Guidelines:\n"
+                    "1. **Task Complete**: If the information you have (including tool execution results) is SUFFICIENT to answer the user, you MUST answer directly in human language. DO NOT call any tools.\n"
+                    "2. **More Tools Needed**: If it is INDISPENSABLE to use a tool, you MUST output ONLY the raw `<tool_call>` block without conversational narrative filler."
+                )
+                combined = f"{tool_prompt}{few_shot}\n\n{combined}"
+                # 尾插强化 (Tail Enforcement)
+                combined += (
+                    "\n\n--- Important Note ---\n"
+                    "- Only respond using the valid structural `<tool_call>` JSON tag if you need data from available tools.\n"
+                    "- Provide only one single execution block and wait for response without dialogue."
+                )
+
+        return combined, file_attachments, image_attachments
 
 
 class GrokChatService:
@@ -178,7 +921,8 @@ class GrokChatService:
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
         image_generation_count: int | None = None,
-        enable_image_streaming: bool | None = None,
+        conversation_id: str | None = None,
+        parent_response_id: str | None = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -191,9 +935,64 @@ class GrokChatService:
             f"attachments={len(file_attachments or [])}"
         )
 
-        browser = get_config("proxy.browser")
+        browser = get_config("proxy.browser") or "chrome136"
+        upstream_mode = _chat_upstream_mode()
+
+        browser_payload = AppChatReverse.build_payload(
+            message=message,
+            model=model,
+            mode=mode,
+            file_attachments=file_attachments,
+            tool_overrides=tool_overrides,
+            model_config_override=model_config_override,
+            image_generation_count=image_generation_count,
+            conversation_id=conversation_id,
+            parent_response_id=parent_response_id,
+        )
+
+        async def _browser_stream():
+            async with _get_chat_semaphore():
+                stream_response = request_browser_bridge(
+                    token,
+                    browser_payload,
+                    conversation_id=conversation_id or "",
+                )
+                logger.info(
+                    "Chat connected via browser bridge: "
+                    f"requested_model={requested_model or model}, "
+                    f"upstream_model={model}, mode={mode}, stream={stream}"
+                )
+                async for line in stream_response:
+                    yield line
 
         async def _stream():
+            should_try_browser = (
+                bridge_enabled()
+                and bridge_chat_first()
+                and upstream_mode in {"browser", "browser_fallback_http"}
+            )
+
+            if should_try_browser:
+                try:
+                    async for line in _browser_stream():
+                        yield line
+                    return
+                except UpstreamException as exc:
+                    if upstream_mode == "browser":
+                        raise
+                    logger.warning(
+                        "Browser bridge failed, falling back to HTTP upstream: "
+                        f"status={getattr(exc, 'status_code', None) or (exc.details or {}).get('status')}, "
+                        f"details={exc.details}"
+                    )
+
+            if upstream_mode == "browser" and not bridge_enabled():
+                raise UpstreamException(
+                    message="Browser bridge is disabled",
+                    details={"status": 503, "bridge_code": "bridge_disabled"},
+                    status_code=503,
+                )
+
             session = AsyncSession(impersonate=browser)
             try:
                 async with _get_chat_semaphore():
@@ -208,17 +1007,16 @@ class GrokChatService:
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
                         image_generation_count=image_generation_count,
-                        enable_image_streaming=enable_image_streaming,
+                        conversation_id=conversation_id,
+                        parent_response_id=parent_response_id,
                     )
                     logger.info(
-                        "Chat connected: "
+                        "Chat connected via HTTP reverse: "
                         f"requested_model={requested_model or model}, "
                         f"upstream_model={model}, mode={mode}, stream={stream}"
                     )
                     async for line in stream_response:
                         yield line
-            except Exception:
-                raise
             finally:
                 try:
                     await session.close()
@@ -236,6 +1034,10 @@ class GrokChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        tools: List[Dict[str, Any]] = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: bool = True,
+        provider_options: Dict[str, Any] | None = None,
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
@@ -244,8 +1046,27 @@ class GrokChatService:
 
         grok_model = model_info.grok_model
         mode = model_info.model_mode
+        reuse_conversation = _conversation_reuse_enabled(provider_options)
+        grok_options = _provider_grok_options(provider_options)
+        conversation_id = _clean_id(
+            grok_options.get("conversation_id") or grok_options.get("conversationId")
+        ) if reuse_conversation else ""
+        parent_response_id = _clean_id(
+            grok_options.get("parent_response_id") or grok_options.get("parentResponseId")
+        ) if reuse_conversation else ""
+        effective_messages = (
+            _latest_user_messages(messages)
+            if reuse_conversation and conversation_id
+            else messages
+        )
+
         # 提取消息和附件
-        message, file_attachments, image_attachments = MessageExtractor.extract(messages)
+        message, file_attachments, image_attachments = MessageExtractor.extract(
+            effective_messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+        )
         if not (message or "").strip() and (file_attachments or image_attachments):
             # 对齐官网行为：仅附件时仍发送非空 message，避免上游 400
             message = "参考以下内容："
@@ -259,16 +1080,47 @@ class GrokChatService:
         # 上传附件
         file_ids: List[str] = []
         image_ids: List[str] = []
+        uploaded_attachments: List[Dict[str, Any]] = []
         if file_attachments or image_attachments:
             upload_service = UploadService()
             try:
                 for attach_data in file_attachments:
-                    file_id, _ = await upload_service.upload_file(attach_data, token)
+                    existing_id = (
+                        _clean_id(attach_data.get("file_id"))
+                        if isinstance(attach_data, dict)
+                        else ""
+                    )
+                    if existing_id:
+                        file_ids.append(existing_id)
+                        continue
+                    file_id, file_uri = await upload_service.upload_file(attach_data, token)
                     file_ids.append(file_id)
+                    if isinstance(attach_data, dict) and attach_data.get("attachmentId"):
+                        uploaded_attachments.append(
+                            {
+                                "attachmentId": attach_data.get("attachmentId"),
+                                "fileId": file_id,
+                                "fileUri": file_uri,
+                                "name": attach_data.get("filename") or "",
+                                "mime": attach_data.get("mime_type") or "",
+                                "size": attach_data.get("size") or 0,
+                            }
+                        )
                     logger.debug(f"Attachment uploaded: type=file, file_id={file_id}")
                 for attach_data in image_attachments:
-                    file_id, _ = await upload_service.upload_file(attach_data, token)
+                    file_id, file_uri = await upload_service.upload_file(attach_data, token)
                     image_ids.append(file_id)
+                    if isinstance(attach_data, dict) and attach_data.get("attachmentId"):
+                        uploaded_attachments.append(
+                            {
+                                "attachmentId": attach_data.get("attachmentId"),
+                                "fileId": file_id,
+                                "fileUri": file_uri,
+                                "name": attach_data.get("filename") or "",
+                                "mime": attach_data.get("mime_type") or "",
+                                "size": attach_data.get("size") or 0,
+                            }
+                        )
                     logger.debug(f"Attachment uploaded: type=image, file_id={file_id}")
             finally:
                 await upload_service.close()
@@ -283,12 +1135,6 @@ class GrokChatService:
         if reasoning_effort is not None:
             model_config_override["reasoningEffort"] = reasoning_effort
 
-        # Passthrough mode: build tool_overrides for Grok API
-        tool_overrides_payload = None
-        # We need to extract tools from some upper context if passed, but since the upstream
-        # signature changed, we will just patch it carefully.
-        # Since this is a partial restore, we initialize to None and just pass it.
-
         response = await self.chat(
             token=token,
             message=message,
@@ -297,11 +1143,21 @@ class GrokChatService:
             mode=mode,
             stream=stream,
             file_attachments=all_attachments,
-            tool_overrides=tool_overrides_payload,
+            tool_overrides=None,
             model_config_override=model_config_override,
+            conversation_id=conversation_id,
+            parent_response_id=parent_response_id,
         )
 
-        return response, stream, model
+        request_metadata = {
+            "reuseConversation": bool(reuse_conversation),
+            "conversationId": conversation_id,
+            "parentResponseId": parent_response_id,
+            "uploadedAttachments": uploaded_attachments,
+            "sourcesMode": _sources_mode(provider_options),
+        }
+
+        return response, stream, model, request_metadata
 
 
 class ChatService:
@@ -315,6 +1171,10 @@ class ChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        tools: List[Dict[str, Any]] = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: bool = True,
+        provider_options: Dict[str, Any] | None = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -351,7 +1211,7 @@ class ChatService:
             try:
                 # 请求 Grok
                 service = GrokChatService()
-                response, _, model_name = await service.chat_openai(
+                response, _, model_name, request_metadata = await service.chat_openai(
                     token,
                     model,
                     messages,
@@ -359,19 +1219,36 @@ class ChatService:
                     reasoning_effort=reasoning_effort,
                     temperature=temperature,
                     top_p=top_p,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
+                    provider_options=provider_options,
                 )
 
                 # 处理响应
                 if is_stream:
                     logger.debug(f"Processing stream response: model={model}")
-                    processor = StreamProcessor(model_name, token, show_think)
+                    processor = StreamProcessor(
+                        model_name,
+                        token,
+                        show_think,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        request_metadata=request_metadata,
+                    )
                     return wrap_stream_with_usage(
                         processor.process(response), token_mgr, token, model
                     )
 
                 # 非流式
                 logger.debug(f"Processing non-stream response: model={model}")
-                result = await CollectProcessor(model_name, token).process(response)
+                result = await CollectProcessor(
+                    model_name,
+                    token,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    request_metadata=request_metadata,
+                ).process(response)
                 try:
                     model_info = ModelService.get(model)
                     effort = (
@@ -389,10 +1266,17 @@ class ChatService:
                 last_error = e
 
                 if rate_limited(e):
-                    # 配额不足，标记 token 为 cooling 并换 token 重试
-                    await token_mgr.mark_rate_limited(token)
+                    # 仅在确认对应模型额度耗尽时，才归零该额度窗口。
+                    error_code = str((e.details or {}).get("error_code") or "").strip()
+                    quota_mode = str((e.details or {}).get("quota_mode") or "").strip()
+                    if error_code == "quota_exhausted":
+                        await token_mgr.mark_rate_limited(
+                            token,
+                            quota_mode=quota_mode or ModelService.quota_mode_for_model(model),
+                        )
                     logger.warning(
-                        f"Token {token[:10]}... rate limited (429), "
+                        f"Token {token[:10]}... rate limited (429"
+                        f"{', quota_exhausted' if error_code == 'quota_exhausted' else ''}), "
                         f"trying next token (attempt {attempt + 1}/{max_token_retries})"
                     )
                     continue
@@ -414,11 +1298,22 @@ class ChatService:
 class StreamProcessor(proc_base.BaseProcessor):
     """Stream response processor."""
 
-    def __init__(self, model: str, token: str = "", show_think: bool = None):
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        show_think: bool = None,
+        tools: List[Dict[str, Any]] = None,
+        tool_choice: Any = None,
+        request_metadata: Dict[str, Any] | None = None,
+    ):
         super().__init__(model, token)
         self.response_id: str = None
+        self.rollout_id: str = ""
         self.fingerprint: str = ""
         self.think_opened: bool = False
+        self.think_closed_once: bool = False
+        self.image_think_active: bool = False
         self.role_sent: bool = False
         self.filter_tags = get_config("app.filter_tags")
         self.tool_usage_enabled = (
@@ -428,6 +1323,37 @@ class StreamProcessor(proc_base.BaseProcessor):
         self._tool_usage_buffer = ""
 
         self.show_think = bool(show_think)
+        self.tools = tools
+        self.tool_choice = tool_choice
+        self._tool_stream_enabled = bool(tools) and tool_choice != "none"
+        self._tool_state = "text"
+        self._tool_buffer = ""
+        self._tool_partial = ""
+        self._tool_calls_seen = False
+        self._tool_call_index = 0
+        self._source_groups: Dict[str, Dict[str, Any]] = {}
+        self._source_order: List[str] = []
+        self._citation_sources: List[Dict[str, str]] = []
+        self._image_sources: List[Dict[str, str]] = []
+        self._capture_seq: int = 0
+        self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
+        self._sources_mode = str(self._request_metadata.get("sourcesMode") or "compact")
+        self._conversation_id = _clean_id(self._request_metadata.get("conversationId"))
+        self._parent_response_id = _clean_id(self._request_metadata.get("parentResponseId"))
+        self._request_parent_response_id = self._parent_response_id
+        self._emitted_answer_text = ""
+        self._final_model_message = ""
+
+    def _grok_metadata(self, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        payload = {
+            "reuseConversation": bool(self._request_metadata.get("reuseConversation")),
+            "conversationId": self._conversation_id,
+            "parentResponseId": self._parent_response_id,
+            "uploadedAttachments": self._request_metadata.get("uploadedAttachments") or [],
+        }
+        if extra:
+            payload.update(extra)
+        return payload
 
     def _filter_tool_card(self, token: str) -> str:
         if not token or not self.tool_usage_enabled:
@@ -446,7 +1372,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                     return "".join(output_parts)
                 end_pos = end_idx + len(end_tag)
                 self._tool_usage_buffer += rest[:end_pos]
-                line = extract_tool_text(self._tool_usage_buffer)
+                line = extract_tool_text(self._tool_usage_buffer, self.rollout_id)
                 if line:
                     if output_parts and not output_parts[-1].endswith("\n"):
                         output_parts[-1] += "\n"
@@ -472,7 +1398,7 @@ class StreamProcessor(proc_base.BaseProcessor):
 
             end_pos = end_idx + len(end_tag)
             raw_card = rest[start_idx:end_pos]
-            line = extract_tool_text(raw_card)
+            line = extract_tool_text(raw_card, self.rollout_id)
             if line:
                 if output_parts and not output_parts[-1].endswith("\n"):
                     output_parts[-1] += "\n"
@@ -502,12 +1428,107 @@ class StreamProcessor(proc_base.BaseProcessor):
 
         return token
 
-    def _sse(self, content: str = "", role: str = None, finish: str = None) -> str:
+    def _with_tool_index(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+        tool_call = dict(tool_call or {})
+        tool_call["index"] = self._tool_call_index
+        self._tool_call_index += 1
+        return tool_call
+
+    @staticmethod
+    def _suffix_prefix(text: str, marker: str) -> int:
+        if not text or not marker:
+            return 0
+        max_len = min(len(text), len(marker) - 1)
+        for keep in range(max_len, 0, -1):
+            if text.endswith(marker[:keep]):
+                return keep
+        return 0
+
+    def _handle_tool_stream(self, chunk: str) -> list[tuple[str, Any]]:
+        if not chunk:
+            return []
+
+        start_tag = "<tool_call>"
+        end_tag = "</tool_call>"
+        events: list[tuple[str, Any]] = []
+        data = f"{self._tool_partial}{chunk}"
+        self._tool_partial = ""
+
+        while data:
+            if self._tool_state == "text":
+                start_idx = data.find(start_tag)
+                if start_idx == -1:
+                    keep = self._suffix_prefix(data, start_tag)
+                    emit = data[:-keep] if keep else data
+                    if emit:
+                        events.append(("text", emit))
+                    self._tool_partial = data[-keep:] if keep else ""
+                    break
+
+                before = data[:start_idx]
+                if before:
+                    events.append(("text", before))
+                data = data[start_idx + len(start_tag):]
+                self._tool_state = "tool"
+                continue
+
+            end_idx = data.find(end_tag)
+            if end_idx == -1:
+                keep = self._suffix_prefix(data, end_tag)
+                append = data[:-keep] if keep else data
+                if append:
+                    self._tool_buffer += append
+                self._tool_partial = data[-keep:] if keep else ""
+                break
+
+            self._tool_buffer += data[:end_idx]
+            data = data[end_idx + len(end_tag):]
+            tool_call = parse_tool_call_block(self._tool_buffer, self.tools)
+            if tool_call:
+                events.append(("tool", self._with_tool_index(tool_call)))
+                self._tool_calls_seen = True
+            self._tool_buffer = ""
+            self._tool_state = "text"
+
+        return events
+
+    def _flush_tool_stream(self) -> list[tuple[str, Any]]:
+        events: list[tuple[str, Any]] = []
+        if self._tool_state == "text":
+            if self._tool_partial:
+                events.append(("text", self._tool_partial))
+                self._tool_partial = ""
+            return events
+
+        raw = f"{self._tool_buffer}{self._tool_partial}"
+        tool_call = parse_tool_call_block(raw, self.tools)
+        if tool_call:
+            events.append(("tool", self._with_tool_index(tool_call)))
+            self._tool_calls_seen = True
+        elif raw:
+            events.append(("text", f"<tool_call>{raw}"))
+        self._tool_buffer = ""
+        self._tool_partial = ""
+        self._tool_state = "text"
+        return events
+
+    def _sse(
+        self,
+        content: str = "",
+        role: str = None,
+        finish: str = None,
+        tool_calls: list = None,
+        sources: Dict[str, Any] = None,
+        rendering: Dict[str, Any] = None,
+        grok: Dict[str, Any] = None,
+    ) -> str:
         """Build SSE response."""
         delta = {}
         if role:
             delta["role"] = role
             delta["content"] = ""
+        elif tool_calls is not None:
+            delta["tool_calls"] = tool_calls
         elif content:
             delta["content"] = content
 
@@ -521,7 +1542,180 @@ class StreamProcessor(proc_base.BaseProcessor):
                 {"index": 0, "delta": delta, "logprobs": None, "finish_reason": finish}
             ],
         }
+        if sources is not None:
+            chunk["sources"] = sources
+        if rendering is not None:
+            chunk["rendering"] = rendering
+        if grok is not None:
+            chunk["grok"] = grok
         return f"data: {orjson.dumps(chunk).decode()}\n\n"
+
+    def _ensure_source_group(
+        self, card_id: str, card: Dict[str, Any] | None = None
+    ) -> Dict[str, Any] | None:
+        if not card_id:
+            return None
+        group = self._source_groups.get(card_id)
+        if group is None and isinstance(card, dict):
+            group = _tool_card_to_source_group(card_id, card)
+            if group:
+                self._source_groups[card_id] = group
+                self._source_order.append(card_id)
+        return group
+
+    def _sources_payload(self) -> Dict[str, Any] | None:
+        groups = [
+            self._source_groups[group_id]
+            for group_id in self._source_order
+            if self._source_groups.get(group_id)
+        ]
+        payload = {
+            "groups": groups,
+            "citations": self._citation_sources,
+            "images": self._image_sources,
+        }
+        if payload["groups"] or payload["citations"] or payload["images"]:
+            if self._sources_mode == "full":
+                return payload
+            return _compact_sources_payload(payload)
+        return None
+
+    def _remember_final_model_message(self, message: Any) -> None:
+        if isinstance(message, str) and message.strip():
+            self._final_model_message = message
+
+    async def _emit_final_message_fallback(self) -> AsyncGenerator[str, None]:
+        final_message = self._final_model_message or ""
+        if not final_message.strip():
+            return
+
+        emitted = self._emitted_answer_text or ""
+        if not emitted.strip():
+            if self.think_opened:
+                async for chunk in self._close_think_block():
+                    yield chunk
+            self._remember_answer_text(final_message)
+            yield self._sse(final_message)
+            return
+
+        if final_message.startswith(emitted):
+            suffix = final_message[len(emitted):]
+            if suffix.strip():
+                if self.think_opened:
+                    async for chunk in self._close_think_block():
+                        yield chunk
+                self._remember_answer_text(suffix)
+                yield self._sse(suffix)
+
+    async def _close_think_block(self) -> AsyncGenerator[str, None]:
+        """Close the visible think block before emitting normal answer content."""
+        if self.think_opened:
+            yield self._sse("\n</think>\n")
+            self.think_opened = False
+            self.think_closed_once = True
+
+    def _remember_answer_text(self, content: str) -> None:
+        if content:
+            self._emitted_answer_text += content
+
+    def _find_follow_up_fallback(self, responses: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+        parent_id = _clean_id(self._request_parent_response_id)
+        if not parent_id:
+            return None
+
+        selected_user: Dict[str, Any] | None = None
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+            sender = str(item.get("sender") or "").lower()
+            if sender not in {"human", "user"}:
+                continue
+            if _clean_id(item.get("parentResponseId")) == parent_id:
+                selected_user = item
+
+        user_id = _clean_id((selected_user or {}).get("responseId"))
+        if not user_id:
+            return None
+
+        selected_assistant: Dict[str, Any] | None = None
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+            sender = str(item.get("sender") or "").lower()
+            if sender != "assistant":
+                continue
+            if _clean_id(item.get("parentResponseId")) == user_id:
+                selected_assistant = item
+        return selected_assistant
+
+    async def _emit_follow_up_fallback(self) -> AsyncGenerator[str, None]:
+        if self._emitted_answer_text.strip():
+            return
+        if not self._conversation_id or not self._request_parent_response_id:
+            return
+
+        assistant: Dict[str, Any] | None = None
+        emitted_content = ""
+        sent_rendering = False
+        sent_response_id = ""
+        browser = get_config("proxy.browser")
+        max_wait = max(6.0, float(get_config("chat.stream_timeout") or 60.0))
+        poll_interval = 0.5
+        max_attempts = max(1, int(max_wait / poll_interval))
+        async with AsyncSession(impersonate=browser) as session:
+            for attempt in range(max_attempts):
+                payload = await AppChatReverse.fetch_responses(
+                    session,
+                    self.token,
+                    self._conversation_id,
+                )
+                responses = payload.get("responses")
+                if isinstance(responses, list):
+                    assistant = self._find_follow_up_fallback(responses)
+                    if assistant:
+                        response_id = _clean_id(assistant.get("responseId"))
+                        if response_id and response_id != sent_response_id:
+                            sent_response_id = response_id
+                            self.response_id = response_id
+                            self._parent_response_id = response_id
+                            yield self._sse(grok=self._grok_metadata())
+
+                        if not self.role_sent:
+                            yield self._sse(role="assistant", grok=self._grok_metadata())
+                            self.role_sent = True
+
+                        if not sent_rendering:
+                            render_payload = extract_render_payload(assistant)
+                            if render_payload:
+                                render_payload = await _cache_render_files(
+                                    render_payload, self.token, self._get_dl()
+                                )
+                                yield self._sse(rendering=render_payload)
+                            sent_rendering = True
+
+                        content = str(assistant.get("message") or "")
+                        if content and content != emitted_content:
+                            if self.think_opened:
+                                async for chunk in self._close_think_block():
+                                    yield chunk
+                            if content.startswith(emitted_content):
+                                delta = content[len(emitted_content):]
+                            elif not emitted_content:
+                                delta = content
+                            else:
+                                delta = ""
+                            if delta:
+                                emitted_content = content
+                                self._remember_answer_text(delta)
+                                yield self._sse(delta)
+
+                        if content.strip() and not bool(assistant.get("partial")):
+                            return
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(poll_interval)
+
+        if not assistant:
+            return
 
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """Process stream response.
@@ -547,7 +1741,20 @@ class StreamProcessor(proc_base.BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                resp = data.get("result", {}).get("response", {})
+                result = data.get("result") if isinstance(data, dict) else None
+                conversation = result.get("conversation") if isinstance(result, dict) else None
+                if isinstance(conversation, dict):
+                    conversation_id = _clean_id(conversation.get("conversationId"))
+                    if conversation_id:
+                        self._conversation_id = conversation_id
+                        yield self._sse(grok=self._grok_metadata())
+                    continue
+
+                resp = _extract_stream_response(data)
+                if resp is None:
+                    continue
+                self._capture_seq += 1
+                _capture_app_chat_event(resp, self.model, "stream", self._capture_seq)
                 is_thinking = bool(resp.get("isThinking"))
                 # isThinking controls <think> tagging
                 # when absent, treat as False
@@ -556,20 +1763,20 @@ class StreamProcessor(proc_base.BaseProcessor):
                     self.fingerprint = llm.get("modelHash", "")
                 if rid := resp.get("responseId"):
                     self.response_id = rid
+                if rid := resp.get("rolloutId"):
+                    self.rollout_id = str(rid)
 
                 if not self.role_sent:
-                    yield self._sse(role="assistant")
+                    yield self._sse(role="assistant", grok=self._grok_metadata())
                     self.role_sent = True
 
                 if img := resp.get("streamingImageGenerationResponse"):
                     if not self.show_think:
                         continue
-                    if is_thinking and not self.think_opened:
+                    self.image_think_active = True
+                    if not self.think_opened:
                         yield self._sse("<think>\n")
                         self.think_opened = True
-                    if (not is_thinking) and self.think_opened:
-                        yield self._sse("\n</think>\n")
-                        self.think_opened = False
                     idx = img.get("imageIndex", 0) + 1
                     progress = img.get("progress", 0)
                     yield self._sse(
@@ -578,6 +1785,20 @@ class StreamProcessor(proc_base.BaseProcessor):
                     continue
 
                 if mr := resp.get("modelResponse"):
+                    self._remember_final_model_message(mr.get("message"))
+                    if response_id := _clean_id(mr.get("responseId")):
+                        self._parent_response_id = response_id
+                        yield self._sse(grok=self._grok_metadata())
+                    render_payload = extract_render_payload(mr)
+                    if render_payload:
+                        render_payload = await _cache_render_files(
+                            render_payload, self.token, self._get_dl()
+                        )
+                        yield self._sse(rendering=render_payload)
+                    if self.image_think_active and self.think_opened:
+                        async for chunk in self._close_think_block():
+                            yield chunk
+                    self.image_think_active = False
                     for url in proc_base._collect_images(mr):
                         parts = url.split("/")
                         img_id = parts[-2] if len(parts) >= 2 else "image"
@@ -603,38 +1824,124 @@ class StreamProcessor(proc_base.BaseProcessor):
                         except orjson.JSONDecodeError:
                             card_data = None
                         if isinstance(card_data, dict):
+                            attachments = _extract_card_attachment_sources([json_data])
+                            if attachments["citations"]:
+                                seen = {item.get("url") for item in self._citation_sources}
+                                for item in attachments["citations"]:
+                                    if item.get("url") and item.get("url") not in seen:
+                                        seen.add(item["url"])
+                                        self._citation_sources.append(item)
+                            if attachments["images"]:
+                                seen = {item.get("url") for item in self._image_sources}
+                                for item in attachments["images"]:
+                                    if item.get("url") and item.get("url") not in seen:
+                                        seen.add(item["url"])
+                                        self._image_sources.append(item)
                             image = card_data.get("image") or {}
                             original = image.get("original")
                             title = image.get("title") or ""
+                            image_chunk = (
+                                card_data.get("image_chunk")
+                                if isinstance(card_data.get("image_chunk"), dict)
+                                else {}
+                            )
+                            if not original and image_chunk:
+                                original = image_chunk.get("imageUrl")
+                                if not title:
+                                    title = image_chunk.get("imageTitle") or "Generated Image"
                             if original:
+                                async for chunk in self._close_think_block():
+                                    yield chunk
                                 title_safe = title.replace("\n", " ").strip()
-                                if title_safe:
-                                    yield self._sse(f"![{title_safe}]({original})\n")
+                                dl_service = getattr(self, "_get_dl", lambda: None)()
+                                if dl_service:
+                                    img_id = title_safe if title_safe else "image"
+                                    rendered = await dl_service.render_image(original, self.token, img_id)
+                                    yield self._sse(f"{rendered}\n")
                                 else:
-                                    yield self._sse(f"![image]({original})\n")
+                                    if not original.startswith("http"):
+                                        original = f"https://assets.grok.com/{original.lstrip('/')}"
+                                    img_id = title_safe if title_safe else "image"
+                                    yield self._sse(f"![{img_id}]({original})\n")
+                    continue
+
+                if tool_card := resp.get("toolUsageCard"):
+                    card_id = str(
+                        resp.get("toolUsageCardId") or tool_card.get("toolUsageCardId") or ""
+                    ).strip()
+                    self._ensure_source_group(card_id, tool_card)
+                    sources_payload = self._sources_payload()
+                    if sources_payload:
+                        yield self._sse(sources=sources_payload)
+
+                if resp.get("messageTag") == "raw_function_result":
+                    card_id = str(resp.get("toolUsageCardId") or "").strip()
+                    group = self._ensure_source_group(card_id)
+                    web_results = ((resp.get("webSearchResults") or {}).get("results")) or []
+                    normalized = _normalize_source_results(web_results)
+                    if group is not None and normalized:
+                        group["results"] = normalized
+                        sources_payload = self._sources_payload()
+                        if sources_payload:
+                            yield self._sse(sources=sources_payload)
                     continue
 
                 if (token := resp.get("token")) is not None:
                     if not token:
                         continue
+                    if is_thinking and self.think_closed_once and not self.image_think_active:
+                        continue
                     filtered = self._filter_token(token)
                     if not filtered:
                         continue
-                    if is_thinking:
+                    # 避免上游字面 <think> 标签与前端思考分段逻辑冲突，导致多段思考块
+                    filtered = re.sub(r"</?think>", "", filtered, flags=re.IGNORECASE)
+                    if not filtered:
+                        continue
+                    in_think = (
+                        (is_thinking and not self.think_closed_once)
+                        or self.image_think_active
+                    )
+                    if in_think:
                         if not self.show_think:
                             continue
                         if not self.think_opened:
                             yield self._sse("<think>\n")
                             self.think_opened = True
-                    else:
-                        if self.think_opened:
-                            yield self._sse("\n</think>\n")
-                            self.think_opened = False
+                        yield self._sse(filtered)
+                        continue
+                    if self.think_opened:
+                        async for chunk in self._close_think_block():
+                            yield chunk
+
+                    if self._tool_stream_enabled:
+                        for kind, payload in self._handle_tool_stream(filtered):
+                            if kind == "text":
+                                self._remember_answer_text(payload)
+                                yield self._sse(payload)
+                            elif kind == "tool":
+                                yield self._sse(tool_calls=[payload])
+                        continue
+
+                    self._remember_answer_text(filtered)
                     yield self._sse(filtered)
 
+            async for chunk in self._emit_follow_up_fallback():
+                yield chunk
+            async for chunk in self._emit_final_message_fallback():
+                yield chunk
             if self.think_opened:
-                yield self._sse("</think>\n")
-            yield self._sse(finish="stop")
+                async for chunk in self._close_think_block():
+                    yield chunk
+            if self._tool_stream_enabled:
+                for kind, payload in self._flush_tool_stream():
+                    if kind == "text":
+                        self._remember_answer_text(payload)
+                        yield self._sse(payload)
+                    elif kind == "tool":
+                        yield self._sse(tool_calls=[payload])
+            finish_reason = "tool_calls" if self._tool_stream_enabled and self._tool_calls_seen else "stop"
+            yield self._sse(finish=finish_reason, sources=self._sources_payload())
             yield "data: [DONE]\n\n"
         except asyncio.CancelledError:
             logger.debug("Stream cancelled by client", extra={"model": self.model})
@@ -665,7 +1972,19 @@ class StreamProcessor(proc_base.BaseProcessor):
             if not self.role_sent:
                 yield self._sse(role="assistant")
                 self.role_sent = True
-            yield self._sse("请求上游失败，请稍后重试。")
+                yield self._sse("请求上游失败，请稍后重试。")
+                yield self._sse(finish="stop")
+                yield "data: [DONE]\n\n"
+                return
+        except UpstreamException as e:
+            logger.error(
+                f"Stream upstream error: {e}",
+                extra={"model": self.model, "error_type": type(e).__name__},
+            )
+            if not self.role_sent:
+                yield self._sse(role="assistant")
+                self.role_sent = True
+            yield self._sse(_describe_upstream_chat_error(e))
             yield self._sse(finish="stop")
             yield "data: [DONE]\n\n"
             return
@@ -688,9 +2007,20 @@ class StreamProcessor(proc_base.BaseProcessor):
 class CollectProcessor(proc_base.BaseProcessor):
     """Non-stream response processor."""
 
-    def __init__(self, model: str, token: str = ""):
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        tools: List[Dict[str, Any]] = None,
+        tool_choice: Any = None,
+        request_metadata: Dict[str, Any] | None = None,
+    ):
         super().__init__(model, token)
         self.filter_tags = get_config("app.filter_tags")
+        self.tools = tools
+        self.tool_choice = tool_choice
+        self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
+        self._sources_mode = str(self._request_metadata.get("sourcesMode") or "compact")
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -699,11 +2029,17 @@ class CollectProcessor(proc_base.BaseProcessor):
 
         result = content
         if "xai:tool_usage_card" in self.filter_tags:
+            rollout_id = ""
+            rollout_match = re.search(
+                r"<rolloutId>(.*?)</rolloutId>", result, flags=re.DOTALL
+            )
+            if rollout_match:
+                rollout_id = rollout_match.group(1).strip()
             result = re.sub(
                 r"<xai:tool_usage_card[^>]*>.*?</xai:tool_usage_card>",
                 lambda match: (
-                    f"{extract_tool_text(match.group(0))}\n"
-                    if extract_tool_text(match.group(0))
+                    f"{extract_tool_text(match.group(0), rollout_id)}\n"
+                    if extract_tool_text(match.group(0), rollout_id)
                     else ""
                 ),
                 result,
@@ -723,8 +2059,10 @@ class CollectProcessor(proc_base.BaseProcessor):
         response_id = ""
         fingerprint = ""
         content = ""
+        final_model_response: Dict[str, Any] = {}
         idle_timeout = get_config("chat.stream_timeout")
         first_item_timeout = get_config("chat.first_token_timeout")
+        capture_seq = 0
 
         try:
             async for line in proc_base._with_idle_timeout(
@@ -738,13 +2076,28 @@ class CollectProcessor(proc_base.BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
-                resp = data.get("result", {}).get("response", {})
+                result = data.get("result") if isinstance(data, dict) else None
+                conversation = result.get("conversation") if isinstance(result, dict) else None
+                if isinstance(conversation, dict):
+                    conversation_id = _clean_id(conversation.get("conversationId"))
+                    if conversation_id:
+                        self._request_metadata["conversationId"] = conversation_id
+                    continue
+
+                resp = _extract_stream_response(data)
+                if resp is None:
+                    continue
+                capture_seq += 1
+                _capture_app_chat_event(resp, self.model, "collect", capture_seq)
 
                 if (llm := resp.get("llmInfo")) and not fingerprint:
                     fingerprint = llm.get("modelHash", "")
 
                 if mr := resp.get("modelResponse"):
+                    final_model_response = mr
                     response_id = mr.get("responseId", "")
+                    if response_id:
+                        self._request_metadata["parentResponseId"] = response_id
                     content = mr.get("message", "")
 
                     card_map: dict[str, tuple[str, str]] = {}
@@ -817,6 +2170,12 @@ class CollectProcessor(proc_base.BaseProcessor):
                 )
             else:
                 logger.error(f"Collect request error: {e}", extra={"model": self.model})
+        except UpstreamException as e:
+            logger.error(
+                f"Collect upstream error: {e}",
+                extra={"model": self.model, "error_type": type(e).__name__},
+            )
+            content = _describe_upstream_chat_error(e)
         except Exception as e:
             logger.error(
                 f"Collect processing error: {e}",
@@ -827,7 +2186,37 @@ class CollectProcessor(proc_base.BaseProcessor):
 
         content = self._filter_content(content)
 
-        return {
+        finish_reason = "stop"
+        tool_calls_result = None
+        if self.tools and self.tool_choice != "none":
+            text_content, tool_calls_list = parse_tool_calls(content, self.tools)
+            if tool_calls_list:
+                tool_calls_result = tool_calls_list
+                content = text_content
+                finish_reason = "tool_calls"
+
+        sources_payload = extract_sources_payload(final_model_response)
+        if sources_payload and self._sources_mode != "full":
+            sources_payload = _compact_sources_payload(sources_payload)
+        render_payload = extract_render_payload(final_model_response)
+        if render_payload:
+            render_payload = await _cache_render_files(
+                render_payload, self.token, self._get_dl()
+            )
+        message_obj = {
+            "role": "assistant",
+            "content": content,
+            "refusal": None,
+            "annotations": [],
+        }
+        if tool_calls_result:
+            message_obj["tool_calls"] = tool_calls_result
+        if sources_payload:
+            message_obj["sources"] = sources_payload
+        if render_payload:
+            message_obj["rendering"] = render_payload
+
+        result_payload = {
             "id": response_id,
             "object": "chat.completion",
             "created": self.created,
@@ -836,13 +2225,8 @@ class CollectProcessor(proc_base.BaseProcessor):
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": content,
-                        "refusal": None,
-                        "annotations": [],
-                    },
-                    "finish_reason": "stop",
+                    "message": message_obj,
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
@@ -862,6 +2246,9 @@ class CollectProcessor(proc_base.BaseProcessor):
                 },
             },
         }
+        if self._request_metadata:
+            result_payload["grok"] = self._request_metadata
+        return result_payload
 
 
 __all__ = [
