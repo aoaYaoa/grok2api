@@ -50,6 +50,15 @@ from app.api.pages import router as pages_router
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """让浏览器校验静态资源，避免同版本部署继续使用旧文件。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
+
 # 初始化日志
 setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"), json_console=False, file_logging=True
@@ -244,7 +253,7 @@ def create_app() -> FastAPI:
     # 静态文件服务
     static_dir = APP_DIR / "static"
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+        app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
 
     # 注册管理与公共路由
     app.include_router(admin_router, prefix="/v1/admin")

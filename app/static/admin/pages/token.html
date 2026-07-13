@@ -52,7 +52,7 @@
       <div class="h-px bg-[var(--border)] my-6"></div>
 
       <!-- Statistics -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6" id="stats-container">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4 mb-6" id="stats-container">
         <!-- Row 1 -->
         <div class="stat-card">
           <div class="stat-value" id="stat-total">-</div>
@@ -68,21 +68,29 @@
         </div>
         <div class="stat-card">
           <div class="stat-value text-red-600" id="stat-invalid">-</div>
-          <div class="stat-label">Token 失效</div>
+          <div class="stat-label">异常账户</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value text-gray-400" id="stat-disabled">-</div>
+          <div class="stat-label">禁用账户</div>
         </div>
 
         <!-- Row 2 -->
         <div class="stat-card">
           <div class="stat-value" id="stat-chat-quota">-</div>
-          <div class="stat-label">Chat 剩余</div>
+          <div class="stat-label">Auto 剩余</div>
         </div>
         <div class="stat-card">
           <div class="stat-value text-blue-600" id="stat-image-quota">-</div>
-          <div class="stat-label">Image 剩余</div>
+          <div class="stat-label">Fast 剩余</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value text-gray-400" id="stat-video-quota">无法统计</div>
-          <div class="stat-label">Video 剩余</div>
+          <div class="stat-value text-gray-400" id="stat-video-quota">-</div>
+          <div class="stat-label">Expert 剩余</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value text-orange-500" id="stat-heavy-quota">-</div>
+          <div class="stat-label">Heavy 剩余</div>
         </div>
         <div class="stat-card">
           <div class="stat-value" id="stat-total-calls">-</div>
@@ -129,7 +137,7 @@
               <th class="w-48 text-left">Token</th>
               <th class="w-24">类型</th>
               <th class="w-24">状态</th>
-              <th class="w-20">额度</th>
+              <th class="w-48">额度信息</th>
               <th class="text-left">备注</th>
               <th class="w-32 text-center">操作</th>
             </tr>
@@ -229,6 +237,7 @@
           <select id="import-pool" class="geist-input">
             <option value="ssoBasic">ssoBasic</option>
             <option value="ssoSuper">ssoSuper</option>
+            <option value="ssoHeavy">ssoHeavy</option>
           </select>
         </div>
         <div>
@@ -269,6 +278,7 @@
           <select id="edit-pool" class="geist-input">
             <option value="ssoBasic">ssoBasic</option>
             <option value="ssoSuper">ssoSuper</option>
+            <option value="ssoHeavy">ssoHeavy</option>
           </select>
         </div>
         <div>

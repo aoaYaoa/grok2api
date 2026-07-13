@@ -17,9 +17,99 @@ const byId = (id) => document.getElementById(id);
 const qsa = (selector) => document.querySelectorAll(selector);
 const DEFAULT_QUOTA_BASIC = 80;
 const DEFAULT_QUOTA_SUPER = 140;
+const DEFAULT_QUOTA_HEAVY = 400;
+const QUOTA_MODES = ['auto', 'fast', 'expert', 'heavy', 'grok_4_3'];
 
 function getDefaultQuotaForPool(pool) {
+  if (pool === 'ssoHeavy') return DEFAULT_QUOTA_HEAVY;
   return pool === 'ssoSuper' ? DEFAULT_QUOTA_SUPER : DEFAULT_QUOTA_BASIC;
+}
+
+function buildDefaultQuotaSet(pool, quota = null) {
+  const remaining = Number.isFinite(Number(quota)) ? Number(quota) : getDefaultQuotaForPool(pool);
+  const base = {
+    auto: { remaining, total: remaining },
+    fast: { remaining, total: remaining },
+    expert: { remaining, total: remaining }
+  };
+  if (pool === 'ssoSuper' || pool === 'ssoHeavy') {
+    base.grok_4_3 = { remaining, total: remaining };
+  }
+  if (pool === 'ssoHeavy') {
+    base.heavy = { remaining: 20, total: 20 };
+  }
+  return base;
+}
+
+function buildEmptyQuotaSet(pool) {
+  const base = {
+    auto: { remaining: 0, total: 0 },
+    fast: { remaining: 0, total: 0 },
+    expert: { remaining: 0, total: 0 }
+  };
+  if (pool === 'ssoSuper' || pool === 'ssoHeavy') {
+    base.grok_4_3 = { remaining: 0, total: 0 };
+  }
+  if (pool === 'ssoHeavy') {
+    base.heavy = { remaining: 0, total: 0 };
+  }
+  return base;
+}
+
+function normalizeQuota(quota, pool) {
+  if (quota && typeof quota === 'object' && !Array.isArray(quota)) {
+    if (QUOTA_MODES.some(mode => Object.prototype.hasOwnProperty.call(quota, mode))) {
+      const normalized = {};
+      QUOTA_MODES.forEach(mode => {
+        if (quota[mode] && typeof quota[mode] === 'object') {
+          normalized[mode] = {
+            remaining: Number(quota[mode].remaining || 0),
+            total: Number(quota[mode].total ?? quota[mode].remaining ?? 0),
+            window_seconds: quota[mode].window_seconds ?? null,
+            reset_at: quota[mode].reset_at ?? null,
+            synced_at: quota[mode].synced_at ?? null,
+            source: quota[mode].source ?? null,
+          };
+        }
+      });
+      return { ...buildEmptyQuotaSet(pool), ...normalized };
+    }
+    if (Object.prototype.hasOwnProperty.call(quota, 'remaining') || Object.prototype.hasOwnProperty.call(quota, 'total')) {
+      return buildDefaultQuotaSet(pool, Number(quota.remaining ?? quota.total ?? 0));
+    }
+  }
+  return buildDefaultQuotaSet(pool, Number(quota || 0));
+}
+
+function quotaRemaining(quota, mode = 'auto') {
+  return Number(quota?.[mode]?.remaining || 0);
+}
+
+function primaryQuota(quota) {
+  return quotaRemaining(quota, 'auto');
+}
+
+function quotaForEdit(currentQuota, currentPool, newPool, newAutoQuota) {
+  const targetPool = newPool || currentPool || 'ssoBasic';
+  const normalized = normalizeQuota(currentQuota, currentPool);
+  if (targetPool === currentPool && Number(newAutoQuota) === primaryQuota(normalized)) {
+    return normalized;
+  }
+  return buildDefaultQuotaSet(targetPool, newAutoQuota);
+}
+
+function renderQuotaPills(quota) {
+  const pills = [
+    ['Auto', quotaRemaining(quota, 'auto'), 'badge-blue'],
+    ['Fast', quotaRemaining(quota, 'fast'), 'badge-green'],
+    ['Expert', quotaRemaining(quota, 'expert'), 'badge-purple'],
+    ['Heavy', quotaRemaining(quota, 'heavy'), 'badge-orange'],
+    ['G4', quotaRemaining(quota, 'grok_4_3'), 'badge-pink'],
+  ];
+  return pills
+    .filter(([, value]) => value > 0)
+    .map(([label, value, cls]) => `<span class="badge ${cls}">${label}:${value}</span>`)
+    .join(' ') || '<span class="badge badge-gray">无额度</span>';
 }
 
 function setText(id, text) {
@@ -156,11 +246,11 @@ function processTokens(data) {
       tokens.forEach(t => {
         // Normalize
         const tObj = typeof t === 'string'
-          ? { token: t, status: 'active', quota: 0, note: '', use_count: 0, tags: [] }
+          ? { token: t, status: 'active', quota: buildDefaultQuotaSet(pool, 0), note: '', use_count: 0, tags: [] }
           : {
             token: t.token,
             status: t.status || 'active',
-            quota: t.quota || 0,
+            quota: normalizeQuota(t.quota, pool),
             note: t.note || '',
             fail_count: t.fail_count || 0,
             use_count: t.use_count || 0,
@@ -184,17 +274,26 @@ function updateStats(data) {
   let activeTokens = 0;
   let coolingTokens = 0;
   let invalidTokens = 0;
+  let disabledTokens = 0;
   let nsfwTokens = 0;
   let noNsfwTokens = 0;
-  let chatQuota = 0;
+  let autoQuota = 0;
+  let fastQuota = 0;
+  let expertQuota = 0;
+  let heavyQuota = 0;
   let totalCalls = 0;
 
   flatTokens.forEach(t => {
     if (t.status === 'active') {
       activeTokens++;
-      chatQuota += t.quota;
+      autoQuota += quotaRemaining(t.quota, 'auto');
+      fastQuota += quotaRemaining(t.quota, 'fast');
+      expertQuota += quotaRemaining(t.quota, 'expert');
+      heavyQuota += quotaRemaining(t.quota, 'heavy');
     } else if (t.status === 'cooling') {
       coolingTokens++;
+    } else if (t.status === 'disabled') {
+      disabledTokens++;
     } else {
       invalidTokens++;
     }
@@ -206,15 +305,16 @@ function updateStats(data) {
     totalCalls += Number(t.use_count || 0);
   });
 
-  const imageQuota = Math.floor(chatQuota / 2);
-
   setText('stat-total', totalTokens.toLocaleString());
   setText('stat-active', activeTokens.toLocaleString());
   setText('stat-cooling', coolingTokens.toLocaleString());
   setText('stat-invalid', invalidTokens.toLocaleString());
+  setText('stat-disabled', disabledTokens.toLocaleString());
 
-  setText('stat-chat-quota', chatQuota.toLocaleString());
-  setText('stat-image-quota', imageQuota.toLocaleString());
+  setText('stat-chat-quota', autoQuota.toLocaleString());
+  setText('stat-image-quota', fastQuota.toLocaleString());
+  setText('stat-video-quota', expertQuota.toLocaleString());
+  setText('stat-heavy-quota', heavyQuota.toLocaleString());
   setText('stat-total-calls', totalCalls.toLocaleString());
 
   updateTabCounts({
@@ -302,7 +402,7 @@ function renderTable() {
     // Quota (Center)
     const tdQuota = document.createElement('td');
     tdQuota.className = 'text-center font-mono text-xs';
-    tdQuota.innerText = item.quota;
+    tdQuota.innerHTML = `<div class="flex flex-wrap items-center justify-center gap-1">${renderQuotaPills(item.quota)}</div>`;
 
     // Note (Left)
     const tdNote = document.createElement('td');
@@ -499,7 +599,7 @@ function openEditModal(index) {
     byId('edit-original-token').value = item.token;
     byId('edit-original-pool').value = item.pool;
     byId('edit-pool').value = item.pool;
-    byId('edit-quota').value = item.quota;
+    byId('edit-quota').value = primaryQuota(item.quota);
     byId('edit-note').value = item.note;
     document.querySelector('#edit-modal h3').innerText = '编辑 Token';
   } else {
@@ -555,8 +655,9 @@ async function saveEdit() {
     token = item.token;
 
     // Update flatTokens first to reflect UI
+    const previousPool = item.pool;
     item.pool = newPool || 'ssoBasic';
-    item.quota = newQuota;
+    item.quota = quotaForEdit(item.quota, previousPool, item.pool, newQuota);
     item.note = newNote;
   } else {
     // Creating new
@@ -571,7 +672,7 @@ async function saveEdit() {
     flatTokens.push({
       token: token,
       pool: newPool || 'ssoBasic',
-      quota: newQuota,
+      quota: buildDefaultQuotaSet(newPool || 'ssoBasic', newQuota),
       note: newNote,
       status: 'active', // default
       use_count: 0,
@@ -605,7 +706,7 @@ async function syncToServer() {
     const payload = {
       token: t.token,
       status: t.status,
-      quota: t.quota,
+      quota: normalizeQuota(t.quota, t.pool),
       note: t.note,
       fail_count: t.fail_count,
       use_count: t.use_count || 0,
@@ -660,7 +761,7 @@ async function submitImport() {
         token: t,
         pool: pool,
         status: 'active',
-        quota: defaultQuota,
+        quota: buildDefaultQuotaSet(pool, defaultQuota),
         note: '',
         tags: [],
         fail_count: 0,
@@ -1124,7 +1225,7 @@ function getFilteredTokens() {
   return flatTokens.filter(t => {
     if (currentFilter === 'active') return t.status === 'active';
     if (currentFilter === 'cooling') return t.status === 'cooling';
-    if (currentFilter === 'expired') return t.status !== 'active' && t.status !== 'cooling';
+    if (currentFilter === 'expired') return t.status !== 'active' && t.status !== 'cooling' && t.status !== 'disabled';
     if (currentFilter === 'nsfw') return t.tags && t.tags.includes('nsfw');
     if (currentFilter === 'no-nsfw') return !t.tags || !t.tags.includes('nsfw');
     return true;
@@ -1136,7 +1237,7 @@ function updateTabCounts(counts) {
     all: flatTokens.length,
     active: flatTokens.filter(t => t.status === 'active').length,
     cooling: flatTokens.filter(t => t.status === 'cooling').length,
-    expired: flatTokens.filter(t => t.status !== 'active' && t.status !== 'cooling').length,
+    expired: flatTokens.filter(t => t.status !== 'active' && t.status !== 'cooling' && t.status !== 'disabled').length,
     nsfw: flatTokens.filter(t => t.tags && t.tags.includes('nsfw')).length,
     'no-nsfw': flatTokens.filter(t => !t.tags || !t.tags.includes('nsfw')).length
   };

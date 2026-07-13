@@ -55,7 +55,7 @@ from app.api.pages import public as public_pages
 from app.api.pages import admin as admin_pages
 from app.api.pages import helpers as page_helpers
 from app.api.pages.helpers import get_asset_version, render_html_page
-from main import create_app
+from main import NoCacheStaticFiles, create_app
 
 
 class PageRouteHelpersTests(unittest.TestCase):
@@ -116,6 +116,17 @@ class PageRouteHelpersTests(unittest.TestCase):
             self.assertIn(get_asset_version(), body)
             self.assertNotIn('__ASSET_VERSION__', body)
 
+    def test_render_html_page_disables_browser_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'public/pages/demo.html'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('demo')
+
+            response = render_html_page(root, 'public/pages/demo.html')
+
+            self.assertEqual(response.headers.get('cache-control'), 'no-store, max-age=0')
+
     def test_admin_page_response_returns_html_response_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,7 +171,14 @@ class PageRouteHelpersTests(unittest.TestCase):
     def test_get_asset_version_defaults_to_project_version(self):
         with patch.dict(os.environ, {}, clear=True):
             with patch.object(page_helpers, '_get_git_short_sha', return_value=''):
-                self.assertEqual(page_helpers.get_asset_version(), '0.3.0')
+                with patch.object(page_helpers, '_get_static_fingerprint', return_value=''):
+                    self.assertEqual(page_helpers.get_asset_version(), '0.3.0')
+
+    def test_get_asset_version_uses_static_fingerprint_without_git(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(page_helpers, '_get_git_short_sha', return_value=''):
+                with patch.object(page_helpers, '_get_static_fingerprint', return_value='assets123'):
+                    self.assertEqual(page_helpers.get_asset_version(), '0.3.0+assets123')
 
     def test_get_asset_version_uses_git_sha_when_available(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -194,6 +212,21 @@ class PublicEntryAssetRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ctx.exception.status_code, 404)
             finally:
                 public_pages.STATIC_DIR = original
+
+
+class StaticAssetCacheHeadersTests(unittest.IsolatedAsyncioTestCase):
+    async def test_static_assets_are_revalidated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'demo.js').write_text('console.log("demo")')
+            static_files = NoCacheStaticFiles(directory=root)
+
+            response = await static_files.get_response(
+                'demo.js',
+                {'method': 'GET', 'headers': []},
+            )
+
+            self.assertEqual(response.headers.get('cache-control'), 'no-cache')
 
 
 if __name__ == '__main__':

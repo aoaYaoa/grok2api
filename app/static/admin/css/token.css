@@ -246,6 +246,16 @@
       color: #9333ea;
     }
 
+    .badge-blue {
+      background: #eff6ff;
+      color: #2563eb;
+    }
+
+    .badge-pink {
+      background: #fdf2f8;
+      color: #db2777;
+    }
+
     .checkbox {
       width: 12px;
       height: 12px;
