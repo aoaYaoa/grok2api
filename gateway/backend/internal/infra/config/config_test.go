@@ -21,6 +21,9 @@ secrets:
 bootstrapAdmin:
   username: "admin"
   password: "password123"
+legacy:
+  assetVersion: "test-assets"
+  publicEnabled: true
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -59,6 +62,13 @@ bootstrapAdmin:
 	expectedFrontendPath := filepath.Join(dir, "frontend", "dist")
 	if cfg.Frontend.StaticPath != expectedFrontendPath {
 		t.Fatalf("frontend static path = %q, want %q", cfg.Frontend.StaticPath, expectedFrontendPath)
+	}
+	expectedLegacyPath := filepath.Join(dir, "legacy-static")
+	if cfg.Legacy.StaticPath != expectedLegacyPath {
+		t.Fatalf("legacy static path = %q, want %q", cfg.Legacy.StaticPath, expectedLegacyPath)
+	}
+	if cfg.Legacy.AssetVersion != "test-assets" || !cfg.Legacy.PublicEnabled {
+		t.Fatalf("legacy config = %#v", cfg.Legacy)
 	}
 }
 

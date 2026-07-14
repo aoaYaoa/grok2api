@@ -36,13 +36,16 @@ import (
 )
 
 type Dependencies struct {
-	Logger             *slog.Logger
-	RequestTimeout     time.Duration
-	MaxBodyBytes       int64
-	SecureCookies      bool
-	SwaggerEnabled     bool
-	PublicAPIBaseURL   string
-	FrontendStaticPath string
+	Logger              *slog.Logger
+	RequestTimeout      time.Duration
+	MaxBodyBytes        int64
+	SecureCookies       bool
+	SwaggerEnabled      bool
+	PublicAPIBaseURL    string
+	FrontendStaticPath  string
+	LegacyStaticPath    string
+	LegacyAssetVersion  string
+	LegacyPublicEnabled bool
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
 	Readiness    func(context.Context) ReadinessSnapshot
 	Ready        func(context.Context) bool
@@ -157,6 +160,7 @@ func New(deps Dependencies) *gin.Engine {
 	}
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
 	inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes).Register(v1)
+	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
 }

@@ -1,163 +1,124 @@
-# Grok2API Go Compatibility Integration Design
+# Grok2API Go Replacement Design
 
 **Date:** 2026-07-14
 
 ## Objective
 
-Integrate the latest `chenyme/grok2api` Go gateway without replacing or degrading the customized Python application. The existing public pages, admin pages, quota presentation, media workflows, browser-session behavior, and compatibility APIs remain available at their current URLs. The new Go dashboard, account pool, model routes, client keys, audits, documentation, settings, and standard APIs are added as real working capabilities.
+Replace the Python runtime with the latest `chenyme/grok2api` Go backend while preserving every customized HTML/CSS/JS page and the workflows behind those pages. Go is the only application backend in the final image. The existing production deployment remains unchanged until a Go-only canary passes automated, browser, persistence, and real-account generation checks.
 
 ## Non-Negotiable Constraints
 
 - Do not modify or deploy `grok2api-xianyudaxian`.
-- Do not replace the existing `/chat`, `/imagine`, `/imagine-workbench`, `/video`, `/nsfw`, `/voice`, `/admin/token`, `/admin/config`, or `/admin/cache` pages.
-- Preserve the backend behavior required by those pages, including parent-post reuse, multi-reference image editing, NSFW routing, video extension, video rename, long-duration chaining, SSE progress, cache access, and file serving.
-- Deploy a single-instance stack with SQLite and an in-memory runtime store. Do not add Redis.
-- Keep the current production version available until the replacement passes local and server-side real-generation checks.
+- Preserve `/login`, `/chat`, `/imagine`, `/imagine-workbench`, `/video`, `/nsfw`, `/voice`, `/admin/login`, `/admin/token`, `/admin/config`, and `/admin/cache`.
+- Preserve the page behavior behind those URLs, including SSE progress, image editing, parent-post reuse, NSFW generation, video extension and chaining, rename, cache access, and quota display.
+- The final runtime contains Go only. Python may be read as migration reference but is not built, started, proxied, or deployed.
+- Use SQLite plus in-memory runtime state. Do not add Redis.
 - Never commit SSO credentials, browser cookies, encryption keys, databases, or production configuration.
 
-## Chosen Architecture
+## Source Layout
 
-The repository will contain two application runtimes behind one edge proxy:
+- `gateway/` is the reviewed snapshot of upstream commit `dd6624c` plus bounded compatibility changes.
+- `app/static/` remains the source of the customized legacy pages and assets.
+- The Go build copies those assets and serves them directly.
+- New compatibility handlers live in the Go transport layer and call Go application services rather than invoking Python or shelling out to a Python process.
 
-1. `grok2api-python` remains the compatibility and custom-workflow application.
-2. `grok2api-go` contains a vendored snapshot of the current `chenyme/main` Go backend and React frontend.
-3. `grok2api-edge` is the only externally published HTTP service and routes requests to the correct runtime.
-4. The existing WARP service remains the shared egress proxy. FlareSolverr remains optional and is not duplicated.
+## Runtime Architecture
 
-The Go source is stored below a dedicated `gateway/` directory so future upstream updates can be reviewed as a bounded subtree. The existing Python files stay at their current paths.
+The final stack has one application service:
+
+1. `grok2api_go` serves the upstream React management app, standard APIs, customized pages, legacy-compatible APIs, media files, health checks, and PWA assets.
+2. WARP remains the egress proxy where required.
+3. FlareSolverr remains optional and is not duplicated.
+
+An edge proxy is unnecessary for route ownership once Go serves every route. If Nginx remains for production TLS or buffering behavior, it has only one upstream: Go.
 
 ## Route Ownership
 
-The edge proxy applies the following stable ownership rules:
+| Route | Go behavior |
+| --- | --- |
+| `/`, public page routes, `/static/*`, `/manifest.webmanifest`, `/sw.js`, `/favicon.ico` | Serve preserved customized assets with asset-version replacement and no-store page headers |
+| `/admin/*` | Serve preserved admin pages and legacy-compatible admin APIs |
+| `/gateway/*` | Serve the upstream React management application |
+| `/v1/*` | Serve standard upstream APIs plus exact legacy compatibility routes used by preserved pages |
+| `/api/admin/v1/*` | Serve upstream Go management APIs |
+| `/v1/files/*` | Serve persisted image, video, and audio files safely |
+| `/health`, `/healthz`, `/readyz` | Report the Go-only runtime and storage readiness |
 
-| Route | Owner | Purpose |
-| --- | --- | --- |
-| `/`, `/login`, `/chat`, `/imagine`, `/imagine-workbench`, `/video`, `/nsfw`, `/voice` | Python | Existing public experience |
-| `/admin`, `/admin/login`, `/admin/token`, `/admin/config`, `/admin/cache` | Python | Existing optimized administration |
-| `/v1/public/*`, `/v1/admin/*`, `/v1/files/*` | Python | Existing page and management APIs |
-| Existing custom video, NSFW, parent-post, cache, media, and compatibility paths | Python | Features not represented by the upstream Go API |
-| `/gateway/*` | Go frontend | New dashboard and management pages |
-| `/api/admin/v1/*` | Go backend | New management API |
-| `/gateway/v1/*` | Go backend with `/gateway` stripped | New standard gateway API without taking over the existing `/v1` contract |
-| `/health` | Python | Existing health contract |
-| `/gateway/healthz`, `/gateway/readyz` | Go | New gateway health contracts |
+## Compatibility Strategy
 
-The Go React router and asset base are configured for `/gateway`. Navigation links from the existing admin header open the new dashboard, accounts, models, client keys, audits, docs, and settings pages without removing the current Token, Config, and Cache entries.
+The browser pages remain unchanged unless a small client adjustment is required to match a stronger Go contract. Each page request is classified into one of three groups:
 
-## Request Capability Routing
+1. Direct mapping to an existing Go handler, such as models, chat completions, image generation/editing, and asynchronous video generation.
+2. A thin compatibility handler that translates the legacy request/response shape to an existing Go application service.
+3. A missing custom workflow that must be ported to Go, such as legacy SSE orchestration, video chaining/extension, rename, cache operations, prompt enhancement, or voice token handling.
 
-The first production release does not redirect the existing external `/v1/*` endpoints to Go. This avoids changing working clients before parity is proven.
+Compatibility handlers must not proxy to Python. Accepted generation work has one owner and one task ID so retries do not duplicate quota consumption.
 
-The compatibility layer classifies requests explicitly:
+## Accounts And Session Longevity
 
-- Standard Chat Completions, Responses, Messages, image generation, image editing, and asynchronous video generation can be exercised through `/gateway/v1/*`.
-- Parent-post image continuation, outpainting workflows, multi-step workbench behavior, NSFW generation, current video SSE, long-duration chaining, video extension, rename, voice, local cache, and current file URLs stay on Python.
-- A request accepted by one runtime is never replayed automatically to the other runtime. This prevents duplicate generation and quota consumption.
-- A later release may selectively route standard existing `/v1` requests to Go only after contract tests and real production checks prove compatibility.
+The five Web SSO accounts are imported directly into Go SQLite at deployment time. There is no Python peer database and no synchronization protocol.
 
-## Account Synchronization
-
-Web SSO credentials must be imported once and remain usable by both runtimes. Each runtime keeps its native storage, while a private synchronization contract keeps account mutations aligned.
-
-- Python remains capable of using Web SSO credentials for custom media workflows and Browser Bridge.
-- Go stores its encrypted account copy in SQLite for the new account pool and standard APIs.
-- A shared `GATEWAY_SYNC_SECRET` authenticates container-internal synchronization endpoints. These endpoints are not routed by the public edge proxy.
-- Account identity is mapped with a stable credential fingerprint and provider, not by exposing plaintext credentials in logs or mapping files.
-- Import, enable, disable, metadata update, and delete operations enqueue an idempotent sync operation to the peer runtime.
-- Sync operations include an origin marker so peer updates do not loop back.
-- Failed sync operations remain pending and are retried with bounded backoff. The UI shows local state, peer state, last successful sync time, and the latest failure reason.
-- Existing production tokens are migrated at deployment time from the server data volume into Go SQLite through the private import path. No secret material enters Git.
-- Grok Build OAuth accounts remain Go-only because the Python custom workflows do not consume them and Go can refresh them natively.
-
-## Session Longevity
-
-Each Web SSO account gets an isolated persistent browser profile and cookie state below the data volume. Profiles must survive application and container restarts.
-
-- Cloudflare cookie refresh merges only Cloudflare-related cookie fields and must not replace SSO cookies.
-- Health and quota probes use bounded intervals and per-account cooldowns.
-- Authentication, quota, Cloudflare, moderation, network, and timeout failures are classified separately.
-- A capability failure disables or cools down only the affected capability where possible; it does not immediately disable every use of the account.
-- Invalid accounts leave the active pool and show a clear re-login requirement instead of repeatedly producing generic `401` errors.
-- Explicit logout, password changes, or upstream security revocation cannot be reversed by the application. These cases require a new SSO credential.
+- Store encrypted Web SSO credentials in SQLite.
+- Keep persistent per-account browser/cookie state under the Go data volume when browser-assisted refresh is used.
+- Merge Cloudflare cookies without overwriting SSO cookies.
+- Classify authentication, Cloudflare, quota, moderation, timeout, and network failures separately.
+- Cool down only the affected account or capability when possible.
+- Mark truly revoked credentials as requiring re-login instead of repeatedly returning a generic `401`.
+- Browser logout, password change, or upstream security revocation still requires importing a fresh credential.
 
 ## Quota Presentation
 
-The existing `/admin/token` page remains the primary compact token view and keeps its current styling and controls.
+The preserved `/admin/token` page remains the compact account view and uses Go management data.
 
-- Normalize scalar and object quota responses before rendering.
-- Show Basic, Super, Heavy, image, and video capability values independently when available.
-- Display `未返回` for missing upstream values instead of inventing allowance, rendering objects, or producing `NaN`.
-- Aggregate only enabled accounts.
-- Display Go peer sync state and last successful quota refresh without turning the page into the new React account screen.
-- The Go account page remains available for detailed account, billing, model capability, and concurrency management.
+- Normalize scalar and object quota responses.
+- Show Basic, Super, Heavy, image, and video values independently when available.
+- Show `未返回` for missing upstream values instead of inventing allowance, printing objects, or producing `NaN`.
+- Aggregate enabled accounts only.
+- Keep the upstream `/gateway/accounts` page for detailed account, billing, model capability, and concurrency management.
 
 ## Error Handling
 
-Both runtimes expose a common user-facing error taxonomy:
+Legacy and standard APIs map failures to a common taxonomy: `auth_invalid`, `permission_denied`, `quota_exhausted`, `account_cooling`, `egress_blocked`, `moderated`, `generation_timeout`, and `upstream_protocol_error`.
 
-- `auth_invalid`: upstream credential revoked or invalid.
-- `permission_denied`: account tier or capability restriction.
-- `quota_exhausted`: quota unavailable.
-- `account_cooling`: temporary cooldown or concurrency gate.
-- `egress_blocked`: proxy, Cloudflare, or network path failure.
-- `moderated`: upstream content moderation rejection.
-- `generation_timeout`: accepted work did not complete before its deadline.
-- `upstream_protocol_error`: malformed or incompatible upstream response.
+Streaming endpoints keep SSE heartbeats. Timeouts preserve accepted task IDs for later polling. Logs redact credentials, cookies, authorization headers, and secret-bearing request bodies.
 
-Streaming endpoints retain SSE keepalive events. Accepted asynchronous work preserves its task ID on timeout so the client can continue polling. Diagnostic logs redact credentials, cookies, authorization headers, and request bodies that may contain secrets.
+## Storage And Configuration
 
-## Storage and Configuration
+- Go uses SQLite and memory; Redis is absent from configuration and Compose.
+- Media, browser profiles, SQLite, logs, and production config use persistent server-side paths.
+- The Go image contains the upstream React build and preserved `app/static` assets.
+- Generated JWT, encryption, admin, and account secrets remain outside Git.
 
-- Python continues using its current local data and log directories.
-- Go uses SQLite at a persistent path and the memory runtime store.
-- Go media uses a persistent local directory.
-- Both services receive the same WARP SOCKS address where required.
-- Generated JWT secrets, credential encryption keys, bootstrap admin credentials, sync secrets, databases, tokens, and browser profiles are supplied by server-side environment/config files excluded from Git.
-- Docker Compose health checks gate the edge proxy and deployment verification.
+## Verification
 
-## Test Strategy
+Required checks before deployment:
 
-The repository starts from a historically non-green Python baseline: some committed tests describe functionality removed or changed by commit `1538fe2`, while the current production service is operational for its exercised paths. This integration must not claim a clean baseline without distinguishing these historical failures.
+- Go unit and contract tests for every compatibility route.
+- Frontend lint/build and router base-path tests.
+- Static page/API inventory tests that fail when a page starts calling an unregistered endpoint.
+- Go-only Docker build, Compose validation, health, restart, persistence, and explicit no-Python/no-Redis assertions.
+- Desktop and mobile browser checks for every preserved page and upstream management page.
+- Five-account import, quota display, and restart persistence.
+- Real Chat, Image, Image Edit, Video, NSFW, parent-post, video-extension, and voice checks where the account supports them.
 
-Required automated checks:
+Historical Python test failures are reference information only; the final acceptance suite runs against Go and the preserved browser assets.
 
-- Existing route, page asset, quota rendering, Browser Bridge, image, video, NSFW, and compatibility tests relevant to preserved behavior.
-- New edge route tests proving old URLs stay on Python and `/gateway` routes reach Go.
-- Go backend `go test ./...`, `go vet ./...`, and binary build.
-- React lint and production build with `/gateway` base-path assertions.
-- Account sync tests for import, update, delete, idempotency, origin-loop prevention, retry, and redaction.
-- Contract tests for Chat, image generation/edit, and asynchronous video APIs through `/gateway/v1`.
-- Docker health, persistence, restart, and no-Redis checks.
+## Deployment And Rollback
 
-Required browser and real-account checks:
-
-- Desktop and mobile screenshots of every preserved public page and the modified admin navigation.
-- Existing Token, Config, and Cache operations.
-- New dashboard, accounts, models, keys, audits, docs, and settings pages.
-- Five-account status and quota synchronization.
-- Real Chat, Image, Image Edit, Video, NSFW, parent-post, and video-extension requests through the intended runtime.
-- Container restart followed by account, cookie, page, and media persistence checks.
-
-## Deployment and Rollback
-
-1. Implement and test on an isolated branch and local ports.
-2. Build immutable Python, Go, frontend, and edge images.
-3. Push the verified commit to the configured Git repository.
-4. Back up `/root/grok2api`, production configuration, token data, browser profiles, SQLite, and media before server changes.
-5. Start the new stack on non-production ports using copied production secrets and data.
-6. Run health checks and real Chat, Image, and Video generation against the canary stack.
-7. Switch the server edge route only after canary success.
-8. Verify public pages, admin pages, new gateway pages, APIs, logs, and persistence after the switch.
-9. Keep the old container and commit `9e1e808` available until the observation window completes.
-10. Roll back by restoring the previous edge target and data snapshot; do not attempt destructive in-place database downgrades.
+1. Complete and verify the Go-only stack in the isolated integration worktree and local canary port.
+2. Push the verified commit without credentials or generated data.
+3. Back up `/root/grok2api`, current production configuration, tokens, browser profiles, logs, and media.
+4. Start the Go-only server canary on a separate port and import the five current tokens into Go SQLite.
+5. Verify pages, quotas, persistence, Chat, Image, and Video against the server canary.
+6. Switch the public upstream only after the canary passes.
+7. Keep commit `9e1e808` and its data snapshot available for rollback. Do not perform destructive database downgrade operations.
 
 ## Acceptance Criteria
 
-- No existing page or customized workflow is removed.
-- New upstream management pages are available below `/gateway` and backed by the Go service.
-- The Go service uses SQLite and memory, with no Redis dependency.
-- Existing public and management URLs preserve their behavior.
-- Five Web SSO accounts have understandable health, quota, and synchronization status.
-- Real Chat, Image, and Video requests succeed on the server after deployment.
-- Account or capability failures no longer surface only as generic `401` messages.
-- The deployment has a tested rollback to commit `9e1e808`.
+- Go is the only application runtime in the deployed stack.
+- No customized page or required workflow is removed or left with broken controls.
+- The new upstream dashboard and management pages work below `/gateway`.
+- SQLite and memory are used with no Redis dependency.
+- The five Web SSO accounts persist across restarts and expose understandable health/quota state.
+- Real server Chat, Image, and Video generation pass before cutover.
+- `grok2api-xianyudaxian` remains untouched.

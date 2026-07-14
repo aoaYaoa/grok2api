@@ -17,14 +17,13 @@ func registerFrontend(router *gin.Engine, staticPath string) {
 		return
 	}
 	files := http.FileServer(http.Dir(root))
-	router.NoRoute(func(c *gin.Context) {
-		requestPath := c.Request.URL.Path
-		if (c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead) || isBackendPath(requestPath) {
-			c.Status(http.StatusNotFound)
-			return
-		}
+	router.GET("/gateway", func(c *gin.Context) {
+		c.Redirect(http.StatusPermanentRedirect, "/gateway/")
+	})
+	handler := func(c *gin.Context) {
+		requestPath := c.Param("filepath")
 		if filePath, exists := frontendFile(root, requestPath); exists {
-			if strings.HasPrefix(path.Clean(requestPath), "/assets/") {
+			if strings.HasPrefix(path.Clean("/"+requestPath), "/assets/") {
 				c.Header("Cache-Control", "public, max-age=31536000, immutable")
 			} else {
 				c.Header("Cache-Control", "no-cache")
@@ -39,7 +38,9 @@ func registerFrontend(router *gin.Engine, staticPath string) {
 		}
 		c.Header("Cache-Control", "no-cache")
 		http.ServeFile(c.Writer, c.Request, indexPath)
-	})
+	}
+	router.GET("/gateway/*filepath", handler)
+	router.HEAD("/gateway/*filepath", handler)
 }
 
 func frontendRoot(staticPath string) (string, string, bool) {
@@ -78,14 +79,4 @@ func frontendFile(root, requestPath string) (string, bool) {
 		return "", false
 	}
 	return relative, true
-}
-
-func isBackendPath(value string) bool {
-	cleanPath := path.Clean("/" + value)
-	for _, prefix := range []string{"/api", "/v1", "/swagger"} {
-		if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix+"/") {
-			return true
-		}
-	}
-	return cleanPath == "/healthz" || cleanPath == "/readyz"
 }

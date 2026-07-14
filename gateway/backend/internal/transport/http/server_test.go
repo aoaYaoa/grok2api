@@ -93,9 +93,9 @@ func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 		body        string
 		cachePrefix string
 	}{
-		{path: "/assets/app.js", status: http.StatusOK, body: "console.log('app')", cachePrefix: "public"},
-		{path: "/dashboard", status: http.StatusOK, body: "<html>app</html>", cachePrefix: "no-cache"},
-		{path: "/assets/missing.js", status: http.StatusNotFound},
+		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "console.log('app')", cachePrefix: "public"},
+		{path: "/gateway/dashboard", status: http.StatusOK, body: "<html>app</html>", cachePrefix: "no-cache"},
+		{path: "/gateway/assets/missing.js", status: http.StatusNotFound},
 		{path: "/api/admin/v1/missing", status: http.StatusNotFound},
 		{path: "/swagger/index.html", status: http.StatusNotFound},
 	} {
@@ -111,6 +111,107 @@ func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 			}
 			if test.cachePrefix != "" && !strings.HasPrefix(recorder.Header().Get("Cache-Control"), test.cachePrefix) {
 				t.Fatalf("cache-control = %q", recorder.Header().Get("Cache-Control"))
+			}
+		})
+	}
+}
+
+func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
+	frontendRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(frontendRoot, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(frontendRoot, "index.html"), []byte("<html>gateway</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(frontendRoot, "assets", "app.js"), []byte("console.log('gateway')"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyRoot := t.TempDir()
+	for _, directory := range []string{
+		"public/pages",
+		"public",
+		"admin/pages",
+		"common/img/favicon",
+		"common/js",
+	} {
+		if err := os.MkdirAll(filepath.Join(legacyRoot, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		"public/pages/login.html":             `<script src="/static/common/js/app.js?v=__ASSET_VERSION__"></script>`,
+		"public/pages/chat.html":              "<html>chat</html>",
+		"public/pages/imagine.html":           "<html>imagine</html>",
+		"public/pages/imagine_workbench.html": "<html>workbench</html>",
+		"public/pages/video.html":             "<html>video</html>",
+		"public/pages/nsfw.html":              "<html>nsfw</html>",
+		"public/pages/voice.html":             "<html>voice</html>",
+		"admin/pages/login.html":              "<html>admin login</html>",
+		"admin/pages/token.html":              "<html>admin token</html>",
+		"admin/pages/config.html":             "<html>admin config</html>",
+		"admin/pages/cache.html":              "<html>admin cache</html>",
+		"public/manifest.webmanifest":         `{"name":"legacy"}`,
+		"public/sw.js":                        "self.addEventListener('install', () => {})",
+		"common/img/favicon/favicon.ico":      "icon",
+		"common/js/app.js":                    "console.log('legacy')",
+	}
+	for relativePath, content := range files {
+		if err := os.WriteFile(filepath.Join(legacyRoot, relativePath), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	router := New(Dependencies{
+		Logger:              slog.Default(),
+		RequestTimeout:      time.Second,
+		MaxBodyBytes:        1024,
+		FrontendStaticPath:  frontendRoot,
+		LegacyStaticPath:    legacyRoot,
+		LegacyAssetVersion:  "test-version",
+		LegacyPublicEnabled: true,
+	})
+
+	tests := []struct {
+		path        string
+		status      int
+		body        string
+		location    string
+		cache       string
+		contentType string
+	}{
+		{path: "/", status: http.StatusTemporaryRedirect, location: "/login"},
+		{path: "/login", status: http.StatusOK, body: "v=test-version", cache: "no-store"},
+		{path: "/chat", status: http.StatusOK, body: "<html>chat</html>", cache: "no-store"},
+		{path: "/admin", status: http.StatusTemporaryRedirect, location: "/admin/login"},
+		{path: "/admin/token", status: http.StatusOK, body: "admin token", cache: "no-store"},
+		{path: "/static/common/js/app.js", status: http.StatusOK, body: "legacy", cache: "no-cache"},
+		{path: "/manifest.webmanifest", status: http.StatusOK, body: "legacy", contentType: "application/manifest+json"},
+		{path: "/sw.js", status: http.StatusOK, body: "install", contentType: "application/javascript"},
+		{path: "/favicon.ico", status: http.StatusOK, body: "icon", contentType: "image/x-icon"},
+		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "gateway", cache: "public"},
+		{path: "/gateway/dashboard", status: http.StatusOK, body: "<html>gateway</html>", cache: "no-cache"},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.status, recorder.Body.String())
+			}
+			if test.body != "" && !strings.Contains(recorder.Body.String(), test.body) {
+				t.Fatalf("body = %q, want substring %q", recorder.Body.String(), test.body)
+			}
+			if test.location != "" && recorder.Header().Get("Location") != test.location {
+				t.Fatalf("location = %q, want %q", recorder.Header().Get("Location"), test.location)
+			}
+			if test.cache != "" && !strings.HasPrefix(recorder.Header().Get("Cache-Control"), test.cache) {
+				t.Fatalf("cache-control = %q, want prefix %q", recorder.Header().Get("Cache-Control"), test.cache)
+			}
+			if test.contentType != "" && !strings.HasPrefix(recorder.Header().Get("Content-Type"), test.contentType) {
+				t.Fatalf("content-type = %q, want prefix %q", recorder.Header().Get("Content-Type"), test.contentType)
 			}
 		})
 	}

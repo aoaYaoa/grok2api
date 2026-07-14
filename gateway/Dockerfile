@@ -7,7 +7,7 @@ FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS frontend-builder
 WORKDIR /src/frontend
 RUN corepack enable
 
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+COPY gateway/frontend/package.json gateway/frontend/pnpm-lock.yaml ./
 RUN --mount=type=cache,id=grok2api-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
     pnpm fetch --frozen-lockfile
@@ -16,9 +16,9 @@ RUN --mount=type=cache,id=grok2api-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
     pnpm install --offline --frozen-lockfile
 
-COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json ./
-COPY frontend/public ./public
-COPY frontend/src ./src
+COPY gateway/frontend/index.html gateway/frontend/vite.config.ts gateway/frontend/tsconfig.json gateway/frontend/tsconfig.app.json gateway/frontend/tsconfig.node.json ./
+COPY gateway/frontend/public ./public
+COPY gateway/frontend/src ./src
 RUN --mount=type=cache,id=grok2api-tsc,target=/src/frontend/.cache,sharing=locked \
     pnpm build
 
@@ -31,13 +31,13 @@ ARG TARGETARCH
 WORKDIR /src/backend
 RUN apk add --no-cache ca-certificates git
 
-COPY backend/go.mod backend/go.sum ./
+COPY gateway/backend/go.mod gateway/backend/go.sum ./
 RUN --mount=type=cache,id=grok2api-go-mod,target=/go/pkg/mod,sharing=locked \
     go mod download
 
-COPY backend/cmd ./cmd
-COPY backend/internal ./internal
-COPY backend/docs/docs.go ./docs/docs.go
+COPY gateway/backend/cmd ./cmd
+COPY gateway/backend/internal ./internal
+COPY gateway/backend/docs/docs.go ./docs/docs.go
 RUN --mount=type=cache,id=grok2api-go-mod,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=grok2api-go-build,target=/root/.cache/go-build,sharing=locked \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
@@ -59,7 +59,8 @@ WORKDIR /app
 
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
-COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/grok2api-entrypoint
+COPY app/static /app/legacy-static
+COPY --chmod=0755 gateway/docker/entrypoint.sh /usr/local/bin/grok2api-entrypoint
 
 EXPOSE 8000
 

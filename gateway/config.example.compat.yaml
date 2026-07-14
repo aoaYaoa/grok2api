@@ -14,8 +14,13 @@ bootstrapAdmin:
   password: "replace-with-a-strong-password"
 
 frontend:
-  publicApiBaseURL: "http://127.0.0.1:18002/gateway"
+  publicApiBaseURL: "http://127.0.0.1:18002"
   staticPath: "/app/frontend/dist"
+
+legacy:
+  staticPath: "/app/legacy-static"
+  assetVersion: "go"
+  publicEnabled: true
 
 database:
   driver: sqlite

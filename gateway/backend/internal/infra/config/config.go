@@ -39,6 +39,7 @@ const (
 type Config struct {
 	Server            ServerConfig            `yaml:"server"`
 	Frontend          FrontendConfig          `yaml:"frontend"`
+	Legacy            LegacyConfig            `yaml:"legacy"`
 	Database          DatabaseConfig          `yaml:"database"`
 	RuntimeStore      RuntimeStoreConfig      `yaml:"runtimeStore"`
 	Auth              AuthConfig              `yaml:"auth"`
@@ -63,6 +64,12 @@ type ServerConfig struct {
 type FrontendConfig struct {
 	PublicAPIBaseURL string `yaml:"publicApiBaseURL"`
 	StaticPath       string `yaml:"staticPath"`
+}
+
+type LegacyConfig struct {
+	StaticPath    string `yaml:"staticPath"`
+	AssetVersion  string `yaml:"assetVersion"`
+	PublicEnabled bool   `yaml:"publicEnabled"`
 }
 
 type DatabaseConfig struct {
@@ -263,6 +270,10 @@ func resolveRelativePaths(cfg *Config, configPath string) error {
 	if staticPath != "" && !filepath.IsAbs(staticPath) {
 		cfg.Frontend.StaticPath = filepath.Clean(filepath.Join(baseDir, staticPath))
 	}
+	legacyStaticPath := strings.TrimSpace(cfg.Legacy.StaticPath)
+	if legacyStaticPath != "" && !filepath.IsAbs(legacyStaticPath) {
+		cfg.Legacy.StaticPath = filepath.Clean(filepath.Join(baseDir, legacyStaticPath))
+	}
 	return nil
 }
 
@@ -415,6 +426,7 @@ func defaultConfig() Config {
 			RequestTimeout: Duration(2 * time.Hour),
 		},
 		Frontend: FrontendConfig{PublicAPIBaseURL: "http://127.0.0.1:8000", StaticPath: "./frontend/dist"},
+		Legacy:   LegacyConfig{StaticPath: "./legacy-static", AssetVersion: "dev", PublicEnabled: true},
 		Database: DatabaseConfig{
 			Driver:   "sqlite",
 			SQLite:   SQLiteDatabaseConfig{Path: "./data/backend.db"},

@@ -1,66 +1,14 @@
 services:
-  grok2api_edge:
-    image: nginx:1.27-alpine
-    ports:
-      - "${GROK2API_PORT:-18002}:8000"
-    volumes:
-      - ./nginx/conf/hybrid.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      grok2api_python:
-        condition: service_healthy
-      grok2api_go:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          wget -qO- http://127.0.0.1:8000/health >/dev/null &&
-          wget -qO- http://127.0.0.1:8000/gateway/healthz >/dev/null
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-
-  grok2api_python:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: grok2api-python-local:latest
-    environment:
-      TZ: Asia/Shanghai
-      LOG_LEVEL: INFO
-      SERVER_PORT: 8000
-      SERVER_WORKERS: 1
-      SERVER_STORAGE_TYPE: local
-      APP_ASSET_VERSION: ${APP_ASSET_VERSION:-}
-    expose:
-      - "8000"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./app/static:/app/app/static
-    depends_on:
-      warp:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-    restart: unless-stopped
-
   grok2api_go:
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
     image: grok2api-go-local:latest
     environment:
       TZ: Asia/Shanghai
       GROK2API_CONFIG_SOURCE: /run/grok2api/config.yaml
-    expose:
-      - "8000"
+    ports:
+      - "${GROK2API_PORT:-18002}:8000"
     volumes:
       - type: bind
         source: ./gateway-config/config.yaml
@@ -94,6 +42,7 @@ services:
 
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
+    profiles: ["flaresolverr"]
     environment:
       TZ: Asia/Shanghai
       LOG_LEVEL: info
