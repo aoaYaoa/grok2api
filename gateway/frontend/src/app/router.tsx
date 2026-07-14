@@ -1,11 +1,11 @@
-import { Navigate, createBrowserRouter } from "react-router-dom";
+import { Navigate, createBrowserRouter, type RouteObject } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
 import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredDashboardPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage } from "@/app/deferred-pages";
 import { gatewayBasename, gatewayRoutePaths } from "@/app/gateway-paths.mjs";
 import { LoginPage } from "@/features/auth/login-page";
 
-export const router = createBrowserRouter([
+export const gatewayRouterRoutes: RouteObject[] = [
   {
     element: <AnonymousBoundary />,
     children: [{ path: gatewayRoutePaths.login, element: <LoginPage /> }],
@@ -30,4 +30,10 @@ export const router = createBrowserRouter([
     ],
   },
   { path: "*", element: <Navigate to={gatewayRoutePaths.dashboard} replace /> },
-], { basename: gatewayBasename });
+];
+
+export const gatewayRouterOptions = { basename: gatewayBasename } as const;
+
+export function createGatewayRouter() {
+  return createBrowserRouter(gatewayRouterRoutes, gatewayRouterOptions);
+}
