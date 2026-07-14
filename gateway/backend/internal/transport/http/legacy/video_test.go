@@ -18,8 +18,14 @@ import (
 )
 
 type fakeLegacyVideoGateway struct {
-	created []gateway.VideoInput
-	polls   map[string]int
+	created   []gateway.VideoInput
+	polls     map[string]int
+	cancelled []string
+}
+
+func (f *fakeLegacyVideoGateway) CancelVideo(_ context.Context, id string, _ clientkeydomain.Key) (mediadomain.Job, error) {
+	f.cancelled = append(f.cancelled, id)
+	return mediadomain.Job{ID: id, Status: mediadomain.StatusFailed, ErrorCode: "cancelled"}, nil
 }
 
 func (f *fakeLegacyVideoGateway) GenerateImage(context.Context, gateway.ImageGenerationInput) (*gateway.Result, error) {
@@ -117,7 +123,7 @@ func TestVideoExtensionIsRejectedUntilNativeGoPortExists(t *testing.T) {
 	}
 }
 
-func TestVideoStopRemovesLegacyPollingSession(t *testing.T) {
+func TestVideoStopCancelsPersistentJobAndRemovesLegacyPollingSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	videoGateway := &fakeLegacyVideoGateway{}
@@ -142,6 +148,9 @@ func TestVideoStopRemovesLegacyPollingSession(t *testing.T) {
 	router.ServeHTTP(stopRecorder, stopRequest)
 	if stopRecorder.Code != http.StatusOK || !strings.Contains(stopRecorder.Body.String(), `"removed":1`) {
 		t.Fatalf("stop status=%d body=%s", stopRecorder.Code, stopRecorder.Body.String())
+	}
+	if len(videoGateway.cancelled) != 1 || videoGateway.cancelled[0] != "video-job-1" {
+		t.Fatalf("cancelled=%v", videoGateway.cancelled)
 	}
 
 	sseRequest := httptest.NewRequest(http.MethodGet, "/v1/public/video/sse?task_id="+startResponse.TaskID+"&public_key=g2-direct-key", nil)

@@ -18,6 +18,7 @@ import (
 type VideoGateway interface {
 	CreateVideo(context.Context, gateway.VideoInput) (mediadomain.Job, error)
 	GetVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
+	CancelVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
 }
 
 type videoTask struct {
@@ -194,8 +195,20 @@ func (h *Handler) videoStop(c *gin.Context) {
 		return
 	}
 	removed := 0
+	clientValue, exists := c.Get(middleware.ClientKey)
+	clientKey, valid := clientValue.(clientkeydomain.Key)
+	if !exists || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
+		return
+	}
 	for _, taskID := range request.TaskIDs {
-		if h.dropVideoTask(strings.TrimSpace(taskID)) {
+		taskID = strings.TrimSpace(taskID)
+		task := h.getVideoTask(taskID)
+		if task == nil {
+			continue
+		}
+		_, _ = h.videoGateway.CancelVideo(c.Request.Context(), task.jobID, clientKey)
+		if h.dropVideoTask(taskID) {
 			removed++
 		}
 	}

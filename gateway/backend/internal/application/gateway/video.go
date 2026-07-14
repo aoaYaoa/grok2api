@@ -103,6 +103,47 @@ func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (m
 	return job, nil
 }
 
+func (s *Service) CancelVideo(ctx context.Context, id string, key clientkey.Key) (media.Job, error) {
+	if s.mediaJobs == nil {
+		return media.Job{}, ErrResponseNotFound
+	}
+	job, err := s.mediaJobs.GetMediaJob(ctx, id, key.ID)
+	if err != nil {
+		return media.Job{}, ErrResponseNotFound
+	}
+	if job.Status == media.StatusCompleted || job.Status == media.StatusFailed {
+		return job, nil
+	}
+	s.mediaMu.Lock()
+	if s.mediaCancelled == nil {
+		s.mediaCancelled = make(map[string]bool)
+	}
+	s.mediaCancelled[id] = true
+	cancel := s.mediaCancels[id]
+	s.mediaMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	now := time.Now().UTC()
+	job.Status = media.StatusFailed
+	job.ErrorCode = "cancelled"
+	job.ErrorMessage = "任务已取消"
+	job.LeaseUntil = nil
+	job.ClaimToken = ""
+	job.UpdatedAt = now
+	job.CompletedAt = &now
+	if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
+		return media.Job{}, err
+	}
+	s.cancelBillingReservation("video_usage_" + job.ID)
+	time.AfterFunc(videoJobLease, func() {
+		s.mediaMu.Lock()
+		delete(s.mediaCancelled, id)
+		s.mediaMu.Unlock()
+	})
+	return job, nil
+}
+
 func (s *Service) RecoverVideoJobs(ctx context.Context) error {
 	if s.mediaJobs == nil {
 		return nil
@@ -236,6 +277,23 @@ func (s *Service) claimVideoJob(ctx context.Context, id string) (media.Job, bool
 func (s *Service) runVideoJob(parent context.Context, job media.Job, route model.Route) {
 	ctx, cancel := context.WithTimeout(parent, videoJobTimeout)
 	defer cancel()
+	s.mediaMu.Lock()
+	if s.mediaCancels == nil {
+		s.mediaCancels = make(map[string]context.CancelFunc)
+	}
+	s.mediaCancels[job.ID] = cancel
+	cancelled := s.mediaCancelled[job.ID]
+	s.mediaMu.Unlock()
+	defer func() {
+		s.mediaMu.Lock()
+		delete(s.mediaCancels, job.ID)
+		delete(s.mediaCancelled, job.ID)
+		s.mediaMu.Unlock()
+	}()
+	if cancelled {
+		cancel()
+		return
+	}
 	startedAt := time.Now()
 	job.Progress = max(job.Progress, 1)
 	job.UpdatedAt = time.Now().UTC()
@@ -244,6 +302,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
 	if err != nil {
+		if s.videoCancelled(job.ID) {
+			return
+		}
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)
 			return
@@ -276,6 +337,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		},
 	})
 	if err != nil {
+		if s.videoCancelled(job.ID) {
+			return
+		}
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)
 			return
@@ -285,6 +349,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		s.selector.MarkFailure(context.Background(), lease.Credential, 0, 0)
 		s.failVideoJob(parent, job, "generation_failed", err)
+		return
+	}
+	if s.videoCancelled(job.ID) {
 		return
 	}
 	now := time.Now().UTC()
@@ -301,6 +368,12 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if route.Provider == account.ProviderWeb && lease.QuotaMode == "weekly" {
 		s.accounts.QueueWebQuotaRefresh(job.AccountID, lease.QuotaMode)
 	}
+}
+
+func (s *Service) videoCancelled(id string) bool {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	return s.mediaCancelled[id]
 }
 
 func (s *Service) reconcileVideoUsage(ctx context.Context) error {

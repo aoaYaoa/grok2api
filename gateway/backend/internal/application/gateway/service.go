@@ -97,6 +97,8 @@ type Service struct {
 	mediaQueue     chan string
 	mediaMu        sync.Mutex
 	mediaQueued    map[string]struct{}
+	mediaCancels   map[string]context.CancelFunc
+	mediaCancelled map[string]bool
 	mediaWorker    int
 	mediaQueueFull atomic.Uint64
 	logger         *slog.Logger
@@ -110,6 +112,8 @@ func (s *Service) ConfigureMedia(repository repository.MediaJobRepository, concu
 	s.mediaWorker = concurrency
 	s.mediaQueue = make(chan string, min(2048, max(64, concurrency*32)))
 	s.mediaQueued = make(map[string]struct{})
+	s.mediaCancels = make(map[string]context.CancelFunc)
+	s.mediaCancelled = make(map[string]bool)
 }
 
 func NewService(models routeResolver, audits auditRecorder, accounts *accountapp.Service, clientKeys *clientkeyapp.Service, providers *provider.Registry, selector *Selector, responses repository.ResponseRepository, maxAttempts int) *Service {
