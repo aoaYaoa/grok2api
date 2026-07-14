@@ -134,6 +134,7 @@ func (s *Selector) routingConfig() (time.Duration, time.Duration, time.Duration,
 func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, promptCacheKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
 	now := time.Now().UTC()
 	stickyKey := promptCacheStickyKey(promptCacheKey)
+	quotaProduct, quotaProductKnown := s.resolveQuotaProduct(provider, upstreamModel)
 	values, err := s.loadCandidates(ctx, provider, upstreamModel, quotaMode, now)
 	if err != nil {
 		return nil, err
@@ -182,7 +183,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			quotaCandidates++
 			continue
 		}
-		if candidate.QuotaWindow != nil && candidate.QuotaWindow.Remaining <= 0 {
+		if quotaWindowExhausted(candidate.QuotaWindow, quotaProduct, quotaProductKnown) {
 			quotaCandidates++
 			if candidate.QuotaWindow.ResetAt != nil {
 				earliestRetry = earlierFuture(earliestRetry, *candidate.QuotaWindow.ResetAt, now)
@@ -303,6 +304,7 @@ func promptCacheStickyKey(value string) string {
 // AcquirePinned 为 previous_response_id 等账号归属请求获取指定账号租约。
 func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider, accountID uint64, upstreamModel, quotaMode string, inference bool) (*accountLease, error) {
 	now := time.Now().UTC()
+	quotaProduct, quotaProductKnown := s.resolveQuotaProduct(provider, upstreamModel)
 	values, err := s.loadCandidates(ctx, provider, upstreamModel, quotaMode, now)
 	if err != nil {
 		return nil, err
@@ -353,7 +355,7 @@ func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider,
 			if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
 				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted}
 			}
-			if candidate.QuotaWindow != nil && candidate.QuotaWindow.Remaining <= 0 {
+			if quotaWindowExhausted(candidate.QuotaWindow, quotaProduct, quotaProductKnown) {
 				var retryAfter time.Duration
 				if candidate.QuotaWindow.ResetAt != nil {
 					retryAfter = retryDelay(now, *candidate.QuotaWindow.ResetAt)
@@ -377,6 +379,30 @@ func effectiveQuotaMode(candidate account.RoutingCandidate, fallback string) str
 		return "weekly"
 	}
 	return fallback
+}
+
+func quotaWindowExhausted(window *account.QuotaWindow, productCode int, productKnown bool) bool {
+	if window == nil {
+		return false
+	}
+	if window.Mode == "weekly" && productKnown {
+		for _, item := range window.Breakdown {
+			if item.ProductCode == productCode {
+				return item.UsagePercent >= 100
+			}
+		}
+	}
+	return window.Remaining <= 0
+}
+
+func (s *Selector) resolveQuotaProduct(provider account.Provider, upstreamModel string) (int, bool) {
+	metadata, ok := s.tierOrders.(interface {
+		QuotaProduct(account.Provider, string) (int, bool)
+	})
+	if !ok {
+		return 0, false
+	}
+	return metadata.QuotaProduct(provider, upstreamModel)
 }
 
 func (s *Selector) MarkSuccess(ctx context.Context, credential account.Credential) {

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { AccountDTO, BillingDTO, QuotaDTO } from "@/features/accounts/accounts-api";
+import { normalizeWeeklyQuotaProducts } from "@/features/accounts/weekly-quota-products.mjs";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 
@@ -132,22 +133,25 @@ type WebQuotaWindow = NonNullable<AccountDTO["quotaWindows"]>[number];
 
 function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale: string; t: TFunction }) {
   const usedPercent = Math.max(0, Math.min(100, window.usagePercent));
-  const breakdown = (window.breakdown ?? []).filter((item) => item.usagePercent > 0);
+  const products = normalizeWeeklyQuotaProducts(window.breakdown);
+  const visibleProducts = products.slice(0, 3);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button type="button" className="block w-full min-w-0 text-left">
-          <div className="flex items-center justify-between gap-2 text-[11px]">
-            {breakdown.length > 0 ? <div className="flex min-w-0 items-center gap-2.5 overflow-hidden text-muted-foreground">{breakdown.slice(0, 3).map((item) => <span key={item.productCode} className="flex shrink-0 items-center gap-1"><span className={cn("size-1.5 rounded-full", quotaProductColor(item.productCode))} /><span>{quotaProductLabel(item.productCode, t)}</span><span className="tabular-nums text-foreground">{formatNumber(item.usagePercent, locale, 1)}%</span></span>)}{breakdown.length > 3 ? <span className="shrink-0">+{breakdown.length - 3}</span> : null}</div> : <span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span>}
-            <span className="shrink-0 tabular-nums">{formatNumber(usedPercent, locale, 1)}%</span>
-          </div>
-          <div className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-muted">{breakdown.length > 0 ? breakdown.map((item) => <div key={item.productCode} className={cn("h-full shrink-0", quotaProductColor(item.productCode))} style={{ width: `${Math.max(0, Math.min(100, item.usagePercent))}%` }} />) : <div className="h-full bg-primary" style={{ width: `${usedPercent}%` }} />}</div>
+          {visibleProducts.length > 0 ? (
+            <div className={cn("grid w-full min-w-0 divide-x divide-border/70", visibleProducts.length === 1 ? "grid-cols-1" : visibleProducts.length === 2 ? "grid-cols-2" : "grid-cols-3")}>
+              {visibleProducts.map((item) => <div key={item.productCode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate text-muted-foreground">{quotaProductLabel(item.productCode, t)}</span><span className="shrink-0 tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full", quotaProductColor(item.productCode))} style={{ width: `${item.remainingPercent}%` }} /></div></div>)}
+            </div>
+          ) : (
+            <><div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span><span className="shrink-0 tabular-nums">{formatNumber(usedPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${usedPercent}%` }} /></div></>
+          )}
         </button>
       </TooltipTrigger>
       <TooltipContent>
         <div>{t("accounts.webWeeklyQuotaUsage", { remaining: formatNumber(100 - usedPercent, locale, 1) })}</div>
         <div className="text-muted-foreground">{window.resetAt ? t("accounts.quotaResetAt", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.quotaResetUnknown")}</div>
-        {breakdown.length > 0 ? <div className="mt-2 grid gap-1 border-t pt-2">{breakdown.map((item) => <div key={item.productCode} className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><span className={cn("size-2 rounded-full", quotaProductColor(item.productCode))} />{quotaProductLabel(item.productCode, t)}</span><span className="tabular-nums">{formatNumber(item.usagePercent, locale, 1)}%</span></div>)}</div> : null}
+        {products.length > 0 ? <div className="mt-2 grid gap-1 border-t pt-2">{products.map((item) => <div key={item.productCode} className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><span className={cn("size-2 rounded-full", quotaProductColor(item.productCode))} />{quotaProductLabel(item.productCode, t)}</span><span className="tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div>)}</div> : null}
       </TooltipContent>
     </Tooltip>
   );

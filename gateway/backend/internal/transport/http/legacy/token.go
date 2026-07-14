@@ -39,12 +39,18 @@ type legacyTokenEntry struct {
 }
 
 type legacyQuotaValue struct {
-	Remaining     int    `json:"remaining"`
-	Total         int    `json:"total"`
-	WindowSeconds int    `json:"window_seconds,omitempty"`
-	ResetAt       *int64 `json:"reset_at,omitempty"`
-	SyncedAt      *int64 `json:"synced_at,omitempty"`
-	Source        string `json:"source,omitempty"`
+	Remaining     int                    `json:"remaining"`
+	Total         int                    `json:"total"`
+	Breakdown     []legacyQuotaBreakdown `json:"breakdown,omitempty"`
+	WindowSeconds int                    `json:"window_seconds,omitempty"`
+	ResetAt       *int64                 `json:"reset_at,omitempty"`
+	SyncedAt      *int64                 `json:"synced_at,omitempty"`
+	Source        string                 `json:"source,omitempty"`
+}
+
+type legacyQuotaBreakdown struct {
+	ProductCode  int     `json:"product_code"`
+	UsagePercent float64 `json:"usage_percent"`
 }
 
 type legacyTokenInput struct {
@@ -253,6 +259,9 @@ func newLegacyTokenEntry(view accountapp.View) legacyTokenEntry {
 		value := legacyQuotaValue{
 			Remaining: window.Remaining, Total: window.Total, WindowSeconds: window.WindowSeconds,
 			ResetAt: unixPointer(window.ResetAt), SyncedAt: unixPointer(window.SyncedAt), Source: string(window.Source),
+		}
+		for _, item := range window.Breakdown {
+			value.Breakdown = append(value.Breakdown, legacyQuotaBreakdown{ProductCode: item.ProductCode, UsagePercent: item.UsagePercent})
 		}
 		quota[mode] = value
 		if value.SyncedAt != nil && *value.SyncedAt > latestSync {

@@ -19,6 +19,8 @@ const DEFAULT_QUOTA_BASIC = 80;
 const DEFAULT_QUOTA_SUPER = 140;
 const DEFAULT_QUOTA_HEAVY = 400;
 const QUOTA_MODES = ['auto', 'fast', 'expert', 'heavy', 'grok_4_3'];
+const QUOTA_WINDOW_MODES = [...QUOTA_MODES, 'weekly'];
+const QUOTA_PRODUCT_LABELS = { 4: 'Chat', 5: 'Imagine', 6: 'Voice' };
 
 function getDefaultQuotaForPool(pool) {
   if (pool === 'ssoHeavy') return DEFAULT_QUOTA_HEAVY;
@@ -50,14 +52,18 @@ function buildEmptyQuotaSet(pool) {
 
 function normalizeQuota(quota, pool) {
   if (quota && typeof quota === 'object' && !Array.isArray(quota)) {
-    if (QUOTA_MODES.some(mode => Object.prototype.hasOwnProperty.call(quota, mode))) {
+    if (QUOTA_WINDOW_MODES.some(mode => Object.prototype.hasOwnProperty.call(quota, mode))) {
       const normalized = {};
-      QUOTA_MODES.forEach(mode => {
+      QUOTA_WINDOW_MODES.forEach(mode => {
         if (quota[mode] && typeof quota[mode] === 'object') {
           normalized[mode] = {
             remaining: Number(quota[mode].remaining || 0),
             total: Number(quota[mode].total ?? quota[mode].remaining ?? 0),
             available: true,
+            breakdown: Array.isArray(quota[mode].breakdown) ? quota[mode].breakdown.map(item => ({
+              product_code: Number(item.product_code ?? item.productCode),
+              usage_percent: Number(item.usage_percent ?? item.usagePercent),
+            })).filter(item => Number.isFinite(item.product_code) && Number.isFinite(item.usage_percent)) : [],
             window_seconds: quota[mode].window_seconds ?? null,
             reset_at: quota[mode].reset_at ?? null,
             synced_at: quota[mode].synced_at ?? null,
@@ -87,6 +93,24 @@ function primaryQuota(quota) {
   return quotaRemaining(quota, 'auto');
 }
 
+function quotaProductEntries(quota) {
+  const breakdown = quota?.weekly?.breakdown;
+  if (!Array.isArray(breakdown)) return [];
+  return breakdown
+    .filter(item => Object.prototype.hasOwnProperty.call(QUOTA_PRODUCT_LABELS, item.product_code))
+    .map(item => ({
+      product_code: item.product_code,
+      label: QUOTA_PRODUCT_LABELS[item.product_code],
+      remaining: Math.max(0, Math.min(100, 100 - Number(item.usage_percent || 0))),
+    }))
+    .sort((left, right) => left.product_code - right.product_code);
+}
+
+function quotaProductRemaining(quota, productCode) {
+  const item = quotaProductEntries(quota).find(value => value.product_code === productCode);
+  return item ? item.remaining : null;
+}
+
 function quotaForEdit(currentQuota, currentPool, newPool, newAutoQuota) {
   const targetPool = newPool || currentPool || 'ssoBasic';
   const normalized = normalizeQuota(currentQuota, currentPool);
@@ -97,6 +121,11 @@ function quotaForEdit(currentQuota, currentPool, newPool, newAutoQuota) {
 }
 
 function renderQuotaPills(quota) {
+  const products = quotaProductEntries(quota);
+  if (products.length > 0) {
+    const classes = { 4: 'badge-blue', 5: 'badge-green', 6: 'badge-purple' };
+    return products.map(item => `<span class="badge ${classes[item.product_code] || 'badge-gray'}">${item.label}:${item.remaining}%</span>`).join(' ');
+  }
   const pills = [
     ['Auto', 'auto', 'badge-blue'],
     ['Fast', 'fast', 'badge-green'],
@@ -289,9 +318,11 @@ function updateStats(data) {
   flatTokens.forEach(t => {
     if (t.status === 'active') {
       activeTokens++;
-      autoQuota += quotaRemaining(t.quota, 'auto');
-      fastQuota += quotaRemaining(t.quota, 'fast');
-      expertQuota += quotaRemaining(t.quota, 'expert');
+      const chatQuota = quotaProductRemaining(t.quota, 4);
+      const imagineQuota = quotaProductRemaining(t.quota, 5);
+      autoQuota += chatQuota ?? quotaRemaining(t.quota, 'auto');
+      fastQuota += imagineQuota ?? quotaRemaining(t.quota, 'fast');
+      expertQuota += imagineQuota ?? quotaRemaining(t.quota, 'expert');
       heavyQuota += quotaRemaining(t.quota, 'heavy');
     } else if (t.status === 'cooling') {
       coolingTokens++;

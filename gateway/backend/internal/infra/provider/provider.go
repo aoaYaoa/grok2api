@@ -225,6 +225,11 @@ type RoutingMetadataAdapter interface {
 	TierOrder(upstreamModel string) []account.WebTier
 }
 
+type QuotaProductMetadataAdapter interface {
+	Adapter
+	QuotaProduct(upstreamModel string) (int, bool)
+}
+
 // PricingMetadataAdapter 将 Provider 私有模型标识映射到公开计费模型。
 type PricingMetadataAdapter interface {
 	Adapter
@@ -344,6 +349,18 @@ func (r *Registry) TierOrder(value account.Provider, upstreamModel string) []acc
 		return nil
 	}
 	return metadata.TierOrder(upstreamModel)
+}
+
+func (r *Registry) QuotaProduct(value account.Provider, upstreamModel string) (int, bool) {
+	adapter, ok := r.Get(value)
+	if !ok {
+		return 0, false
+	}
+	metadata, ok := adapter.(QuotaProductMetadataAdapter)
+	if !ok {
+		return 0, false
+	}
+	return metadata.QuotaProduct(upstreamModel)
 }
 
 func (r *Registry) PricingModel(value account.Provider, upstreamModel string) string {

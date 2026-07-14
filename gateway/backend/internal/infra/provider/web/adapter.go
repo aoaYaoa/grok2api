@@ -124,6 +124,21 @@ func (a *Adapter) TierOrder(upstreamModel string) []account.WebTier {
 	}
 }
 
+func (a *Adapter) QuotaProduct(upstreamModel string) (int, bool) {
+	spec, ok := Resolve(upstreamModel)
+	if !ok {
+		return 0, false
+	}
+	switch spec.Capability {
+	case modeldomain.CapabilityChat:
+		return account.QuotaProductChat, true
+	case modeldomain.CapabilityImage, modeldomain.CapabilityImageEdit, modeldomain.CapabilityVideo:
+		return account.QuotaProductImagine, true
+	default:
+		return 0, false
+	}
+}
+
 func (a *Adapter) PricingModel(upstreamModel string) string {
 	spec, ok := Resolve(upstreamModel)
 	if ok && spec.Capability == modeldomain.CapabilityChat {

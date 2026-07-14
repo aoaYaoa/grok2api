@@ -120,6 +120,7 @@ func TestLegacyTokenListUsesOpaqueHandlesAndGoQuotaWindows(t *testing.T) {
 	synced := now.Add(-time.Minute)
 	accounts := &fakeLegacyAccountService{views: []accountapp.View{
 		{Credential: accountdomain.Credential{ID: 1, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, SourceKey: "sso:secret-hash", WebTier: accountdomain.WebTierSuper, Name: "super", Enabled: true, AuthStatus: accountdomain.AuthStatusActive, CreatedAt: now}, QuotaWindows: []accountdomain.QuotaWindow{
+			{Mode: "weekly", Remaining: 0, Total: 10000, UsagePercent: 100, Breakdown: []accountdomain.QuotaBreakdown{{ProductCode: accountdomain.QuotaProductChat, UsagePercent: 0}, {ProductCode: accountdomain.QuotaProductImagine, UsagePercent: 100}}, SyncedAt: &synced, Source: accountdomain.QuotaSourceUpstream},
 			{Mode: "auto", Remaining: 85, Total: 100, WindowSeconds: 7200, SyncedAt: &synced, Source: accountdomain.QuotaSourceUpstream},
 			{Mode: "fast", Remaining: 139, Total: 140, WindowSeconds: 7200, SyncedAt: &synced, Source: accountdomain.QuotaSourceUpstream},
 		}},
@@ -137,7 +138,7 @@ func TestLegacyTokenListUsesOpaqueHandlesAndGoQuotaWindows(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{`"ssoSuper"`, `"token":"account:1"`, `"status":"active"`, `"auto":{"remaining":85`, `"fast":{"remaining":139`, `"ssoBasic"`, `"status":"disabled"`} {
+	for _, expected := range []string{`"ssoSuper"`, `"token":"account:1"`, `"status":"active"`, `"weekly":{"remaining":0`, `"breakdown":[{"product_code":4,"usage_percent":0},{"product_code":5,"usage_percent":100}]`, `"auto":{"remaining":85`, `"fast":{"remaining":139`, `"ssoBasic"`, `"status":"disabled"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("body missing %q: %s", expected, body)
 		}

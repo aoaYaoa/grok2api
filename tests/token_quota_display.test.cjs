@@ -62,6 +62,26 @@ test('token quota object is normalized and rendered without object strings', () 
   assert.doesNotMatch(html, /\[object Object\]/);
 });
 
+test('weekly product quota displays remaining percentages including unused chat', () => {
+  const context = loadTokenAdminContext();
+  const quota = context.normalizeQuota({
+    weekly: {
+      remaining: 0,
+      total: 10000,
+      breakdown: [
+        { product_code: 4, usage_percent: 0 },
+        { product_code: 5, usage_percent: 100 },
+      ],
+    },
+  }, 'ssoSuper');
+
+  assert.equal(context.quotaProductRemaining(quota, 4), 100);
+  assert.equal(context.quotaProductRemaining(quota, 5), 0);
+  const html = context.renderQuotaPills(quota);
+  assert.match(html, /Chat:100%/);
+  assert.match(html, /Imagine:0%/);
+});
+
 test('token stats aggregate quota objects without NaN', () => {
   const text = {};
   const elements = new Proxy({}, {

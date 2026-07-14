@@ -155,6 +155,53 @@ func TestSelectorUsesPaidWeeklyPoolAsWebQuotaGate(t *testing.T) {
 	}
 }
 
+func TestSelectorUsesWeeklyProductBreakdownForRequestedModel(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "weekly-product.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "product-aware-web", SourceKey: "product-aware-web",
+		EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	resetAt := now.Add(7 * 24 * time.Hour)
+	if err := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		AccountID: value.ID, Mode: "weekly", Remaining: 0, Total: 10000, UsagePercent: 100,
+		Breakdown: []account.QuotaBreakdown{
+			{ProductCode: account.QuotaProductChat, UsagePercent: 0},
+			{ProductCode: account.QuotaProductImagine, UsagePercent: 100},
+		},
+		ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	metadata := staticQuotaMetadata{products: map[string]int{
+		"grok-chat-auto":     account.QuotaProductChat,
+		"grok-imagine-image": account.QuotaProductImagine,
+	}}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), metadata, time.Hour, time.Second, time.Minute)
+
+	lease, err := selector.Acquire(ctx, account.ProviderWeb, "grok-chat-auto", "auto", "", nil, false)
+	if err != nil {
+		t.Fatalf("chat should use its available weekly product quota: %v", err)
+	}
+	lease.Release()
+
+	if _, err := selector.Acquire(ctx, account.ProviderWeb, "grok-imagine-image", "fast", "", nil, false); err == nil {
+		t.Fatal("image should remain blocked by exhausted Imagine weekly quota")
+	}
+}
+
 func TestSelectorClaimsPaidBillingProbeAfterPeriodEnd(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "paid-probe.db"))
@@ -489,6 +536,17 @@ type staticTierOrder struct{ order []account.WebTier }
 
 func (value staticTierOrder) TierOrder(account.Provider, string) []account.WebTier {
 	return value.order
+}
+
+type staticQuotaMetadata struct {
+	products map[string]int
+}
+
+func (staticQuotaMetadata) TierOrder(account.Provider, string) []account.WebTier { return nil }
+
+func (value staticQuotaMetadata) QuotaProduct(_ account.Provider, upstreamModel string) (int, bool) {
+	product, ok := value.products[upstreamModel]
+	return product, ok
 }
 
 func (f failingConcurrencyLimiter) Acquire(context.Context, string, int) (func(), bool, error) {
