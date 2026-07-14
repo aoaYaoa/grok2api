@@ -91,6 +91,29 @@ func (f *fakeLegacyAccountService) RefreshWebQuota(_ context.Context, id uint64)
 	return []accountdomain.QuotaWindow{{AccountID: id, Mode: "auto", Remaining: 90, Total: 100}}, nil
 }
 
+func (f *fakeLegacyAccountService) SyncWebQuotaAccountsWithProgress(ctx context.Context, ids []uint64, progress accountapp.BatchProgressObserver) (int, int, error) {
+	succeeded := 0
+	failed := 0
+	if progress != nil {
+		if err := progress(0, len(ids)); err != nil {
+			return 0, 0, err
+		}
+	}
+	for index, id := range ids {
+		if _, err := f.RefreshWebQuota(ctx, id); err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+		if progress != nil {
+			if err := progress(index+1, len(ids)); err != nil {
+				return succeeded, failed, err
+			}
+		}
+	}
+	return succeeded, failed, nil
+}
+
 func TestLegacyTokenListUsesOpaqueHandlesAndGoQuotaWindows(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)

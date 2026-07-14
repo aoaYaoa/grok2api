@@ -1624,6 +1624,14 @@ func (s *Service) SyncWebQuotaAccounts(ctx context.Context, ids []uint64) (int, 
 	})
 }
 
+// SyncWebQuotaAccountsWithProgress 同步指定 Web 账号集合并报告批量完成进度。
+func (s *Service) SyncWebQuotaAccountsWithProgress(ctx context.Context, ids []uint64, progress BatchProgressObserver) (int, int, error) {
+	return s.runAccountBatch(ctx, "web_quota_selected_sync", ids, s.syncPool, progress, func(workCtx context.Context, id uint64) error {
+		_, err := s.RefreshWebQuota(workCtx, id)
+		return err
+	})
+}
+
 // RefreshAllTokens 续期全部可刷新的 Grok Build 凭据，不可续期账号会被跳过。
 func (s *Service) RefreshAllTokens(ctx context.Context) (int, int, int, error) {
 	return s.RefreshAllTokensWithProgress(ctx, nil)

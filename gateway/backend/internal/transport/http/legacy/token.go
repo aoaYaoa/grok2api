@@ -21,6 +21,7 @@ type LegacyAccountService interface {
 	Update(context.Context, uint64, accountapp.UpdateInput) (accountapp.View, error)
 	Delete(context.Context, uint64) error
 	RefreshWebQuota(context.Context, uint64) ([]accountdomain.QuotaWindow, error)
+	SyncWebQuotaAccountsWithProgress(context.Context, []uint64, accountapp.BatchProgressObserver) (int, int, error)
 }
 
 type legacyTokenEntry struct {
@@ -64,6 +65,7 @@ func (h *Handler) registerTokens(admin *gin.RouterGroup) {
 	admin.GET("/tokens", h.listLegacyTokens)
 	admin.POST("/tokens", h.saveLegacyTokens)
 	admin.POST("/tokens/refresh", h.refreshLegacyToken)
+	admin.POST("/tokens/refresh/async", h.startLegacyQuotaBatch)
 }
 
 func (h *Handler) listLegacyTokens(c *gin.Context) {

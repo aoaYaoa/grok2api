@@ -40,6 +40,8 @@ type Handler struct {
 	videoMu        sync.Mutex
 	videoTasks     map[string]*videoTask
 	accounts       LegacyAccountService
+	batchMu        sync.RWMutex
+	batchTasks     map[string]*legacyBatchTask
 }
 
 type ImageGenerator interface {
@@ -72,6 +74,7 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 	return &Handler{
 		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
 		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
+		batchTasks: make(map[string]*legacyBatchTask),
 	}
 }
 
@@ -100,6 +103,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 		registerAdmin(admin)
 	}
 	h.registerTokens(admin)
+	h.registerBatchTasks(admin)
 }
 
 var _ LegacyAccountService = (*accountapp.Service)(nil)
