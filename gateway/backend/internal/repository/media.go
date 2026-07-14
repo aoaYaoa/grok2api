@@ -11,6 +11,7 @@ import (
 type MediaJobRepository interface {
 	CreateMediaJob(ctx context.Context, value media.Job) error
 	GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error)
+	ListMediaJobs(ctx context.Context, clientKeyID uint64, offset, limit int) ([]media.Job, int64, error)
 	UpdateMediaJob(ctx context.Context, value media.Job) error
 	ListRecoverableMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
 	ListUnrecordedCompletedMediaJobs(ctx context.Context, limit int) ([]media.Job, error)

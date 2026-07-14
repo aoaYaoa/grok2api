@@ -84,6 +84,29 @@ func (r *MediaJobRepository) GetMediaJob(ctx context.Context, id string, clientK
 	return mediaJobToDomain(row), nil
 }
 
+func (r *MediaJobRepository) ListMediaJobs(ctx context.Context, clientKeyID uint64, offset, limit int) ([]media.Job, int64, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("client_key_id = ?", clientKeyID)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []mediaJobModel
+	if err := query.Order("created_at DESC, id DESC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	values := make([]media.Job, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, mediaJobToDomain(row))
+	}
+	return values, total, nil
+}
+
 func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job) error {
 	updates := mediaJobFromDomain(value)
 	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", value.ID)

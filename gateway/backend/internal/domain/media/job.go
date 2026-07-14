@@ -30,6 +30,7 @@ type Job struct {
 	Status          Status
 	Progress        int
 	InputJSON       string
+	DisplayName     string
 	UpstreamURL     string
 	ContentType     string
 	ErrorCode       string

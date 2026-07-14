@@ -21,6 +21,18 @@ type fakeLegacyVideoGateway struct {
 	created   []gateway.VideoInput
 	polls     map[string]int
 	cancelled []string
+	listed    []mediadomain.Job
+	renamedID string
+	renamedTo string
+}
+
+func (f *fakeLegacyVideoGateway) ListVideos(_ context.Context, _ clientkeydomain.Key, _, _ int) ([]mediadomain.Job, int64, error) {
+	return f.listed, int64(len(f.listed)), nil
+}
+
+func (f *fakeLegacyVideoGateway) RenameVideo(_ context.Context, identifier, displayName string, _ clientkeydomain.Key) (mediadomain.Job, error) {
+	f.renamedID, f.renamedTo = identifier, displayName
+	return mediadomain.Job{ID: "video-job-1", UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4", InputJSON: `{"display_name":"` + displayName + `"}`}, nil
 }
 
 func (f *fakeLegacyVideoGateway) CancelVideo(_ context.Context, id string, _ clientkeydomain.Key) (mediadomain.Job, error) {
@@ -158,5 +170,37 @@ func TestVideoStopCancelsPersistentJobAndRemovesLegacyPollingSession(t *testing.
 	router.ServeHTTP(sseRecorder, sseRequest)
 	if sseRecorder.Code != http.StatusNotFound {
 		t.Fatalf("sse status=%d body=%s", sseRecorder.Code, sseRecorder.Body.String())
+	}
+}
+
+func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{listed: []mediadomain.Job{{
+		ID: "video-job-1", RequestID: "request-1", Status: mediadomain.StatusCompleted,
+		UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4",
+		InputJSON:   `{"image_urls":[],"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
+	}}}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/v1/public/video/cache/list?page=1&page_size=100", nil)
+	listRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	listRecorder := httptest.NewRecorder()
+	router.ServeHTTP(listRecorder, listRequest)
+	for _, expected := range []string{`"display_name":"Saved title"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`} {
+		if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), expected) {
+			t.Fatalf("list status=%d body=%s missing=%s", listRecorder.Code, listRecorder.Body.String(), expected)
+		}
+	}
+
+	renameRequest := httptest.NewRequest(http.MethodPost, "/v1/public/video/rename", bytes.NewBufferString(`{"post_id":"123e4567-e89b-12d3-a456-426614174000","display_name":"New title"}`))
+	renameRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	renameRequest.Header.Set("Content-Type", "application/json")
+	renameRecorder := httptest.NewRecorder()
+	router.ServeHTTP(renameRecorder, renameRequest)
+	if renameRecorder.Code != http.StatusOK || !strings.Contains(renameRecorder.Body.String(), `"status":"success"`) || videoGateway.renamedID != "123e4567-e89b-12d3-a456-426614174000" || videoGateway.renamedTo != "New title" {
+		t.Fatalf("rename status=%d body=%s id=%q title=%q", renameRecorder.Code, renameRecorder.Body.String(), videoGateway.renamedID, videoGateway.renamedTo)
 	}
 }

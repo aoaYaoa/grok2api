@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +19,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var videoPostIDPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
 type VideoGateway interface {
 	CreateVideo(context.Context, gateway.VideoInput) (mediadomain.Job, error)
 	GetVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
 	CancelVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
+	ListVideos(context.Context, clientkeydomain.Key, int, int) ([]mediadomain.Job, int64, error)
+	RenameVideo(context.Context, string, string, clientkeydomain.Key) (mediadomain.Job, error)
 }
 
 type videoTask struct {
@@ -49,6 +57,86 @@ func (h *Handler) registerVideo(public *gin.RouterGroup) {
 	public.POST("/video/start", h.videoStart)
 	public.GET("/video/sse", h.videoSSE)
 	public.POST("/video/stop", h.videoStop)
+	public.GET("/video/cache/list", h.videoCacheList)
+	public.POST("/video/rename", h.videoRename)
+}
+
+func (h *Handler) videoCacheList(c *gin.Context) {
+	clientValue, exists := c.Get(middleware.ClientKey)
+	clientKey, valid := clientValue.(clientkeydomain.Key)
+	if !exists || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
+		return
+	}
+	pageValue, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "100"))
+	values, total, err := h.videoGateway.ListVideos(c.Request.Context(), clientKey, pageValue, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to list videos"})
+		return
+	}
+	items := make([]gin.H, 0, len(values))
+	for _, job := range values {
+		if job.Status != mediadomain.StatusCompleted || strings.TrimSpace(job.UpstreamURL) == "" {
+			continue
+		}
+		postID := videoPostIDPattern.FindString(job.UpstreamURL)
+		displayName := strings.TrimSpace(job.DisplayName)
+		if displayName == "" {
+			var metadata struct {
+				DisplayName string `json:"display_name"`
+			}
+			_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
+			displayName = strings.TrimSpace(metadata.DisplayName)
+		}
+		name := job.ID + ".mp4"
+		if parsed, parseErr := url.Parse(job.UpstreamURL); parseErr == nil {
+			if base := path.Base(parsed.Path); base != "." && base != "/" && base != "" {
+				name = base
+			}
+		}
+		items = append(items, gin.H{
+			"name": name, "view_url": job.UpstreamURL, "post_id": postID, "share_link": "",
+			"original_post_id": "", "display_name": displayName, "size_bytes": 0,
+			"mtime_ms": job.UpdatedAt.UnixMilli(), "task_id": job.ID,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "page": pageValue, "page_size": pageSize, "total": total})
+}
+
+func (h *Handler) videoRename(c *gin.Context) {
+	clientValue, exists := c.Get(middleware.ClientKey)
+	clientKey, valid := clientValue.(clientkeydomain.Key)
+	if !exists || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
+		return
+	}
+	var request struct {
+		PostID      string `json:"post_id"`
+		ShareLink   string `json:"share_link"`
+		Name        string `json:"name"`
+		DisplayName string `json:"display_name"`
+	}
+	if json.NewDecoder(c.Request.Body).Decode(&request) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid request"})
+		return
+	}
+	identifier := strings.TrimSpace(request.PostID)
+	if identifier == "" {
+		identifier = strings.TrimSpace(request.ShareLink)
+	}
+	if identifier == "" {
+		identifier = strings.TrimSpace(request.Name)
+	}
+	job, err := h.videoGateway.RenameVideo(c.Request.Context(), identifier, request.DisplayName, clientKey)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "Video not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "success", "result": gin.H{
+		"task_id": job.ID, "post_id": videoPostIDPattern.FindString(job.UpstreamURL),
+		"display_name": job.DisplayName, "view_url": job.UpstreamURL,
+	}})
 }
 
 func (h *Handler) videoStart(c *gin.Context) {

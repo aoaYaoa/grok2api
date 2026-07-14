@@ -80,6 +80,10 @@ func (r *videoUsageRepository) GetMediaJob(context.Context, string, uint64) (med
 	return r.job, nil
 }
 
+func (r *videoUsageRepository) ListMediaJobs(context.Context, uint64, int, int) ([]media.Job, int64, error) {
+	return []media.Job{r.job}, 1, nil
+}
+
 func (r *videoUsageRepository) UpdateMediaJob(context.Context, media.Job) error { return nil }
 
 func (r *videoUsageRepository) ListRecoverableMediaJobs(context.Context, int) ([]media.Job, error) {

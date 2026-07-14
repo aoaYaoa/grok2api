@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,58 @@ func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (m
 		return media.Job{}, ErrResponseNotFound
 	}
 	return job, nil
+}
+
+func (s *Service) ListVideos(ctx context.Context, key clientkey.Key, page, pageSize int) ([]media.Job, int64, error) {
+	if s.mediaJobs == nil {
+		return nil, 0, ErrResponseNotFound
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 200 {
+		pageSize = 100
+	}
+	values, total, err := s.mediaJobs.ListMediaJobs(ctx, key.ID, (page-1)*pageSize, pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	for index := range values {
+		values[index].DisplayName = decodeVideoMetadata(values[index].InputJSON).DisplayName
+	}
+	return values, total, nil
+}
+
+func (s *Service) RenameVideo(ctx context.Context, identifier, displayName string, key clientkey.Key) (media.Job, error) {
+	identifier = strings.TrimSpace(identifier)
+	displayName = strings.TrimSpace(displayName)
+	if identifier == "" || len(displayName) > 160 {
+		return media.Job{}, fmt.Errorf("视频标识不能为空且标题不能超过 160 个字符")
+	}
+	for page := 1; ; page++ {
+		values, total, err := s.mediaJobs.ListMediaJobs(ctx, key.ID, (page-1)*1000, 1000)
+		if err != nil {
+			return media.Job{}, err
+		}
+		for _, job := range values {
+			if job.ID != identifier && job.RequestID != identifier && job.UpstreamURL != identifier && !strings.Contains(job.UpstreamURL, identifier) {
+				continue
+			}
+			metadata := decodeVideoMetadata(job.InputJSON)
+			metadata.DisplayName = displayName
+			job.InputJSON = encodeVideoMetadata(metadata)
+			job.DisplayName = displayName
+			job.UpdatedAt = time.Now().UTC()
+			if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
+				return media.Job{}, err
+			}
+			return job, nil
+		}
+		if page*1000 >= int(total) || len(values) == 0 {
+			break
+		}
+	}
+	return media.Job{}, ErrResponseNotFound
 }
 
 func (s *Service) CancelVideo(ctx context.Context, id string, key clientkey.Key) (media.Job, error) {
@@ -427,15 +480,28 @@ func (s *Service) recordVideoUsage(ctx context.Context, job media.Job, durationM
 	return s.mediaJobs.MarkMediaJobUsageRecorded(markCtx, job.ID, time.Now().UTC())
 }
 
+type videoInputMetadata struct {
+	ImageURLs   []string `json:"image_urls"`
+	DisplayName string   `json:"display_name,omitempty"`
+}
+
 func encodeVideoInput(referenceURLs []string) string {
-	data, _ := json.Marshal(map[string][]string{"image_urls": referenceURLs})
+	return encodeVideoMetadata(videoInputMetadata{ImageURLs: referenceURLs})
+}
+
+func encodeVideoMetadata(metadata videoInputMetadata) string {
+	data, _ := json.Marshal(metadata)
 	return string(data)
 }
 
 func decodeVideoInput(value string) []string {
-	var input map[string][]string
+	return decodeVideoMetadata(value).ImageURLs
+}
+
+func decodeVideoMetadata(value string) videoInputMetadata {
+	var input videoInputMetadata
 	_ = json.Unmarshal([]byte(value), &input)
-	return input["image_urls"]
+	return input
 }
 
 func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, err error) {
