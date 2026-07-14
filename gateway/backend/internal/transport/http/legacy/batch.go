@@ -41,12 +41,14 @@ type legacyBatchTask struct {
 	cancelled   bool
 	cancel      context.CancelFunc
 	final       *legacyBatchEvent
+	finalized   chan struct{}
 	subscribers map[chan legacyBatchEvent]struct{}
 }
 
 func newLegacyBatchTask(id string, total int, cancel context.CancelFunc) *legacyBatchTask {
 	return &legacyBatchTask{
 		id: id, total: total, status: "running", cancel: cancel,
+		finalized:   make(chan struct{}),
 		subscribers: make(map[chan legacyBatchEvent]struct{}),
 	}
 }
@@ -101,7 +103,7 @@ func (t *legacyBatchTask) finish(succeeded, failed int, runErr error) {
 		}
 	}
 	t.final = &event
-	t.publishLocked(event)
+	close(t.finalized)
 }
 
 func (t *legacyBatchTask) requestCancel() {
@@ -133,6 +135,16 @@ func (t *legacyBatchTask) detach(ch chan legacyBatchEvent) {
 	t.mu.Lock()
 	delete(t.subscribers, ch)
 	t.mu.Unlock()
+}
+
+func (t *legacyBatchTask) finalEvent() *legacyBatchEvent {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.final == nil {
+		return nil
+	}
+	final := *t.final
+	return &final
 }
 
 func (t *legacyBatchTask) publishLocked(event legacyBatchEvent) {
@@ -202,11 +214,7 @@ func (h *Handler) startLegacyQuotaBatch(c *gin.Context) {
 			return runCtx.Err()
 		})
 		task.finish(succeeded, failed, runErr)
-		time.AfterFunc(legacyBatchTaskTTL, func() {
-			h.batchMu.Lock()
-			delete(h.batchTasks, taskID)
-			h.batchMu.Unlock()
-		})
+		h.scheduleLegacyBatchTaskExpiry(taskID, legacyBatchTaskTTL)
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"status": "success", "task_id": taskID, "total": len(ids)})
@@ -230,16 +238,33 @@ func (h *Handler) streamLegacyBatchTask(c *gin.Context) {
 		writeLegacyBatchEvent(c, *final)
 		return
 	}
+	if final = task.finalEvent(); final != nil {
+		writeLegacyBatchEvent(c, *final)
+		return
+	}
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 	for {
+		if final := task.finalEvent(); final != nil {
+			writeLegacyBatchEvent(c, *final)
+			return
+		}
 		select {
 		case event := <-ch:
 			if !writeLegacyBatchEvent(c, event) || isLegacyBatchFinal(event.Type) {
 				return
 			}
+		case <-task.finalized:
+			if final := task.finalEvent(); final != nil {
+				writeLegacyBatchEvent(c, *final)
+			}
+			return
 		case <-heartbeat.C:
+			if final := task.finalEvent(); final != nil {
+				writeLegacyBatchEvent(c, *final)
+				return
+			}
 			if _, err := fmt.Fprint(c.Writer, ": ping\n\n"); err != nil {
 				return
 			}
@@ -248,6 +273,14 @@ func (h *Handler) streamLegacyBatchTask(c *gin.Context) {
 			return
 		}
 	}
+}
+
+func (h *Handler) scheduleLegacyBatchTaskExpiry(taskID string, ttl time.Duration) {
+	time.AfterFunc(ttl, func() {
+		h.batchMu.Lock()
+		delete(h.batchTasks, taskID)
+		h.batchMu.Unlock()
+	})
 }
 
 func (h *Handler) cancelLegacyBatchTask(c *gin.Context) {

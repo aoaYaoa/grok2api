@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,6 +68,21 @@ type flushRecorder struct {
 func (r *flushRecorder) Flush() {
 	r.ResponseRecorder.Flush()
 	r.once.Do(func() { close(r.flushed) })
+}
+
+type gatedFlushRecorder struct {
+	*httptest.ResponseRecorder
+	flushed chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *gatedFlushRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.once.Do(func() {
+		close(r.flushed)
+		<-r.release
+	})
 }
 
 func TestLegacyQuotaBatchStreamsProgressWithHeaderAuthentication(t *testing.T) {
@@ -159,6 +175,122 @@ func TestLegacyQuotaBatchCancelStopsWorkAndPublishesCancelled(t *testing.T) {
 	}
 	if !strings.Contains(streamRecorder.Body.String(), `"type":"cancelled"`) {
 		t.Fatalf("body=%s", streamRecorder.Body.String())
+	}
+}
+
+func TestLegacyQuotaBatchSlowStreamObservesTerminalEventAfterProgressQueueFills(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name      string
+		eventType string
+		finish    func(*legacyBatchTask)
+	}{
+		{name: "done", eventType: "done", finish: func(task *legacyBatchTask) { task.finish(64, 0, nil) }},
+		{name: "error", eventType: "error", finish: func(task *legacyBatchTask) { task.finish(0, 64, errors.New("quota sync failed")) }},
+		{name: "cancelled", eventType: "cancelled", finish: func(task *legacyBatchTask) {
+			task.requestCancel()
+			task.finish(0, 0, context.Canceled)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(Options{AdminKey: "admin", Accounts: &fakeLegacyAccountService{}}, nil)
+			task := newLegacyBatchTask("slow-task", 64, func() {})
+			handler.batchTasks[task.id] = task
+			router := gin.New()
+			handler.Register(router, nil, nil)
+
+			recorder := &gatedFlushRecorder{
+				ResponseRecorder: httptest.NewRecorder(),
+				flushed:          make(chan struct{}),
+				release:          make(chan struct{}),
+			}
+			var releaseOnce sync.Once
+			releaseStream := func() { releaseOnce.Do(func() { close(recorder.release) }) }
+			defer releaseStream()
+			request := httptest.NewRequest(http.MethodGet, "/v1/admin/batch/slow-task/stream", nil)
+			request.Header.Set("Authorization", "Bearer admin")
+			requestContext, cancel := context.WithCancel(request.Context())
+			defer cancel()
+			request = request.WithContext(requestContext)
+			streamDone := make(chan struct{})
+			go func() {
+				router.ServeHTTP(recorder, request)
+				close(streamDone)
+			}()
+
+			select {
+			case <-recorder.flushed:
+			case <-time.After(time.Second):
+				t.Fatal("SSE snapshot was not flushed")
+			}
+			for processed := 1; processed <= 64; processed++ {
+				task.record(processed)
+			}
+			producerDone := make(chan struct{})
+			go func() {
+				test.finish(task)
+				close(producerDone)
+			}()
+			select {
+			case <-producerDone:
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("task finalization blocked on a slow subscriber")
+			}
+			releaseStream()
+
+			select {
+			case <-streamDone:
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("SSE stream did not finish after the progress queue filled")
+			}
+			if !strings.Contains(recorder.Body.String(), `"type":"`+test.eventType+`"`) {
+				t.Fatalf("terminal event missing from SSE body: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestLegacyQuotaBatchRejectsRawSSOValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for name, payload := range map[string]string{
+		"single token": `{"token":"sso=raw-secret"}`,
+		"token list":   `{"tokens":["raw-secret"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			accounts := &fakeLegacyAccountService{}
+			router := newLegacyBatchTestRouter(accounts)
+			request := httptest.NewRequest(http.MethodPost, "/v1/admin/tokens/refresh/async", bytes.NewBufferString(payload))
+			request.Header.Set("Authorization", "Bearer admin")
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "requires account handles") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if len(accounts.refreshed) != 0 {
+				t.Fatalf("raw SSO value reached account service: %#v", accounts.refreshed)
+			}
+		})
+	}
+}
+
+func TestLegacyBatchTaskExpiryRemovesCompletedTask(t *testing.T) {
+	handler := NewHandler(Options{AdminKey: "admin", Accounts: &fakeLegacyAccountService{}}, nil)
+	task := newLegacyBatchTask("expired-task", 1, func() {})
+	task.finish(1, 0, nil)
+	handler.batchTasks[task.id] = task
+	handler.scheduleLegacyBatchTaskExpiry(task.id, 10*time.Millisecond)
+
+	if handler.getLegacyBatchTask(task.id) == nil {
+		t.Fatal("task expired before its TTL elapsed")
+	}
+	deadline := time.Now().Add(time.Second)
+	for handler.getLegacyBatchTask(task.id) != nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if handler.getLegacyBatchTask(task.id) != nil {
+		t.Fatal("completed task remained available after its TTL elapsed")
 	}
 }
 
