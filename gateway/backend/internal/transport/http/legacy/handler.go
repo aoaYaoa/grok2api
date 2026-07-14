@@ -5,7 +5,9 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
@@ -21,14 +23,26 @@ type Options struct {
 	PublicKey     string
 	ClientKey     string
 	StorageType   string
+	AllowNSFW     bool
 }
 
 type Handler struct {
-	options    Options
-	clientAuth ClientAuthenticator
+	options        Options
+	clientAuth     ClientAuthenticator
+	imageGenerator ImageGenerator
+	imageMu        sync.Mutex
+	imageTasks     map[string]*imageTask
 }
 
-func NewHandler(options Options, clientAuth ClientAuthenticator) *Handler {
+type ImageGenerator interface {
+	GenerateImage(context.Context, gateway.ImageGenerationInput) (*gateway.Result, error)
+}
+
+type ImageEditor interface {
+	EditImage(context.Context, gateway.ImageEditInput) (*gateway.Result, error)
+}
+
+func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator ...ImageGenerator) *Handler {
 	options.AdminKey = strings.TrimSpace(options.AdminKey)
 	options.PublicKey = strings.TrimSpace(options.PublicKey)
 	options.ClientKey = strings.TrimSpace(options.ClientKey)
@@ -36,10 +50,15 @@ func NewHandler(options Options, clientAuth ClientAuthenticator) *Handler {
 	if options.StorageType == "" {
 		options.StorageType = "sqlite"
 	}
-	return &Handler{options: options, clientAuth: clientAuth}
+	var generator ImageGenerator
+	if len(imageGenerator) > 0 {
+		generator = imageGenerator[0]
+	}
+	return &Handler{options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask)}
 }
 
 func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin func(*gin.RouterGroup)) {
+	router.GET("/v1/public/imagine/config", h.imagineConfig)
 	public := router.Group("/v1/public")
 	public.Use(h.publicAuth())
 	public.GET("/verify", func(c *gin.Context) {
@@ -48,6 +67,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 	if registerPublic != nil {
 		registerPublic(public)
 	}
+	h.registerImagine(public)
 
 	admin := router.Group("/v1/admin")
 	admin.Use(h.adminAuth())
@@ -69,6 +89,9 @@ func (h *Handler) publicAuth() gin.HandlerFunc {
 			return
 		}
 		raw := bearerToken(c.GetHeader("Authorization"))
+		if raw == "" {
+			raw = strings.TrimSpace(c.Query("public_key"))
+		}
 		if h.options.PublicKey != "" && !constantTimeEqual(raw, h.options.PublicKey) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
 			return

@@ -50,6 +50,7 @@ type Dependencies struct {
 	LegacyAdminKey      string
 	LegacyPublicKey     string
 	LegacyClientKey     string
+	LegacyAllowNSFW     bool
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
 	Readiness    func(context.Context) ReadinessSnapshot
 	Ready        func(context.Context) bool
@@ -171,7 +172,8 @@ func New(deps Dependencies) *gin.Engine {
 		PublicKey:     deps.LegacyPublicKey,
 		ClientKey:     deps.LegacyClientKey,
 		StorageType:   "sqlite",
-	}, deps.ClientKeys).Register(router, inferenceHandler.RegisterLegacyPublic, nil)
+		AllowNSFW:     deps.LegacyAllowNSFW,
+	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, nil)
 	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router

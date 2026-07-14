@@ -68,6 +68,27 @@ func TestPublicRoutesMapLegacyKeyToPersistentClientKey(t *testing.T) {
 	}
 }
 
+func TestPublicRoutesAcceptEventSourceQueryCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-client-secret"}
+	handler := NewHandler(Options{
+		PublicEnabled: true,
+		PublicKey:     "legacy-public-key",
+		ClientKey:     "g2-client-secret",
+	}, authenticator)
+	router := gin.New()
+	handler.Register(router, func(group *gin.RouterGroup) {
+		group.GET("/events", func(c *gin.Context) { c.Status(http.StatusOK) })
+	}, nil)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/events?public_key=legacy-public-key", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestPublicRoutesAcceptConfiguredClientKeyDirectly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
