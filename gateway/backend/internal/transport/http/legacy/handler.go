@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -18,12 +19,13 @@ type ClientAuthenticator interface {
 }
 
 type Options struct {
-	PublicEnabled bool
-	AdminKey      string
-	PublicKey     string
-	ClientKey     string
-	StorageType   string
-	AllowNSFW     bool
+	PublicEnabled     bool
+	AdminKey          string
+	PublicKey         string
+	ClientKey         string
+	StorageType       string
+	AllowNSFW         bool
+	VideoPollInterval time.Duration
 }
 
 type Handler struct {
@@ -32,6 +34,9 @@ type Handler struct {
 	imageGenerator ImageGenerator
 	imageMu        sync.Mutex
 	imageTasks     map[string]*imageTask
+	videoGateway   VideoGateway
+	videoMu        sync.Mutex
+	videoTasks     map[string]*videoTask
 }
 
 type ImageGenerator interface {
@@ -50,11 +55,21 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 	if options.StorageType == "" {
 		options.StorageType = "sqlite"
 	}
+	if options.VideoPollInterval <= 0 {
+		options.VideoPollInterval = time.Second
+	}
 	var generator ImageGenerator
 	if len(imageGenerator) > 0 {
 		generator = imageGenerator[0]
 	}
-	return &Handler{options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask)}
+	var videoGateway VideoGateway
+	if candidate, ok := generator.(VideoGateway); ok {
+		videoGateway = candidate
+	}
+	return &Handler{
+		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
+		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask),
+	}
 }
 
 func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin func(*gin.RouterGroup)) {
@@ -68,6 +83,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 		registerPublic(public)
 	}
 	h.registerImagine(public)
+	h.registerVideo(public)
 
 	admin := router.Group("/v1/admin")
 	admin.Use(h.adminAuth())

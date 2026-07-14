@@ -1,0 +1,153 @@
+package legacy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/gin-gonic/gin"
+)
+
+type fakeLegacyVideoGateway struct {
+	created []gateway.VideoInput
+	polls   map[string]int
+}
+
+func (f *fakeLegacyVideoGateway) GenerateImage(context.Context, gateway.ImageGenerationInput) (*gateway.Result, error) {
+	return nil, errors.New("not used")
+}
+
+func (f *fakeLegacyVideoGateway) CreateVideo(_ context.Context, input gateway.VideoInput) (mediadomain.Job, error) {
+	f.created = append(f.created, input)
+	id := "video-job-" + string(rune('0'+len(f.created)))
+	return mediadomain.Job{ID: id, Status: mediadomain.StatusQueued, Progress: 0}, nil
+}
+
+func (f *fakeLegacyVideoGateway) GetVideo(_ context.Context, id string, _ clientkeydomain.Key) (mediadomain.Job, error) {
+	if f.polls == nil {
+		f.polls = make(map[string]int)
+	}
+	f.polls[id]++
+	if f.polls[id] == 1 {
+		return mediadomain.Job{ID: id, Status: mediadomain.StatusInProgress, Progress: 35}, nil
+	}
+	return mediadomain.Job{ID: id, Status: mediadomain.StatusCompleted, Progress: 100, UpstreamURL: "https://example.com/video.mp4", Seconds: 6}, nil
+}
+
+func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true, VideoPollInterval: time.Millisecond}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	startBody := `{
+		"prompt":"move",
+		"aspect_ratio":"16:9",
+		"video_length":6,
+		"resolution_name":"720p",
+		"concurrent":2,
+		"image_references":["data:image/png;base64,YWJj"]
+	}`
+	startRequest := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(startBody))
+	startRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	startRequest.Header.Set("Content-Type", "application/json")
+	startRecorder := httptest.NewRecorder()
+	router.ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", startRecorder.Code, startRecorder.Body.String())
+	}
+	var startResponse struct {
+		TaskID  string   `json:"task_id"`
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(startRecorder.Body.Bytes(), &startResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(startResponse.TaskIDs) != 2 || startResponse.TaskID != startResponse.TaskIDs[0] || len(videoGateway.created) != 2 {
+		t.Fatalf("response=%#v created=%d", startResponse, len(videoGateway.created))
+	}
+	for _, input := range videoGateway.created {
+		if input.PublicModel != "grok-imagine-video" || input.Prompt != "move" || input.Duration != 6 || input.AspectRatio != "16:9" || input.Resolution != "720p" || len(input.ReferenceURLs) != 1 {
+			t.Fatalf("input=%#v", input)
+		}
+	}
+
+	sseRequest := httptest.NewRequest(http.MethodGet, "/v1/public/video/sse?task_id="+startResponse.TaskID+"&public_key=g2-direct-key", nil)
+	sseRecorder := httptest.NewRecorder()
+	router.ServeHTTP(sseRecorder, sseRequest)
+	if sseRecorder.Code != http.StatusOK || !strings.HasPrefix(sseRecorder.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("sse status=%d content-type=%q body=%s", sseRecorder.Code, sseRecorder.Header().Get("Content-Type"), sseRecorder.Body.String())
+	}
+	for _, expected := range []string{"当前进度 35%", "[video](https://example.com/video.mp4)", `"finish_reason":"stop"`, "data: [DONE]"} {
+		if !strings.Contains(sseRecorder.Body.String(), expected) {
+			t.Fatalf("SSE body missing %q: %s", expected, sseRecorder.Body.String())
+		}
+	}
+}
+
+func TestVideoExtensionIsRejectedUntilNativeGoPortExists(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"extend","is_video_extension":true,"extend_post_id":"post-1"}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotImplemented || !strings.Contains(recorder.Body.String(), "extension") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(videoGateway.created) != 0 {
+		t.Fatalf("unexpected jobs=%d", len(videoGateway.created))
+	}
+}
+
+func TestVideoStopRemovesLegacyPollingSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	startRequest := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"move"}`))
+	startRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	startRequest.Header.Set("Content-Type", "application/json")
+	startRecorder := httptest.NewRecorder()
+	router.ServeHTTP(startRecorder, startRequest)
+	var startResponse struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal(startRecorder.Body.Bytes(), &startResponse)
+
+	stopRequest := httptest.NewRequest(http.MethodPost, "/v1/public/video/stop", bytes.NewBufferString(`{"task_ids":["`+startResponse.TaskID+`"]}`))
+	stopRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	stopRequest.Header.Set("Content-Type", "application/json")
+	stopRecorder := httptest.NewRecorder()
+	router.ServeHTTP(stopRecorder, stopRequest)
+	if stopRecorder.Code != http.StatusOK || !strings.Contains(stopRecorder.Body.String(), `"removed":1`) {
+		t.Fatalf("stop status=%d body=%s", stopRecorder.Code, stopRecorder.Body.String())
+	}
+
+	sseRequest := httptest.NewRequest(http.MethodGet, "/v1/public/video/sse?task_id="+startResponse.TaskID+"&public_key=g2-direct-key", nil)
+	sseRecorder := httptest.NewRecorder()
+	router.ServeHTTP(sseRecorder, sseRequest)
+	if sseRecorder.Code != http.StatusNotFound {
+		t.Fatalf("sse status=%d body=%s", sseRecorder.Code, sseRecorder.Body.String())
+	}
+}
