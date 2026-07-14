@@ -70,6 +70,9 @@ type LegacyConfig struct {
 	StaticPath    string `yaml:"staticPath"`
 	AssetVersion  string `yaml:"assetVersion"`
 	PublicEnabled bool   `yaml:"publicEnabled"`
+	AdminKey      string `yaml:"adminKey"`
+	PublicKey     string `yaml:"publicKey"`
+	ClientKey     string `yaml:"clientKey"`
 }
 
 type DatabaseConfig struct {

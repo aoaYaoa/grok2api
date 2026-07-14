@@ -881,7 +881,7 @@
         }
         return;
       }
-      const res = await fetch('/v1/models', {
+      const res = await fetch('/v1/public/models', {
         cache: 'no-store',
         headers: buildAuthHeaders(authHeader)
       });
@@ -1577,5 +1577,4 @@
   loadModels();
   bindEvents();
 })();
-
 

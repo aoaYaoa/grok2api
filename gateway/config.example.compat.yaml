@@ -21,6 +21,9 @@ legacy:
   staticPath: "/app/legacy-static"
   assetVersion: "go"
   publicEnabled: true
+  adminKey: "replace-with-the-existing-admin-app-key"
+  publicKey: ""
+  clientKey: "replace-with-a-created-g2-client-key"
 
 database:
   driver: sqlite

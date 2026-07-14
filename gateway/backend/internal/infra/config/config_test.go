@@ -24,6 +24,9 @@ bootstrapAdmin:
 legacy:
   assetVersion: "test-assets"
   publicEnabled: true
+  adminKey: "legacy-admin-key"
+  publicKey: "legacy-public-key"
+  clientKey: "g2-test-client-key"
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -67,7 +70,7 @@ legacy:
 	if cfg.Legacy.StaticPath != expectedLegacyPath {
 		t.Fatalf("legacy static path = %q, want %q", cfg.Legacy.StaticPath, expectedLegacyPath)
 	}
-	if cfg.Legacy.AssetVersion != "test-assets" || !cfg.Legacy.PublicEnabled {
+	if cfg.Legacy.AssetVersion != "test-assets" || !cfg.Legacy.PublicEnabled || cfg.Legacy.AdminKey != "legacy-admin-key" || cfg.Legacy.PublicKey != "legacy-public-key" || cfg.Legacy.ClientKey != "g2-test-client-key" {
 		t.Fatalf("legacy config = %#v", cfg.Legacy)
 	}
 }

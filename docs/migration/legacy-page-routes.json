@@ -26,7 +26,7 @@
     { "path": "/v1/files/image/:param", "owner": "adapter", "pages": ["admin/cache", "imagine", "nsfw"] },
     { "path": "/v1/files/video/:param", "owner": "adapter", "pages": ["admin/cache", "video", "nsfw"] },
     { "path": "/v1/images/generations", "owner": "direct", "pages": ["pure-html-generator"] },
-    { "path": "/v1/models", "owner": "direct", "pages": ["chat"] },
+    { "path": "/v1/public/models", "owner": "adapter", "pages": ["chat"] },
     { "path": "/v1/public/chat/completions", "owner": "adapter", "pages": ["chat"] },
     { "path": "/v1/public/imagine/config", "owner": "adapter", "pages": ["imagine"] },
     { "path": "/v1/public/imagine/edit", "owner": "adapter", "pages": ["imagine", "nsfw"] },

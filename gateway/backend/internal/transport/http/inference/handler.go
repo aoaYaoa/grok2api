@@ -59,6 +59,13 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.DELETE("/responses/:responseId", h.deleteResponse)
 }
 
+// RegisterLegacyPublic exposes the preserved browser page routes after the
+// legacy authentication middleware has attached a real Go client key.
+func (h *Handler) RegisterLegacyPublic(router *gin.RouterGroup) {
+	router.GET("/models", h.listModels)
+	router.POST("/chat/completions", h.createChatCompletion)
+}
+
 type responsesRequest struct {
 	Model              string `json:"model"`
 	Stream             bool   `json:"stream"`

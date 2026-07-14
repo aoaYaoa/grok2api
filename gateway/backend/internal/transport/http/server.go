@@ -25,6 +25,7 @@ import (
 	dashboardhttp "github.com/chenyme/grok2api/backend/internal/transport/http/dashboard"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/inference"
+	legacyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/legacy"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
@@ -46,6 +47,9 @@ type Dependencies struct {
 	LegacyStaticPath    string
 	LegacyAssetVersion  string
 	LegacyPublicEnabled bool
+	LegacyAdminKey      string
+	LegacyPublicKey     string
+	LegacyClientKey     string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
 	Readiness    func(context.Context) ReadinessSnapshot
 	Ready        func(context.Context) bool
@@ -146,6 +150,7 @@ func New(deps Dependencies) *gin.Engine {
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
 	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
 
+	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
 	v1 := router.Group("/v1")
 	if deps.TrafficReady != nil {
 		v1.Use(func(c *gin.Context) {
@@ -159,7 +164,14 @@ func New(deps Dependencies) *gin.Engine {
 		})
 	}
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
-	inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes).Register(v1)
+	inferenceHandler.Register(v1)
+	legacyhttp.NewHandler(legacyhttp.Options{
+		PublicEnabled: deps.LegacyPublicEnabled,
+		AdminKey:      deps.LegacyAdminKey,
+		PublicKey:     deps.LegacyPublicKey,
+		ClientKey:     deps.LegacyClientKey,
+		StorageType:   "sqlite",
+	}, deps.ClientKeys).Register(router, inferenceHandler.RegisterLegacyPublic, nil)
 	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router

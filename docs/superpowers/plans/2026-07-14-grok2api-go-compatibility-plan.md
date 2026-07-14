@@ -23,8 +23,8 @@
 
 ## Task 3: Port Authentication, Models, Chat, And Image Workflows
 
-- [ ] Implement `/v1/public/verify`, `/v1/admin/verify`, and legacy storage/auth helpers over Go config.
-- [ ] Map `/v1/models` and `/v1/public/chat/completions` to existing Go inference services with legacy response/stream behavior.
+- [x] Implement `/v1/public/verify`, `/v1/admin/verify`, and legacy storage/auth helpers over Go config.
+- [x] Map legacy public models and `/v1/public/chat/completions` to existing Go inference services with legacy response/stream behavior.
 - [ ] Port imagine config/start/stop/SSE/WebSocket, edit, parent-post, workbench edit, and prompt enhancement contracts.
 - [ ] Add contract tests derived from the preserved JavaScript request and response handling.
 
