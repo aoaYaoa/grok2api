@@ -10,6 +10,7 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
+	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
@@ -28,6 +29,7 @@ type Options struct {
 	AllowNSFW         bool
 	VideoPollInterval time.Duration
 	Accounts          LegacyAccountService
+	Settings          *settingsapp.Service
 }
 
 type Handler struct {
@@ -46,6 +48,7 @@ type Handler struct {
 	promptMu       sync.Mutex
 	promptTasks    map[string]*promptTask
 	promptTaskTTL  time.Duration
+	settings       *settingsapp.Service
 }
 
 type ImageGenerator interface {
@@ -87,7 +90,7 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
 		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
 		batchTasks: make(map[string]*legacyBatchTask), promptGateway: promptGateway,
-		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute,
+		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute, settings: options.Settings,
 	}
 }
 
@@ -118,6 +121,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 	}
 	h.registerTokens(admin)
 	h.registerBatchTasks(admin)
+	h.registerConfig(admin)
 }
 
 var _ LegacyAccountService = (*accountapp.Service)(nil)

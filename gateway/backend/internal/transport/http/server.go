@@ -174,6 +174,7 @@ func New(deps Dependencies) *gin.Engine {
 		StorageType:   "sqlite",
 		AllowNSFW:     deps.LegacyAllowNSFW,
 		Accounts:      deps.Accounts,
+		Settings:      deps.Settings,
 	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, nil)
 	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
 	registerFrontend(router, deps.FrontendStaticPath)
