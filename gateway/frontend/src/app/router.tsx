@@ -2,12 +2,13 @@ import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
 import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredDashboardPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage } from "@/app/deferred-pages";
+import { gatewayBasename, gatewayRoutePaths } from "@/app/gateway-paths.mjs";
 import { LoginPage } from "@/features/auth/login-page";
 
 export const router = createBrowserRouter([
   {
     element: <AnonymousBoundary />,
-    children: [{ path: "/login", element: <LoginPage /> }],
+    children: [{ path: gatewayRoutePaths.login, element: <LoginPage /> }],
   },
   {
     element: <AuthBoundary />,
@@ -15,18 +16,18 @@ export const router = createBrowserRouter([
       {
         element: <DeferredAppShell />,
         children: [
-          { index: true, element: <Navigate to="/dashboard" replace /> },
-          { path: "/dashboard", element: <DeferredDashboardPage /> },
-          { path: "/accounts", element: <DeferredAccountsPage /> },
-          { path: "/models", element: <DeferredModelsPage /> },
-          { path: "/client-keys", element: <DeferredClientKeysPage /> },
-          { path: "/request-audits", element: <DeferredRequestAuditsPage /> },
-          { path: "/docs", element: <Navigate to="/docs/chat/completions" replace /> },
-          { path: "/docs/:category/:endpoint", element: <DeferredApiDocsPage /> },
-          { path: "/settings", element: <DeferredSettingsPage /> },
+          { index: true, element: <Navigate to={gatewayRoutePaths.dashboard} replace /> },
+          { path: gatewayRoutePaths.dashboard, element: <DeferredDashboardPage /> },
+          { path: gatewayRoutePaths.accounts, element: <DeferredAccountsPage /> },
+          { path: gatewayRoutePaths.models, element: <DeferredModelsPage /> },
+          { path: gatewayRoutePaths.clientKeys, element: <DeferredClientKeysPage /> },
+          { path: gatewayRoutePaths.requestAudits, element: <DeferredRequestAuditsPage /> },
+          { path: gatewayRoutePaths.docs, element: <Navigate to={gatewayRoutePaths.docsDefault} replace /> },
+          { path: gatewayRoutePaths.docsEndpoint, element: <DeferredApiDocsPage /> },
+          { path: gatewayRoutePaths.settings, element: <DeferredSettingsPage /> },
         ],
       },
     ],
   },
-  { path: "*", element: <Navigate to="/dashboard" replace /> },
-], { basename: "/gateway" });
+  { path: "*", element: <Navigate to={gatewayRoutePaths.dashboard} replace /> },
+], { basename: gatewayBasename });

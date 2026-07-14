@@ -1,18 +1,21 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+import { gatewayViteBase } from "./src/app/gateway-paths.mjs";
+
 export default defineConfig({
-  base: "/gateway/",
+  base: gatewayViteBase,
   plugins: [react(), tailwindcss()],
   define: {
     __GROK2API_DEV_API_TARGET__: JSON.stringify(process.env.VITE_DEV_API_TARGET ?? ""),
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(path.dirname(fileURLToPath(import.meta.url)), "./src"),
     },
   },
   server: {
