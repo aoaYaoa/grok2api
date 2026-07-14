@@ -30,9 +30,6 @@ services:
       SERVER_WORKERS: 1
       SERVER_STORAGE_TYPE: local
       APP_ASSET_VERSION: ${APP_ASSET_VERSION:-}
-      FLARESOLVERR_URL: http://flaresolverr:8191
-      CF_REFRESH_INTERVAL: "${CF_REFRESH_INTERVAL:-600}"
-      CF_TIMEOUT: "${CF_TIMEOUT:-60}"
     expose:
       - "8000"
     volumes:
@@ -41,8 +38,6 @@ services:
       - ./app/static:/app/app/static
     depends_on:
       warp:
-        condition: service_started
-      flaresolverr:
         condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
