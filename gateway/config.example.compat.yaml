@@ -14,7 +14,7 @@ bootstrapAdmin:
   password: "replace-with-a-strong-password"
 
 frontend:
-  publicApiBaseURL: "http://127.0.0.1:18000/gateway"
+  publicApiBaseURL: "http://127.0.0.1:18002/gateway"
   staticPath: "/app/frontend/dist"
 
 database:
