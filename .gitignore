@@ -48,7 +48,6 @@ logs/
 data/*.json
 data/tmp/*
 data/.locks/*
-gateway-data/
 gateway-config/
 app/data/*.json
 app/data/tmp/*

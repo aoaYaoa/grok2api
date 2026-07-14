@@ -68,7 +68,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      - ./gateway-data:/app/data
+      - grok2api_gateway_data:/app/data
     depends_on:
       warp:
         condition: service_started
@@ -98,3 +98,6 @@ services:
       TZ: Asia/Shanghai
       LOG_LEVEL: info
     restart: unless-stopped
+
+volumes:
+  grok2api_gateway_data:

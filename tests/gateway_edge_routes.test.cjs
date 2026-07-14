@@ -64,7 +64,10 @@ test("hybrid compose isolates Python and Go behind one edge without Redis", () =
   assert.equal(configVolume.read_only, true);
   assert.equal(configVolume.bind.create_host_path, false);
   assert.ok(configVolume.source.endsWith("/gateway-config/config.yaml"));
-  assert.ok(goVolumes.some((volume) => volume.target === "/app/data" && volume.source.endsWith("/gateway-data")));
+  const dataVolume = goVolumes.find((volume) => volume.target === "/app/data");
+  assert.ok(dataVolume);
+  assert.equal(dataVolume.type, "volume");
+  assert.match(dataVolume.source, /grok2api_gateway_data$/);
 
   const edgeHealth = model.services.grok2api_edge.healthcheck.test.join(" ");
   assert.match(edgeHealth, /\/health/);
@@ -112,6 +115,5 @@ test("Go compatibility config is single-instance memory and local storage", () =
   assert.match(config, /runtimeStore:[\s\S]*driver: memory/);
   assert.match(config, /media:[\s\S]*driver: local/);
   assert.match(config, /socks5:\/\/warp:1080/);
-  assert.match(gitignore, /^gateway-data\/$/m);
   assert.match(gitignore, /^gateway-config\/$/m);
 });
