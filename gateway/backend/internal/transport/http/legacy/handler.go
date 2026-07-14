@@ -42,6 +42,10 @@ type Handler struct {
 	accounts       LegacyAccountService
 	batchMu        sync.RWMutex
 	batchTasks     map[string]*legacyBatchTask
+	promptGateway  PromptGateway
+	promptMu       sync.Mutex
+	promptTasks    map[string]*promptTask
+	promptTaskTTL  time.Duration
 }
 
 type ImageGenerator interface {
@@ -50,6 +54,10 @@ type ImageGenerator interface {
 
 type ImageEditor interface {
 	EditImage(context.Context, gateway.ImageEditInput) (*gateway.Result, error)
+}
+
+type PromptGateway interface {
+	CreateChatCompletion(context.Context, gateway.Input) (*gateway.Result, error)
 }
 
 func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator ...ImageGenerator) *Handler {
@@ -71,10 +79,15 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 	if candidate, ok := generator.(VideoGateway); ok {
 		videoGateway = candidate
 	}
+	var promptGateway PromptGateway
+	if candidate, ok := generator.(PromptGateway); ok {
+		promptGateway = candidate
+	}
 	return &Handler{
 		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
 		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
-		batchTasks: make(map[string]*legacyBatchTask),
+		batchTasks: make(map[string]*legacyBatchTask), promptGateway: promptGateway,
+		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute,
 	}
 }
 
@@ -90,6 +103,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 	}
 	h.registerImagine(public)
 	h.registerVideo(public)
+	h.registerPrompt(public)
 
 	admin := router.Group("/v1/admin")
 	admin.Use(h.adminAuth())
