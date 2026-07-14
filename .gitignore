@@ -48,6 +48,7 @@ logs/
 data/*.json
 data/tmp/*
 data/.locks/*
+data/gateway/
 app/data/*.json
 app/data/tmp/*
 app/data/.locks/*

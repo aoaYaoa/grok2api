@@ -1,53 +1,96 @@
 services:
-  grok2api:
-    container_name: grok2api
+  grok2api_edge:
+    image: nginx:1.27-alpine
+    ports:
+      - "${GROK2API_PORT:-18000}:8000"
+    volumes:
+      - ./nginx/conf/hybrid.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      grok2api_python:
+        condition: service_healthy
+      grok2api_go:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  grok2api_python:
     build:
       context: .
       dockerfile: Dockerfile
-    image: grok2api-local:latest
-    ports:
-      - "18000:8000"
+    image: grok2api-python-local:latest
     environment:
       TZ: Asia/Shanghai
       LOG_LEVEL: INFO
       SERVER_PORT: 8000
       SERVER_WORKERS: 1
       SERVER_STORAGE_TYPE: local
-      # 可选：手动指定前端静态资源版本，用于强制浏览器刷新缓存
       APP_ASSET_VERSION: ${APP_ASSET_VERSION:-}
-      # 启用 CF 自动刷新: 取消以下三行注释，并取消底部 flaresolverr 服务的注释
-      # FLARESOLVERR_URL: http://flaresolverr:8191
-      # CF_REFRESH_INTERVAL: "600"
-      # CF_TIMEOUT: "60"
-
-      # SERVER_STORAGE_TYPE: (local, redis, mysql, pgsql) default: local
-      # SERVER_STORAGE_URL: (local mode is empty) default: empty
-      #   Redis: redis://localhost:6379/0 or redis://:password@localhost:6379/0
-      #   MySQL: mysql+aiomysql://user:pass@localhost/db
-      #   PgSQL: postgresql+asyncpg://user:pass@localhost/db
+      FLARESOLVERR_URL: http://flaresolverr:8191
+      CF_REFRESH_INTERVAL: "${CF_REFRESH_INTERVAL:-600}"
+      CF_TIMEOUT: "${CF_TIMEOUT:-60}"
+    expose:
+      - "8000"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./app/static:/app/app/static
+    depends_on:
+      warp:
+        condition: service_started
+      flaresolverr:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
+
+  grok2api_go:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: grok2api-go-local:latest
+    environment:
+      TZ: Asia/Shanghai
+      GROK2API_CONFIG_SOURCE: /run/grok2api/config.yaml
+    expose:
+      - "8000"
+    volumes:
+      - ./data/gateway/config.yaml:/run/grok2api/config.yaml:ro
+      - ./data/gateway:/app/data
+    depends_on:
+      warp:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
 
   warp:
-    container_name: warp
     image: caomingjun/warp:latest
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:1080:1080"
     environment:
-      - WARP_SLEEP=2
+      WARP_SLEEP: "2"
     cap_add:
       - NET_ADMIN
+    restart: unless-stopped
 
   flaresolverr:
-    container_name: flaresolverr
     image: ghcr.io/flaresolverr/flaresolverr:latest
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8191:8191"
     environment:
       TZ: Asia/Shanghai
       LOG_LEVEL: info
+    restart: unless-stopped

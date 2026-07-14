@@ -1,0 +1,50 @@
+server:
+  listen: "0.0.0.0:8000"
+  maxBodyBytes: 33554432
+  readTimeout: 15m
+  requestTimeout: 2h
+  swaggerEnabled: false
+
+secrets:
+  jwtSecret: "replace-with-at-least-32-characters"
+  credentialEncryptionKey: "replace-with-base64-encoded-32-byte-key"
+
+bootstrapAdmin:
+  username: "admin"
+  password: "replace-with-a-strong-password"
+
+frontend:
+  publicApiBaseURL: "http://127.0.0.1:18000/gateway"
+  staticPath: "/app/frontend/dist"
+
+database:
+  driver: sqlite
+  sqlite:
+    path: "/app/data/backend.db"
+  postgres:
+    dsn: ""
+    maxOpenConns: 50
+    maxIdleConns: 10
+
+runtimeStore:
+  driver: memory
+  redis:
+    address: ""
+    username: ""
+    password: ""
+    database: 0
+    keyPrefix: "grok2api:"
+    tls: false
+
+auth:
+  accessTokenTTL: 15m
+  refreshTokenTTL: 720h
+  secureCookies: false
+
+media:
+  driver: local
+  local:
+    path: "/app/data/media"
+
+# Add the shared WARP node from the gateway Settings page when required:
+# socks5://warp:1080
