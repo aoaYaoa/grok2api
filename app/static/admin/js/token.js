@@ -28,32 +28,24 @@ function getDefaultQuotaForPool(pool) {
 function buildDefaultQuotaSet(pool, quota = null) {
   const remaining = Number.isFinite(Number(quota)) ? Number(quota) : getDefaultQuotaForPool(pool);
   const base = {
-    auto: { remaining, total: remaining },
-    fast: { remaining, total: remaining },
-    expert: { remaining, total: remaining }
+    auto: { remaining, total: remaining, available: true },
+    fast: { remaining, total: remaining, available: true },
+    expert: { remaining, total: remaining, available: true }
   };
   if (pool === 'ssoSuper' || pool === 'ssoHeavy') {
-    base.grok_4_3 = { remaining, total: remaining };
+    base.grok_4_3 = { remaining, total: remaining, available: true };
   }
   if (pool === 'ssoHeavy') {
-    base.heavy = { remaining: 20, total: 20 };
+    base.heavy = { remaining: 20, total: 20, available: true };
   }
   return base;
 }
 
 function buildEmptyQuotaSet(pool) {
-  const base = {
-    auto: { remaining: 0, total: 0 },
-    fast: { remaining: 0, total: 0 },
-    expert: { remaining: 0, total: 0 }
-  };
-  if (pool === 'ssoSuper' || pool === 'ssoHeavy') {
-    base.grok_4_3 = { remaining: 0, total: 0 };
-  }
-  if (pool === 'ssoHeavy') {
-    base.heavy = { remaining: 0, total: 0 };
-  }
-  return base;
+  return QUOTA_MODES.reduce((result, mode) => {
+    result[mode] = { remaining: 0, total: 0, available: false };
+    return result;
+  }, {});
 }
 
 function normalizeQuota(quota, pool) {
@@ -65,6 +57,7 @@ function normalizeQuota(quota, pool) {
           normalized[mode] = {
             remaining: Number(quota[mode].remaining || 0),
             total: Number(quota[mode].total ?? quota[mode].remaining ?? 0),
+            available: true,
             window_seconds: quota[mode].window_seconds ?? null,
             reset_at: quota[mode].reset_at ?? null,
             synced_at: quota[mode].synced_at ?? null,
@@ -78,11 +71,16 @@ function normalizeQuota(quota, pool) {
       return buildDefaultQuotaSet(pool, Number(quota.remaining ?? quota.total ?? 0));
     }
   }
+  if (quota === null || quota === undefined || quota === '' || (typeof quota === 'object' && !Array.isArray(quota))) {
+    return buildEmptyQuotaSet(pool);
+  }
   return buildDefaultQuotaSet(pool, Number(quota || 0));
 }
 
 function quotaRemaining(quota, mode = 'auto') {
-  return Number(quota?.[mode]?.remaining || 0);
+  const value = quota?.[mode];
+  if (!value || value.available === false) return 0;
+  return Number(value.remaining || 0);
 }
 
 function primaryQuota(quota) {
@@ -100,16 +98,21 @@ function quotaForEdit(currentQuota, currentPool, newPool, newAutoQuota) {
 
 function renderQuotaPills(quota) {
   const pills = [
-    ['Auto', quotaRemaining(quota, 'auto'), 'badge-blue'],
-    ['Fast', quotaRemaining(quota, 'fast'), 'badge-green'],
-    ['Expert', quotaRemaining(quota, 'expert'), 'badge-purple'],
-    ['Heavy', quotaRemaining(quota, 'heavy'), 'badge-orange'],
-    ['G4', quotaRemaining(quota, 'grok_4_3'), 'badge-pink'],
+    ['Auto', 'auto', 'badge-blue'],
+    ['Fast', 'fast', 'badge-green'],
+    ['Expert', 'expert', 'badge-purple'],
+    ['Heavy', 'heavy', 'badge-orange'],
+    ['G4', 'grok_4_3', 'badge-pink'],
   ];
   return pills
-    .filter(([, value]) => value > 0)
-    .map(([label, value, cls]) => `<span class="badge ${cls}">${label}:${value}</span>`)
-    .join(' ') || '<span class="badge badge-gray">无额度</span>';
+    .map(([label, mode, cls]) => {
+      const value = quota?.[mode];
+      if (!value || value.available === false) {
+        return `<span class="badge badge-gray">${label}:未返回</span>`;
+      }
+      return `<span class="badge ${cls}">${label}:${quotaRemaining(quota, mode)}</span>`;
+    })
+    .join(' ');
 }
 
 function setText(id, text) {
@@ -246,7 +249,7 @@ function processTokens(data) {
       tokens.forEach(t => {
         // Normalize
         const tObj = typeof t === 'string'
-          ? { token: t, status: 'active', quota: buildDefaultQuotaSet(pool, 0), note: '', use_count: 0, tags: [] }
+          ? { token: t, status: 'active', quota: buildEmptyQuotaSet(pool), note: '', use_count: 0, tags: [] }
           : {
             token: t.token,
             status: t.status || 'active',
@@ -752,7 +755,6 @@ async function submitImport() {
   const pool = byId('import-pool').value.trim() || 'ssoBasic';
   const text = byId('import-text').value;
   const lines = text.split('\n');
-  const defaultQuota = getDefaultQuotaForPool(pool);
 
   lines.forEach(line => {
     const t = line.trim();
@@ -761,7 +763,7 @@ async function submitImport() {
         token: t,
         pool: pool,
         status: 'active',
-        quota: buildDefaultQuotaSet(pool, defaultQuota),
+        quota: buildEmptyQuotaSet(pool),
         note: '',
         tags: [],
         fail_count: 0,

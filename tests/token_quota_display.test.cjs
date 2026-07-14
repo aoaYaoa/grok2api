@@ -133,7 +133,21 @@ test('missing heavy quota is not replaced with a synthetic allowance', () => {
   }, 'ssoHeavy');
 
   assert.equal(context.quotaRemaining(quota, 'heavy'), 0);
-  assert.doesNotMatch(context.renderQuotaPills(quota), /Heavy:/);
+  assert.match(context.renderQuotaPills(quota), /Heavy:未返回/);
+});
+
+test('empty upstream quota shows not returned instead of tier defaults', () => {
+  const context = loadTokenAdminContext();
+  const quota = context.normalizeQuota({}, 'ssoHeavy');
+  const html = context.renderQuotaPills(quota);
+
+  assert.equal(context.quotaRemaining(quota, 'auto'), 0);
+  assert.match(html, /Auto:未返回/);
+  assert.match(html, /Fast:未返回/);
+  assert.match(html, /Expert:未返回/);
+  assert.match(html, /Heavy:未返回/);
+  assert.match(html, /G4:未返回/);
+  assert.doesNotMatch(html, /Auto:400/);
 });
 
 test('quota totals include active tokens only', () => {

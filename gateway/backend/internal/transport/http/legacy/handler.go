@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -26,6 +27,7 @@ type Options struct {
 	StorageType       string
 	AllowNSFW         bool
 	VideoPollInterval time.Duration
+	Accounts          LegacyAccountService
 }
 
 type Handler struct {
@@ -37,6 +39,7 @@ type Handler struct {
 	videoGateway   VideoGateway
 	videoMu        sync.Mutex
 	videoTasks     map[string]*videoTask
+	accounts       LegacyAccountService
 }
 
 type ImageGenerator interface {
@@ -68,7 +71,7 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 	}
 	return &Handler{
 		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
-		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask),
+		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
 	}
 }
 
@@ -96,7 +99,10 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 	if registerAdmin != nil {
 		registerAdmin(admin)
 	}
+	h.registerTokens(admin)
 }
+
+var _ LegacyAccountService = (*accountapp.Service)(nil)
 
 func (h *Handler) publicAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
