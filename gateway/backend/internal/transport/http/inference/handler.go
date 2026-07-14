@@ -52,6 +52,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/messages", h.createMessage)
 	router.POST("/images/generations", h.generateImage)
 	router.POST("/images/edits", h.editImage)
+	router.POST("/videos", h.generateLegacyVideo)
 	router.POST("/videos/generations", h.generateVideo)
 	router.GET("/videos/:requestId", h.getVideo)
 	router.POST("/responses/compact", h.compactResponse)
@@ -95,6 +96,28 @@ type imageGenerationRequest struct {
 	ResponseFormat string          `json:"response_format"`
 	StorageOptions json.RawMessage `json:"storage_options"`
 	Stream         bool            `json:"stream"`
+}
+
+type legacyVideoImageReference struct {
+	ImageURL string `json:"image_url"`
+}
+
+type legacyVideoRequest struct {
+	Model          string                     `json:"model"`
+	Prompt         string                     `json:"prompt"`
+	Size           string                     `json:"size"`
+	Seconds        int                        `json:"seconds"`
+	Quality        string                     `json:"quality"`
+	ImageReference *legacyVideoImageReference `json:"image_reference"`
+}
+
+type normalizedLegacyVideoRequest struct {
+	model        string
+	prompt       string
+	aspectRatio  string
+	resolution   string
+	duration     int
+	referenceURL string
 }
 
 type imageEditJSONImage struct {
@@ -254,7 +277,7 @@ func (h *Handler) generateImage(c *gin.Context) {
 		return
 	}
 	result, err := h.gateway.GenerateImage(c.Request.Context(), gateway.ImageGenerationInput{
-		RequestID: requestID, ClientKey: clientKey, PublicModel: request.Model, Prompt: request.Prompt,
+		RequestID: requestID, ClientKey: clientKey, PublicModel: normalizeLegacyImageModel(request.Model), Prompt: request.Prompt,
 		Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
 		Resolution: request.Resolution, ResponseFormat: request.ResponseFormat, Streaming: request.Stream,
 	})
@@ -263,6 +286,136 @@ func (h *Handler) generateImage(c *gin.Context) {
 		return
 	}
 	h.writeResult(c, result, request.Stream)
+}
+
+func normalizeLegacyImageModel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "grok-imagine-1.0" {
+		return "grok-imagine-image-quality"
+	}
+	return value
+}
+
+func (h *Handler) generateLegacyVideo(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
+	if !isJSONRequest(c) {
+		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "视频生成仅支持 application/json")
+		return
+	}
+	var request legacyVideoRequest
+	if err := decodeSingleJSON(c.Request.Body, &request, true); err != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频生成 JSON 请求无效: "+err.Error())
+		return
+	}
+	input, err := normalizeLegacyVideoRequest(request)
+	if err != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	clientKey, requestID, ok := requestIdentity(c)
+	if !ok {
+		return
+	}
+	job, err := h.gateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
+		RequestID: requestID, ClientKey: clientKey, PublicModel: input.model, Prompt: input.prompt,
+		Duration: input.duration, AspectRatio: input.aspectRatio, Resolution: input.resolution,
+		ReferenceURLs: compactStrings([]string{input.referenceURL}),
+	})
+	if err != nil {
+		writeGatewayError(c, err)
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		job, err = h.gateway.GetVideo(c.Request.Context(), job.ID, clientKey)
+		if err != nil {
+			writeGatewayError(c, err)
+			return
+		}
+		switch job.Status {
+		case mediadomain.StatusCompleted:
+			c.JSON(http.StatusOK, gin.H{"url": job.UpstreamURL, "video_url": job.UpstreamURL, "request_id": job.ID})
+			return
+		case mediadomain.StatusFailed:
+			message := strings.TrimSpace(job.ErrorMessage)
+			if message == "" {
+				message = "视频生成失败"
+			}
+			writeOpenAIError(c, http.StatusBadGateway, "video_generation_failed", message)
+			return
+		}
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func normalizeLegacyVideoRequest(request legacyVideoRequest) (normalizedLegacyVideoRequest, error) {
+	model := strings.TrimSpace(request.Model)
+	if model == "grok-imagine-1.0-video" {
+		model = "grok-imagine-video"
+	}
+	if model != "grok-imagine-video" {
+		return normalizedLegacyVideoRequest{}, errors.New("model 必须是 grok-imagine-1.0-video 或 grok-imagine-video")
+	}
+	duration := request.Seconds
+	if duration == 0 {
+		duration = 6
+	}
+	if duration < 1 || duration > 15 {
+		return normalizedLegacyVideoRequest{}, errors.New("seconds 必须在 1 到 15 秒之间")
+	}
+	aspectRatio, ok := legacyVideoAspectRatio(request.Size)
+	if !ok {
+		return normalizedLegacyVideoRequest{}, errors.New("size 必须是支持的横屏、竖屏或方形尺寸")
+	}
+	resolution := strings.ToLower(strings.TrimSpace(request.Quality))
+	switch resolution {
+	case "", "standard", "480p":
+		resolution = "480p"
+	case "high", "720p":
+		resolution = "720p"
+	default:
+		return normalizedLegacyVideoRequest{}, errors.New("quality 必须是 standard、high、480p 或 720p")
+	}
+	prompt := strings.TrimSpace(request.Prompt)
+	referenceURL := ""
+	if request.ImageReference != nil {
+		referenceURL = strings.TrimSpace(request.ImageReference.ImageURL)
+	}
+	if prompt == "" && referenceURL == "" {
+		return normalizedLegacyVideoRequest{}, errors.New("prompt 不能为空")
+	}
+	return normalizedLegacyVideoRequest{
+		model: model, prompt: prompt, aspectRatio: aspectRatio, resolution: resolution,
+		duration: duration, referenceURL: referenceURL,
+	}, nil
+}
+
+func legacyVideoAspectRatio(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1280x720", "1792x1024", "16:9":
+		return "16:9", true
+	case "720x1280", "1024x1792", "9:16":
+		return "9:16", true
+	case "1024x1024", "1:1", "":
+		return "1:1", true
+	default:
+		return "", false
+	}
+}
+
+func compactStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {

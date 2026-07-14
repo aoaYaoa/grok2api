@@ -78,15 +78,63 @@ func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
 		t.Fatalf("wrong content type status=%d body=%s", wrongContentTypeRecorder.Code, wrongContentTypeRecorder.Body.String())
 	}
 
-	unsupportedRecorder := httptest.NewRecorder()
-	router.ServeHTTP(unsupportedRecorder, httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{}`)))
-	if unsupportedRecorder.Code != http.StatusNotFound {
-		t.Fatalf("unsupported video endpoint status=%d", unsupportedRecorder.Code)
+	legacyRequest := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{
+		"model":"grok-imagine-1.0-video","prompt":"test","size":"1792x1024",
+		"seconds":6,"quality":"high","image_reference":{"image_url":"https://example.com/input.png"}
+	}`))
+	legacyRequest.Header.Set("Content-Type", "application/json")
+	legacyRecorder := httptest.NewRecorder()
+	router.ServeHTTP(legacyRecorder, legacyRequest)
+	if legacyRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy video endpoint status=%d body=%s", legacyRecorder.Code, legacyRecorder.Body.String())
 	}
 	contentRecorder := httptest.NewRecorder()
 	router.ServeHTTP(contentRecorder, httptest.NewRequest(http.MethodGet, "/v1/videos/request_1/content", nil))
 	if contentRecorder.Code != http.StatusNotFound {
 		t.Fatalf("video content endpoint status=%d", contentRecorder.Code)
+	}
+}
+
+func TestNormalizeLegacyVideoRequest(t *testing.T) {
+	tests := []struct {
+		name        string
+		request     legacyVideoRequest
+		wantModel   string
+		wantRatio   string
+		wantQuality string
+		wantRef     string
+		wantError   string
+	}{
+		{name: "desktop high", request: legacyVideoRequest{Model: "grok-imagine-1.0-video", Prompt: "move", Size: "1792x1024", Seconds: 6, Quality: "high", ImageReference: &legacyVideoImageReference{ImageURL: "https://example.com/input.png"}}, wantModel: "grok-imagine-video", wantRatio: "16:9", wantQuality: "720p", wantRef: "https://example.com/input.png"},
+		{name: "portrait standard", request: legacyVideoRequest{Model: "grok-imagine-video", Prompt: "move", Size: "720x1280", Seconds: 15, Quality: "standard"}, wantModel: "grok-imagine-video", wantRatio: "9:16", wantQuality: "480p"},
+		{name: "unsupported duration", request: legacyVideoRequest{Model: "grok-imagine-1.0-video", Prompt: "move", Size: "1024x1024", Seconds: 30, Quality: "standard"}, wantError: "1 到 15"},
+		{name: "unsupported model", request: legacyVideoRequest{Model: "other", Prompt: "move", Size: "1024x1024", Seconds: 6, Quality: "standard"}, wantError: "model"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input, err := normalizeLegacyVideoRequest(test.request)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if input.model != test.wantModel || input.aspectRatio != test.wantRatio || input.resolution != test.wantQuality || input.referenceURL != test.wantRef {
+				t.Fatalf("input=%+v", input)
+			}
+		})
+	}
+}
+
+func TestNormalizeLegacyImageModel(t *testing.T) {
+	if got := normalizeLegacyImageModel(" grok-imagine-1.0 "); got != "grok-imagine-image-quality" {
+		t.Fatalf("legacy alias=%q", got)
+	}
+	if got := normalizeLegacyImageModel("grok-imagine-image"); got != "grok-imagine-image" {
+		t.Fatalf("native model=%q", got)
 	}
 }
 
