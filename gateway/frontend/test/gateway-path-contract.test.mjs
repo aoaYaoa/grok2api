@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -35,16 +37,18 @@ test("the actual router configuration resolves nested gateway docs URLs", async 
   );
   assert.ok(loadedConfig, "vite.config.ts must load for router tests");
 
+  const cacheDir = await mkdtemp(path.join(os.tmpdir(), "grok2api-gateway-router-"));
   const server = await createServer({
     ...loadedConfig.config,
     configFile: false,
     root: frontendRoot,
-    cacheDir: "/private/tmp/grok2api-gateway-router-test",
+    cacheDir,
     server: { middlewareMode: true, hmr: false },
     appType: "custom",
   });
 
   try {
+    assert.ok(server.config.cacheDir.startsWith(os.tmpdir()), "router test cache must use the platform temp directory");
     const routerModule = await server.ssrLoadModule("/src/app/router.tsx");
     const matches = matchRoutes(
       routerModule.gatewayRouterRoutes,
@@ -57,5 +61,6 @@ test("the actual router configuration resolves nested gateway docs URLs", async 
     assert.deepEqual(matches.at(-1)?.params, { category: "chat", endpoint: "completions" });
   } finally {
     await server.close();
+    await rm(cacheDir, { recursive: true, force: true });
   }
 });
