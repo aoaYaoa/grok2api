@@ -113,6 +113,7 @@ type ImageGenerationRequest struct {
 	Resolution     string
 	ResponseFormat string
 	Streaming      bool
+	NSFW           *bool
 }
 
 type ImageInput struct {

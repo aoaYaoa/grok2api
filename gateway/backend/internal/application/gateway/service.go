@@ -530,6 +530,7 @@ type ImageGenerationInput struct {
 	Resolution     string
 	ResponseFormat string
 	Streaming      bool
+	NSFW           *bool
 }
 
 type ImageEditInput struct {
@@ -548,7 +549,7 @@ func (s *Service) GenerateImage(ctx context.Context, input ImageGenerationInput)
 		return adapter.GenerateImage(ctx, provider.ImageGenerationRequest{
 			Credential: credential, Model: upstream, Prompt: input.Prompt, Count: input.Count,
 			Size: input.Size, AspectRatio: input.AspectRatio, Resolution: input.Resolution,
-			ResponseFormat: input.ResponseFormat, Streaming: input.Streaming,
+			ResponseFormat: input.ResponseFormat, Streaming: input.Streaming, NSFW: input.NSFW,
 		})
 	}, input.Streaming, input.Resolution, input.Count, 0)
 }

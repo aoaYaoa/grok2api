@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 )
 
 const maxLegacyImageResponseBytes = 64 << 20
+
+var parentPostIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
 type imageTask struct {
 	id          string
@@ -76,6 +79,7 @@ func (h *Handler) registerImagine(public *gin.RouterGroup) {
 	public.GET("/imagine/sse", h.imagineSSE)
 	public.POST("/imagine/edit", h.imagineEdit)
 	public.POST("/imagine/workbench/edit", h.imagineWorkbenchEdit)
+	public.GET("/imagine/parent-post", h.imagineParentPost)
 }
 
 func (h *Handler) imagineConfig(c *gin.Context) {
@@ -180,7 +184,7 @@ func (h *Handler) imagineSSE(c *gin.Context) {
 		result, err := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{
 			RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey,
 			PublicModel: "grok-imagine-image-quality", Prompt: task.prompt, Count: 1,
-			AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json",
+			AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw,
 		})
 		if err != nil {
 			writeLegacySSE(c, gin.H{"type": "error", "message": err.Error(), "code": "image_generation_failed"})
@@ -210,6 +214,19 @@ func (h *Handler) imagineSSE(c *gin.Context) {
 			})
 		}
 	}
+}
+
+func (h *Handler) imagineParentPost(c *gin.Context) {
+	parentPostID := strings.TrimSpace(c.Query("parent_post_id"))
+	if !parentPostIDPattern.MatchString(parentPostID) {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "parent_post_id format is invalid"})
+		return
+	}
+	sourceURL := imaginePublicImageURL(parentPostID)
+	c.JSON(http.StatusOK, gin.H{
+		"parent_post_id": parentPostID, "media_url": "", "thumbnail_image_url": "",
+		"source_image_url": sourceURL, "mime_type": "image/jpeg", "original_post_id": "", "original_ref_type": "",
+	})
 }
 
 func (h *Handler) imagineEdit(c *gin.Context) {
@@ -300,8 +317,10 @@ func collectEditImages(request imagineEditRequest, workbench bool) []string {
 		for _, item := range request.ReferenceItems {
 			if strings.TrimSpace(item.SourceImageURL) != "" {
 				add(item.SourceImageURL)
-			} else {
+			} else if strings.TrimSpace(item.ImageURL) != "" {
 				add(item.ImageURL)
+			} else if parentPostIDPattern.MatchString(strings.TrimSpace(item.ParentPostID)) {
+				add(imaginePublicImageURL(strings.TrimSpace(item.ParentPostID)))
 			}
 		}
 	}
@@ -314,7 +333,14 @@ func collectEditImages(request imagineEditRequest, workbench bool) []string {
 			add("data:image/jpeg;base64," + raw)
 		}
 	}
+	if len(values) == 0 && parentPostIDPattern.MatchString(strings.TrimSpace(request.ParentPostID)) {
+		add(imaginePublicImageURL(strings.TrimSpace(request.ParentPostID)))
+	}
 	return values
+}
+
+func imaginePublicImageURL(parentPostID string) string {
+	return "https://imagine-public.x.ai/imagine-public/images/" + parentPostID + ".jpg"
 }
 
 func buildImagineEditPayload(response imageAPIResponse, request imagineEditRequest, elapsedMS int64) gin.H {

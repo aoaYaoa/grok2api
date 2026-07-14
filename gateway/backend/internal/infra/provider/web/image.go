@@ -533,7 +533,11 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 		return nil, err
 	}
-	if err := connection.WriteJSON(imagineRequestMessage(newWebID("img"), request.Prompt, ratio, cfg.AllowNSFW, modelConfig.Pro, modelConfig.NativeBatchSize)); err != nil {
+	nsfw := cfg.AllowNSFW
+	if request.NSFW != nil {
+		nsfw = *request.NSFW
+	}
+	if err := connection.WriteJSON(imagineRequestMessage(newWebID("img"), request.Prompt, ratio, nsfw, modelConfig.Pro, modelConfig.NativeBatchSize)); err != nil {
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 		return nil, err
 	}
