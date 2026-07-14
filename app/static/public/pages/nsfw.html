@@ -185,7 +185,7 @@
   <div id="nsfwSettingsOverlay" class="nsfw-settings-overlay"></div>
 
   <!-- 移动端双行 Sticky Bar -->
-  <div id="nsfwStickyBar" class="nsfw-sticky-bar">
+  <div id="nsfwStickyBar" class="nsfw-sticky-bar" data-mobile-fab>
     <!-- 第一行：候选图操作：左⚙ + 右主按钮 -->
     <div class="nsfw-sticky-row nsfw-sticky-row--image">
       <button class="nsfw-icon-btn" id="nsfwSettingsBtn" type="button" title="生成参数" aria-label="生成参数">
@@ -236,6 +236,7 @@
             <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
           </svg>
         </button>
+        <button class="nsfw-icon-btn" data-proxy-click="#extendVideoBtn" type="button" title="延长当前视频" aria-label="延长当前视频">延长</button>
         <!-- 生成视频/中断视频 主按钮 -->
         <button id="imStartVideoBtn" class="geist-button nsfw-main-btn nsfw-main-btn--video" type="button" disabled>
           <svg class="nsfw-btn-play" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
