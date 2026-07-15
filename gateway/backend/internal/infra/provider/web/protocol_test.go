@@ -734,6 +734,30 @@ func TestGenerateVideoArchivesProtectedOutputWithAccountSession(t *testing.T) {
 	}
 }
 
+func TestArchiveVideoRejectsHTTPDowngradeAgainstHTTPSBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "video/mp4")
+		_, _ = io.WriteString(writer, "must not be fetched")
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := strings.Replace(server.URL, "http://", "https://", 1)
+	adapter := NewAdapter(Config{BaseURL: baseURL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter.SetVideoAssetStore(&videoAssetStoreStub{})
+	_, err = adapter.ArchiveVideo(context.Background(), account.Credential{ID: 1, EncryptedAccessToken: encrypted}, provider.VideoResult{URL: server.URL + "/video.mp4", ContentType: "video/mp4"})
+	if err == nil || !provider.IsMediaPostProcessingError(err) {
+		t.Fatalf("HTTP downgrade was accepted: %v", err)
+	}
+}
+
 type videoAssetStoreStub struct{ data []byte }
 
 func (s *videoAssetStoreStub) SaveVideo(_ context.Context, _ string, _ string, body io.Reader) (string, error) {

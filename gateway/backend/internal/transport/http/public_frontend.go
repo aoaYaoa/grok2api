@@ -43,6 +43,16 @@ func registerPublicFrontend(router *gin.Engine, staticPath string, enabled bool)
 	}
 	router.GET("/assets/*filepath", asset)
 	router.HEAD("/assets/*filepath", asset)
+	router.GET("/sw.js", func(c *gin.Context) {
+		filePath, exists := frontendFile(root, "/sw.js")
+		if !exists {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Header("Cache-Control", "no-store, max-age=0")
+		c.Header("Service-Worker-Allowed", "/")
+		http.ServeFile(c.Writer, c.Request, filepath.Join(root, filePath))
+	})
 	for _, assetPath := range []string{"/grok2api.png", "/manifest.webmanifest", "/favicon.ico"} {
 		assetPath := assetPath
 		router.GET(assetPath, func(c *gin.Context) {

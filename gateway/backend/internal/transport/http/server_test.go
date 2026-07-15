@@ -151,6 +151,7 @@ func TestPublicAndGatewayReactFrontendsAreServedByOneGoRouter(t *testing.T) {
 		"public/index.html":           "<html>public-react</html>",
 		"public/assets/public.js":     "console.log('public-react')",
 		"public/manifest.webmanifest": `{"name":"react"}`,
+		"public/sw.js":                "self.registration.unregister()",
 		"public/grok2api.png":         "icon",
 		"public/favicon.ico":          "icon",
 	}
@@ -197,7 +198,7 @@ func TestPublicAndGatewayReactFrontendsAreServedByOneGoRouter(t *testing.T) {
 		{path: "/static/common/js/app.js", status: http.StatusNotFound},
 		{path: "/assets/public.js", status: http.StatusOK, body: "public-react", cache: "public"},
 		{path: "/manifest.webmanifest", status: http.StatusOK, body: "react"},
-		{path: "/sw.js", status: http.StatusNotFound},
+		{path: "/sw.js", status: http.StatusOK, body: "registration.unregister", cache: "no-store", contentType: "text/javascript"},
 		{path: "/favicon.ico", status: http.StatusOK, body: "icon", contentType: "image/x-icon"},
 		{path: "/v1/files/image/cached.png", status: http.StatusOK, body: "cached-image", contentType: "image/png"},
 		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "gateway", cache: "public"},

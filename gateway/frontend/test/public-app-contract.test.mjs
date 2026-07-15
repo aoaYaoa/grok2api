@@ -53,6 +53,22 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.match(video, /scrollIntoView/);
   assert.match(video, /disabled=\{!prompt\.trim\(\) && !references\.length\}/);
   assert.match(grid, /onExtend\?:/);
+  assert.match(grid, /<video[^>]*controls/);
+  assert.doesNotMatch(grid, /onPlay=\{\(\) => onActivate/);
+});
+
+test("public app retires legacy service workers and PWA caches", async () => {
+  const publicMain = await readFile(path.join(root, "src/public-main.tsx"), "utf8");
+  const worker = await readFile(path.join(root, "public/sw.js"), "utf8");
+
+  assert.match(publicMain, /navigator\.serviceWorker\.getRegistrations/);
+  assert.match(publicMain, /registration\.unregister/);
+  assert.match(publicMain, /scriptURL/);
+  assert.match(publicMain, /\/sw\.js/);
+  assert.match(publicMain, /caches\.keys/);
+  assert.match(publicMain, /grok2api-pwa-/);
+  assert.match(publicMain, /\.catch\(/);
+  assert.doesNotMatch(worker, /client\.navigate/);
 });
 
 test("video cache dialog does not merge the whole cache into session history", async () => {

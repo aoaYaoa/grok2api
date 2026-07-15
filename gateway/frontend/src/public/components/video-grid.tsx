@@ -19,10 +19,12 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {videos.map((item) => (
         <article key={`${item.id}-${item.createdAt}`} className={cn("overflow-hidden rounded-md border bg-card shadow-sm", activeID === item.id && "ring-2 ring-primary")}>
-          <button className="relative block aspect-video w-full bg-muted" onClick={() => onActivate(item)}>
-            {item.url ? <video src={item.url} muted playsInline preload="metadata" className="size-full object-cover" /> : <div className="grid size-full place-items-center text-sm text-muted-foreground">{item.error || `进度 ${item.progress}%`}</div>}
-            <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "completed" ? "完成" : `${item.progress}%`}</span>
-          </button>
+          <div className="relative aspect-video w-full bg-muted">
+            {item.url
+              ? <video src={item.url} controls playsInline preload="metadata" className="size-full object-contain" />
+              : <button className="grid size-full place-items-center text-sm text-muted-foreground" onClick={() => onActivate(item)}>{item.error || `进度 ${item.progress}%`}</button>}
+            <span className="pointer-events-none absolute left-2 top-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "completed" ? "完成" : `${item.progress}%`}</span>
+          </div>
           <div className="flex h-12 items-center gap-1 px-2">
             <span className="min-w-0 flex-1 truncate text-sm">{item.displayName}</span>
             {item.url && <>

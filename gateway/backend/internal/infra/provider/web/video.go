@@ -141,7 +141,7 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 	}
 	cfg := a.config()
 	parsed, err := url.Parse(strings.TrimSpace(result.URL))
-	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.User != nil || !trustedVideoAssetHost(parsed.Hostname(), cfg.BaseURL) {
+	if err != nil || parsed.User != nil || !trustedVideoAssetURL(parsed, cfg.BaseURL) {
 		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, fmt.Errorf("视频内容 URL 不受信任"))
 	}
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
@@ -225,6 +225,20 @@ func trustedVideoAssetHost(host, baseURL string) bool {
 	return err == nil && parsed.Hostname() != "" && strings.EqualFold(host, parsed.Hostname())
 }
 
+func trustedVideoAssetURL(value *url.URL, baseURL string) bool {
+	if value == nil {
+		return false
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return trustedVideoAssetHost(value.Hostname(), baseURL)
+	}
+	if !strings.EqualFold(value.Scheme, "http") {
+		return false
+	}
+	base, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(base.Scheme, "http") && strings.EqualFold(value.Hostname(), base.Hostname()) && value.Port() == base.Port()
+}
+
 func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -275,7 +289,7 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 			return false, nil
 		}
 		if value, _ := stream["videoUrl"].(string); value != "" {
-			result.URL = absoluteAssetURL(value)
+			result.URL = absoluteVideoAssetURL(value)
 			result.ContentType = "video/mp4"
 			return true, nil
 		}
@@ -295,6 +309,14 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		return provider.VideoResult{}, "", err
 	}
 	return result, postID, nil
+}
+
+func absoluteVideoAssetURL(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
+		return value
+	}
+	return "https://assets.grok.com/" + strings.TrimPrefix(value, "/")
 }
 
 func consumeVideoSSE(reader io.Reader, handle func(map[string]any) (bool, error)) error {
