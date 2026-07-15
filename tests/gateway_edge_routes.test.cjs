@@ -49,13 +49,15 @@ test("compose publishes one Go application and contains no Python or Redis servi
   assert.doesNotMatch(JSON.stringify(model), /grok2api_python/);
 });
 
-test("Go image contains both upstream React and preserved legacy assets", () => {
+test("Go image contains admin and public React builds without legacy page assets", () => {
   const dockerfile = read("gateway/Dockerfile");
 
   assert.match(dockerfile, /COPY gateway\/frontend\/package\.json gateway\/frontend\/pnpm-lock\.yaml/);
   assert.match(dockerfile, /COPY gateway\/backend\/go\.mod gateway\/backend\/go\.sum/);
-  assert.match(dockerfile, /COPY app\/static \/app\/legacy-static/);
+  assert.doesNotMatch(dockerfile, /COPY app\/static \/app\/legacy-static/);
   assert.match(dockerfile, /COPY --from=frontend-builder \/src\/frontend\/dist \/app\/frontend\/dist/);
+  assert.match(read("gateway/frontend/package.json"), /build:admin/);
+  assert.match(read("gateway/frontend/package.json"), /build:public/);
   assert.doesNotMatch(dockerfile, /python/i);
 });
 

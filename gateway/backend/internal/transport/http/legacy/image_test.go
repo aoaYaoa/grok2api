@@ -12,12 +12,57 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 type fakeImageGenerator struct {
 	calls      int
 	inputs     []gateway.ImageGenerationInput
 	editInputs []gateway.ImageEditInput
+}
+
+func TestImagineWebSocketStreamsExistingTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	generator := &fakeImageGenerator{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, generator)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	startRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/public/imagine/start", bytes.NewBufferString(`{"prompt":"draw ws","aspect_ratio":"1:1"}`))
+	startRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	startRequest.Header.Set("Content-Type", "application/json")
+	startResponse, err := http.DefaultClient.Do(startRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBody, _ := io.ReadAll(startResponse.Body)
+	_ = startResponse.Body.Close()
+	taskID := jsonStringField(t, startBody, "task_id")
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/public/imagine/ws?task_id=" + taskID + "&public_key=g2-direct-key"
+	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	seenStatus, seenImage := false, false
+	for index := 0; index < 4; index++ {
+		_, message, readErr := connection.ReadMessage()
+		if readErr != nil {
+			break
+		}
+		seenStatus = seenStatus || strings.Contains(string(message), `"status":"running"`)
+		seenImage = seenImage || strings.Contains(string(message), `"b64_json":"YWJj"`)
+		if seenStatus && seenImage {
+			break
+		}
+	}
+	if !seenStatus || !seenImage {
+		t.Fatalf("seen status=%v image=%v", seenStatus, seenImage)
+	}
 }
 
 func (f *fakeImageGenerator) GenerateImage(_ context.Context, input gateway.ImageGenerationInput) (*gateway.Result, error) {

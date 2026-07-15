@@ -1,0 +1,11 @@
+{
+  "name": "Grok2API 工作台",
+  "short_name": "Grok2API",
+  "start_url": "/chat",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#111111",
+  "icons": [
+    { "src": "/grok2api.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

@@ -197,7 +197,7 @@ func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
 	}
 }
 
-func TestVideoExtensionIsRejectedUntilNativeGoPortExists(t *testing.T) {
+func TestVideoExtensionMapsToNativeGoJob(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	videoGateway := &fakeLegacyVideoGateway{}
@@ -205,16 +205,20 @@ func TestVideoExtensionIsRejectedUntilNativeGoPortExists(t *testing.T) {
 	router := gin.New()
 	handler.Register(router, nil, nil)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"extend","is_video_extension":true,"extend_post_id":"post-1"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"extend","is_video_extension":true,"extend_post_id":"123e4567-e89b-12d3-a456-426614174000","video_extension_start_time":5.25,"original_post_id":"223e4567-e89b-12d3-a456-426614174000","file_attachment_id":"223e4567-e89b-12d3-a456-426614174000","stitch_with_extend":true}`))
 	request.Header.Set("Authorization", "Bearer g2-direct-key")
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNotImplemented || !strings.Contains(recorder.Body.String(), "extension") {
+	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if len(videoGateway.created) != 0 {
-		t.Fatalf("unexpected jobs=%d", len(videoGateway.created))
+	if len(videoGateway.created) != 1 {
+		t.Fatalf("jobs=%d", len(videoGateway.created))
+	}
+	input := videoGateway.created[0]
+	if !input.IsExtension || input.ExtendPostID != "123e4567-e89b-12d3-a456-426614174000" || input.ExtensionStartTime != 5.25 || input.OriginalPostID != "223e4567-e89b-12d3-a456-426614174000" || !input.StitchWithExtend {
+		t.Fatalf("input=%#v", input)
 	}
 }
 

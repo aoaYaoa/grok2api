@@ -198,6 +198,7 @@ func New(deps Dependencies) *gin.Engine {
 		}
 	})
 	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
-	registerFrontend(router, deps.FrontendStaticPath)
+	registerPublicFrontend(router, frontendBuildPath(deps.FrontendStaticPath, "public"), deps.LegacyPublicEnabled)
+	registerFrontend(router, frontendBuildPath(deps.FrontendStaticPath, "admin"))
 	return router
 }

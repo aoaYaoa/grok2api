@@ -27,21 +27,27 @@ const (
 )
 
 type VideoInput struct {
-	RequestID     string
-	ClientKey     clientkey.Key
-	PublicModel   string
-	Prompt        string
-	Duration      int
-	AspectRatio   string
-	Resolution    string
-	ReferenceURLs []string
+	RequestID          string
+	ClientKey          clientkey.Key
+	PublicModel        string
+	Prompt             string
+	Duration           int
+	AspectRatio        string
+	Resolution         string
+	ReferenceURLs      []string
+	IsExtension        bool
+	ExtendPostID       string
+	ExtensionStartTime float64
+	OriginalPostID     string
+	FileAttachmentID   string
+	StitchWithExtend   bool
 }
 
 func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job, error) {
 	if s.mediaJobs == nil || s.mediaQueue == nil {
 		return media.Job{}, fmt.Errorf("视频任务服务未配置")
 	}
-	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0) {
+	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0 && !input.IsExtension) {
 		return media.Job{}, fmt.Errorf("文本生视频必须提供 prompt；图片生视频可以省略 prompt")
 	}
 	route, err := s.models.GetByPublicID(ctx, input.PublicModel)
@@ -72,7 +78,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: route.PublicID, ModelRouteID: route.ID, UpstreamModel: route.UpstreamModel, Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input), CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(route.PublicID, input.Resolution, input.Duration); ok {
@@ -372,9 +378,12 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	lastProgress := job.Progress
+	metadata := decodeVideoMetadata(job.InputJSON)
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
 		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
-		ReferenceURLs: decodeVideoInput(job.InputJSON),
+		ReferenceURLs: metadata.ImageURLs, IsExtension: metadata.IsExtension, ExtendPostID: metadata.ExtendPostID,
+		ExtensionStartTime: metadata.ExtensionStartTime, OriginalPostID: metadata.OriginalPostID,
+		FileAttachmentID: metadata.FileAttachmentID, StitchWithExtend: metadata.StitchWithExtend,
 		Progress: func(value int) {
 			value = min(99, max(1, value))
 			if value-lastProgress < 5 {
@@ -481,12 +490,18 @@ func (s *Service) recordVideoUsage(ctx context.Context, job media.Job, durationM
 }
 
 type videoInputMetadata struct {
-	ImageURLs   []string `json:"image_urls"`
-	DisplayName string   `json:"display_name,omitempty"`
+	ImageURLs          []string `json:"image_urls"`
+	DisplayName        string   `json:"display_name,omitempty"`
+	IsExtension        bool     `json:"is_extension,omitempty"`
+	ExtendPostID       string   `json:"extend_post_id,omitempty"`
+	ExtensionStartTime float64  `json:"extension_start_time,omitempty"`
+	OriginalPostID     string   `json:"original_post_id,omitempty"`
+	FileAttachmentID   string   `json:"file_attachment_id,omitempty"`
+	StitchWithExtend   bool     `json:"stitch_with_extend,omitempty"`
 }
 
-func encodeVideoInput(referenceURLs []string) string {
-	return encodeVideoMetadata(videoInputMetadata{ImageURLs: referenceURLs})
+func encodeVideoInput(input VideoInput) string {
+	return encodeVideoMetadata(videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend})
 }
 
 func encodeVideoMetadata(metadata videoInputMetadata) string {

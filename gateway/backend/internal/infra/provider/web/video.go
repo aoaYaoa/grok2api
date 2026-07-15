@@ -26,6 +26,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, err
 	}
 	defer lease.Release()
+	if request.IsExtension {
+		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
+	}
 	parentID := ""
 	references := make([]string, 0, len(request.ReferenceURLs))
 	for _, rawReference := range request.ReferenceURLs {
@@ -64,6 +67,53 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	if result.URL == "" {
 		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
+	}
+	return result, nil
+}
+
+func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *egress.Lease, token string, request provider.VideoRequest) (provider.VideoResult, error) {
+	startTime := request.ExtensionStartTime
+	if startTime <= 0 {
+		startTime = 6
+	}
+	originalPostID := strings.TrimSpace(request.OriginalPostID)
+	if originalPostID == "" {
+		originalPostID = request.ExtendPostID
+	}
+	mode := "normal"
+	prompt := strings.TrimSpace(request.Prompt)
+	if prompt != "" {
+		mode = "custom"
+	}
+	message := "--mode=" + mode
+	if prompt != "" {
+		message = prompt + " --mode=" + mode
+	}
+	config := map[string]any{
+		"isVideoExtension": true, "videoExtensionStartTime": startTime, "extendPostId": request.ExtendPostID,
+		"stitchWithExtendPostId": request.StitchWithExtend, "originalPostId": originalPostID,
+		"originalRefType": "ORIGINAL_REF_TYPE_VIDEO_EXTENSION", "mode": mode, "aspectRatio": resolveAspectRatio(request.AspectRatio),
+		"videoLength": request.Duration, "resolutionName": request.Resolution, "parentPostId": request.ExtendPostID, "isVideoEdit": false,
+	}
+	if prompt != "" {
+		config["originalPrompt"] = prompt
+	}
+	payload := map[string]any{
+		"temporary": true, "modelName": "grok-3", "message": message, "fileAttachments": []string{},
+		"toolOverrides": map[string]any{"videoGen": true}, "enableSideBySide": true,
+		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
+	}
+	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	if err != nil {
+		return provider.VideoResult{}, err
+	}
+	result, _, parseErr := parseVideoStream(response, request.Progress)
+	_ = response.Body.Close()
+	if parseErr != nil {
+		return provider.VideoResult{}, parseErr
+	}
+	if result.URL == "" {
+		return provider.VideoResult{}, fmt.Errorf("视频延长完成但没有返回内容 URL")
 	}
 	return result, nil
 }

@@ -17,6 +17,7 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 const maxLegacyImageResponseBytes = 64 << 20
@@ -77,9 +78,89 @@ func (h *Handler) registerImagine(public *gin.RouterGroup) {
 	public.POST("/imagine/start", h.imagineStart)
 	public.POST("/imagine/stop", h.imagineStop)
 	public.GET("/imagine/sse", h.imagineSSE)
+	public.GET("/imagine/ws", h.imagineWS)
 	public.POST("/imagine/edit", h.imagineEdit)
 	public.POST("/imagine/workbench/edit", h.imagineWorkbenchEdit)
 	public.GET("/imagine/parent-post", h.imagineParentPost)
+}
+
+var imageUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }, HandshakeTimeout: 15 * time.Second}
+
+func (h *Handler) imagineWS(c *gin.Context) {
+	taskID := strings.TrimSpace(c.Query("task_id"))
+	task := h.getImageTask(taskID)
+	if task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "Task not found"})
+		return
+	}
+	clientValue, ok := c.Get(middleware.ClientKey)
+	clientKey, valid := clientValue.(clientkeydomain.Key)
+	if !ok || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
+		return
+	}
+	connection, err := imageUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	runContext, cancel := context.WithCancel(c.Request.Context())
+	stopTaskWatch := context.AfterFunc(task.ctx, cancel)
+	defer func() { stopTaskWatch(); cancel(); h.dropImageTask(taskID) }()
+	go func() {
+		for {
+			_, message, readErr := connection.ReadMessage()
+			if readErr != nil {
+				cancel()
+				return
+			}
+			var command struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(message, &command) == nil && strings.EqualFold(command.Type, "stop") {
+				cancel()
+				return
+			}
+		}
+	}()
+	if connection.WriteJSON(gin.H{"type": "status", "status": "running", "run_id": taskID}) != nil {
+		return
+	}
+	for sequence := 1; ; sequence++ {
+		if runContext.Err() != nil {
+			_ = connection.WriteJSON(gin.H{"type": "status", "status": "stopped", "run_id": taskID})
+			return
+		}
+		startedAt := time.Now()
+		resolution := "1k"
+		if task.pro {
+			resolution = "2k"
+		}
+		result, generateErr := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey, PublicModel: "grok-imagine-image-quality", Prompt: task.prompt, Count: 1, AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw})
+		if generateErr != nil {
+			_ = connection.WriteJSON(gin.H{"type": "error", "message": generateErr.Error(), "code": "image_generation_failed"})
+			return
+		}
+		response, consumeErr := consumeImageResult(result)
+		if consumeErr != nil {
+			_ = connection.WriteJSON(gin.H{"type": "error", "message": consumeErr.Error(), "code": "image_generation_failed"})
+			return
+		}
+		for _, image := range response.Data {
+			if image.Base64 == "" {
+				continue
+			}
+			mimeType := image.MIMEType
+			if mimeType == "" {
+				mimeType = "image/jpeg"
+			}
+			imageID := fmt.Sprintf("local-%s-%d", taskID, sequence)
+			source := "data:" + mimeType + ";base64," + image.Base64
+			if connection.WriteJSON(gin.H{"type": "image", "b64_json": image.Base64, "mime_type": mimeType, "image_id": imageID, "parent_post_id": imageID, "current_source_image_url": source, "sequence": sequence, "prompt": task.prompt, "elapsed_ms": time.Since(startedAt).Milliseconds()}) != nil {
+				return
+			}
+		}
+	}
 }
 
 func (h *Handler) imagineConfig(c *gin.Context) {

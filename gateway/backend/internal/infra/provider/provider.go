@@ -133,18 +133,40 @@ type ImageEditRequest struct {
 }
 
 type VideoRequest struct {
-	Credential    account.Credential
-	Prompt        string
-	Duration      int
-	AspectRatio   string
-	Resolution    string
-	ReferenceURLs []string
-	Progress      func(int)
+	Credential         account.Credential
+	Prompt             string
+	Duration           int
+	AspectRatio        string
+	Resolution         string
+	ReferenceURLs      []string
+	IsExtension        bool
+	ExtendPostID       string
+	ExtensionStartTime float64
+	OriginalPostID     string
+	FileAttachmentID   string
+	StitchWithExtend   bool
+	Progress           func(int)
 }
 
 type VideoResult struct {
 	URL         string
 	ContentType string
+}
+
+type VoiceTokenRequest struct {
+	Credential  account.Credential
+	Voice       string
+	Personality string
+	Speed       float64
+}
+
+type VoiceTokenResult struct {
+	Token           string
+	URL             string
+	URLs            []string
+	ParticipantName string
+	RoomName        string
+	ICEServers      []map[string]any
 }
 
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。
@@ -217,6 +239,11 @@ type ImageAssetStore interface {
 type VideoAdapter interface {
 	Adapter
 	GenerateVideo(ctx context.Context, request VideoRequest) (VideoResult, error)
+}
+
+type VoiceAdapter interface {
+	Adapter
+	CreateVoiceToken(ctx context.Context, request VoiceTokenRequest) (VoiceTokenResult, error)
 }
 
 type RoutingMetadataAdapter interface {
@@ -393,5 +420,14 @@ func (r *Registry) Videos(value account.Provider) (VideoAdapter, bool) {
 		return nil, false
 	}
 	result, ok := adapter.(VideoAdapter)
+	return result, ok
+}
+
+func (r *Registry) Voice(value account.Provider) (VoiceAdapter, bool) {
+	adapter, ok := r.Get(value)
+	if !ok {
+		return nil, false
+	}
+	result, ok := adapter.(VoiceAdapter)
 	return result, ok
 }

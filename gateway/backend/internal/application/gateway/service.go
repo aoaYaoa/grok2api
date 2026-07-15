@@ -67,6 +67,45 @@ type Usage struct {
 	ResponseModel          string
 }
 
+type VoiceTokenInput struct {
+	Voice       string
+	Personality string
+	Speed       float64
+}
+type VoiceTokenResult struct {
+	Token           string
+	URL             string
+	URLs            []string
+	ParticipantName string
+	RoomName        string
+	ICEServers      []map[string]any
+}
+
+func (s *Service) CreateVoiceToken(ctx context.Context, clientKey clientkey.Key, input VoiceTokenInput) (VoiceTokenResult, error) {
+	if !clientKey.Enabled {
+		return VoiceTokenResult{}, clientkeyapp.ErrInvalidKey
+	}
+	adapter, ok := s.providers.Voice(accountdomain.ProviderWeb)
+	if !ok {
+		return VoiceTokenResult{}, ErrNoAvailableAccount
+	}
+	lease, err := s.selector.Acquire(ctx, accountdomain.ProviderWeb, "grok-chat-fast", "fast", "", map[uint64]bool{}, false)
+	if err != nil {
+		return VoiceTokenResult{}, err
+	}
+	defer lease.release()
+	result, err := adapter.CreateVoiceToken(ctx, provider.VoiceTokenRequest{Credential: lease.Credential, Voice: input.Voice, Personality: input.Personality, Speed: input.Speed})
+	if err != nil {
+		if errors.Is(err, provider.ErrUnauthorized) {
+			_ = s.accounts.MarkReauthRequired(context.Background(), lease.Credential.ID, "Grok Web SSO credential rejected by LiveKit")
+		}
+		s.selector.MarkFailure(context.Background(), lease.Credential, 0, 0)
+		return VoiceTokenResult{}, err
+	}
+	s.selector.MarkSuccess(context.Background(), lease.Credential)
+	return VoiceTokenResult{Token: result.Token, URL: result.URL, URLs: result.URLs, ParticipantName: result.ParticipantName, RoomName: result.RoomName, ICEServers: result.ICEServers}, nil
+}
+
 type Result struct {
 	StatusCode int
 	Status     string

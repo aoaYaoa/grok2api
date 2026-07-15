@@ -116,49 +116,27 @@ func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 	}
 }
 
-func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
+func TestPublicAndGatewayReactFrontendsAreServedByOneGoRouter(t *testing.T) {
 	frontendRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(frontendRoot, "assets"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(frontendRoot, "admin", "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(frontendRoot, "index.html"), []byte("<html>gateway</html>"), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Join(frontendRoot, "public", "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(frontendRoot, "assets", "app.js"), []byte("console.log('gateway')"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(frontendRoot, "admin", "index.html"), []byte("<html>gateway-react</html>"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-
-	legacyRoot := t.TempDir()
-	for _, directory := range []string{
-		"public/pages",
-		"public",
-		"admin/pages",
-		"common/img/favicon",
-		"common/js",
-	} {
-		if err := os.MkdirAll(filepath.Join(legacyRoot, directory), 0o755); err != nil {
-			t.Fatal(err)
-		}
 	}
 	files := map[string]string{
-		"public/pages/login.html":             `<script src="/static/common/js/app.js?v=__ASSET_VERSION__"></script>`,
-		"public/pages/chat.html":              "<html>chat</html>",
-		"public/pages/imagine.html":           "<html>imagine</html>",
-		"public/pages/imagine_workbench.html": "<html>workbench</html>",
-		"public/pages/video.html":             "<html>video</html>",
-		"public/pages/nsfw.html":              "<html>nsfw</html>",
-		"public/pages/voice.html":             "<html>voice</html>",
-		"admin/pages/login.html":              "<html>admin login</html>",
-		"admin/pages/token.html":              "<html>admin token</html>",
-		"admin/pages/config.html":             "<html>admin config</html>",
-		"admin/pages/cache.html":              "<html>admin cache</html>",
-		"public/manifest.webmanifest":         `{"name":"legacy"}`,
-		"public/sw.js":                        "self.addEventListener('install', () => {})",
-		"common/img/favicon/favicon.ico":      "icon",
-		"common/js/app.js":                    "console.log('legacy')",
+		"admin/assets/app.js":         "console.log('gateway')",
+		"public/index.html":           "<html>public-react</html>",
+		"public/assets/public.js":     "console.log('public-react')",
+		"public/manifest.webmanifest": `{"name":"react"}`,
+		"public/grok2api.png":         "icon",
+		"public/favicon.ico":          "icon",
 	}
 	for relativePath, content := range files {
-		if err := os.WriteFile(filepath.Join(legacyRoot, relativePath), []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(frontendRoot, relativePath), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,9 +153,7 @@ func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
 		RequestTimeout:      time.Second,
 		MaxBodyBytes:        1024,
 		FrontendStaticPath:  frontendRoot,
-		LegacyStaticPath:    legacyRoot,
 		LegacyCachePath:     legacyCacheRoot,
-		LegacyAssetVersion:  "test-version",
 		LegacyPublicEnabled: true,
 	})
 
@@ -190,21 +166,22 @@ func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
 		contentType string
 	}{
 		{path: "/", status: http.StatusTemporaryRedirect, location: "/login"},
-		{path: "/login", status: http.StatusOK, body: "v=test-version", cache: "no-store"},
-		{path: "/chat", status: http.StatusOK, body: "<html>chat</html>", cache: "no-store"},
+		{path: "/login", status: http.StatusOK, body: "public-react", cache: "no-cache"},
+		{path: "/chat", status: http.StatusOK, body: "public-react", cache: "no-cache"},
 		{path: "/admin", status: http.StatusTemporaryRedirect, location: "/gateway/dashboard"},
 		{path: "/admin/login", status: http.StatusTemporaryRedirect, location: "/gateway/login"},
 		{path: "/admin/token", status: http.StatusTemporaryRedirect, location: "/gateway/accounts"},
 		{path: "/admin/config", status: http.StatusTemporaryRedirect, location: "/gateway/settings"},
 		{path: "/admin/cache", status: http.StatusTemporaryRedirect, location: "/gateway/cache"},
 		{path: "/admin/anything/deep", status: http.StatusTemporaryRedirect, location: "/gateway/dashboard"},
-		{path: "/static/common/js/app.js", status: http.StatusOK, body: "legacy", cache: "no-cache"},
-		{path: "/manifest.webmanifest", status: http.StatusOK, body: "legacy", contentType: "application/manifest+json"},
-		{path: "/sw.js", status: http.StatusOK, body: "install", contentType: "application/javascript"},
+		{path: "/static/common/js/app.js", status: http.StatusNotFound},
+		{path: "/assets/public.js", status: http.StatusOK, body: "public-react", cache: "public"},
+		{path: "/manifest.webmanifest", status: http.StatusOK, body: "react"},
+		{path: "/sw.js", status: http.StatusNotFound},
 		{path: "/favicon.ico", status: http.StatusOK, body: "icon", contentType: "image/x-icon"},
 		{path: "/v1/files/image/cached.png", status: http.StatusOK, body: "cached-image", contentType: "image/png"},
 		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "gateway", cache: "public"},
-		{path: "/gateway/dashboard", status: http.StatusOK, body: "<html>gateway</html>", cache: "no-cache"},
+		{path: "/gateway/dashboard", status: http.StatusOK, body: "gateway-react", cache: "no-cache"},
 	}
 	for _, test := range tests {
 		t.Run(test.path, func(t *testing.T) {

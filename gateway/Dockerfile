@@ -16,7 +16,7 @@ RUN --mount=type=cache,id=grok2api-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
     pnpm install --offline --frozen-lockfile
 
-COPY gateway/frontend/index.html gateway/frontend/vite.config.ts gateway/frontend/tsconfig.json gateway/frontend/tsconfig.app.json gateway/frontend/tsconfig.node.json ./
+COPY gateway/frontend/index.html gateway/frontend/public.html gateway/frontend/vite.config.ts gateway/frontend/tsconfig.json gateway/frontend/tsconfig.app.json gateway/frontend/tsconfig.node.json ./
 COPY gateway/frontend/public ./public
 COPY gateway/frontend/src ./src
 RUN --mount=type=cache,id=grok2api-tsc,target=/src/frontend/.cache,sharing=locked \
@@ -59,7 +59,6 @@ WORKDIR /app
 
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
-COPY app/static /app/legacy-static
 COPY --chmod=0755 gateway/docker/entrypoint.sh /usr/local/bin/grok2api-entrypoint
 
 EXPOSE 8000

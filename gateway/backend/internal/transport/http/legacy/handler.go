@@ -40,6 +40,7 @@ type Handler struct {
 	imageMu        sync.Mutex
 	imageTasks     map[string]*imageTask
 	videoGateway   VideoGateway
+	voiceGateway   VoiceGateway
 	videoMu        sync.Mutex
 	videoTasks     map[string]*videoTask
 	accounts       LegacyAccountService
@@ -88,9 +89,13 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 	if candidate, ok := generator.(PromptGateway); ok {
 		promptGateway = candidate
 	}
+	var voiceGateway VoiceGateway
+	if candidate, ok := generator.(VoiceGateway); ok {
+		voiceGateway = candidate
+	}
 	return &Handler{
 		options: options, clientAuth: clientAuth, imageGenerator: generator, imageTasks: make(map[string]*imageTask),
-		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
+		videoGateway: videoGateway, voiceGateway: voiceGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
 		batchTasks: make(map[string]*legacyBatchTask), promptGateway: promptGateway,
 		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute, settings: options.Settings,
 		videoCache: options.VideoCache,
@@ -110,6 +115,7 @@ func (h *Handler) Register(router *gin.Engine, registerPublic, registerAdmin fun
 	h.registerImagine(public)
 	h.registerVideo(public)
 	h.registerPrompt(public)
+	h.registerVoice(public)
 
 	admin := router.Group("/v1/admin")
 	admin.Use(h.adminAuth())

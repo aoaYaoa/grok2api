@@ -65,6 +65,10 @@ type videoStartRequest struct {
 	ReferenceItems   []referenceItem `json:"reference_items"`
 	IsVideoExtension bool            `json:"is_video_extension"`
 	ExtendPostID     string          `json:"extend_post_id"`
+	ExtensionStart   float64         `json:"video_extension_start_time"`
+	OriginalPostID   string          `json:"original_post_id"`
+	FileAttachmentID string          `json:"file_attachment_id"`
+	StitchWithExtend *bool           `json:"stitch_with_extend"`
 }
 
 type videoStopRequest struct {
@@ -266,11 +270,17 @@ func (h *Handler) videoStart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid request"})
 		return
 	}
-	if request.IsVideoExtension {
-		c.JSON(http.StatusNotImplemented, gin.H{"detail": "Native Go video extension is not implemented yet"})
+	request.Prompt = strings.TrimSpace(request.Prompt)
+	request.ExtendPostID = strings.TrimSpace(request.ExtendPostID)
+	request.OriginalPostID = strings.TrimSpace(request.OriginalPostID)
+	request.FileAttachmentID = strings.TrimSpace(request.FileAttachmentID)
+	if request.IsVideoExtension && !videoPostIDPattern.MatchString(request.ExtendPostID) {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "extend_post_id is required for video extension"})
 		return
 	}
-	request.Prompt = strings.TrimSpace(request.Prompt)
+	if request.IsVideoExtension && request.ExtensionStart <= 0 {
+		request.ExtensionStart = 6
+	}
 	request.AspectRatio = normalizeVideoRatio(request.AspectRatio)
 	if request.VideoLength == 0 {
 		request.VideoLength = 6
@@ -295,7 +305,7 @@ func (h *Handler) videoStart(c *gin.Context) {
 		return
 	}
 	references := collectVideoReferences(request)
-	if request.Prompt == "" && len(references) == 0 {
+	if request.Prompt == "" && len(references) == 0 && !request.IsVideoExtension {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Prompt cannot be empty when no image reference is provided"})
 		return
 	}
@@ -320,6 +330,9 @@ func (h *Handler) videoStart(c *gin.Context) {
 			RequestID: taskID, ClientKey: clientKey, PublicModel: "grok-imagine-video",
 			Prompt: request.Prompt, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
 			Resolution: request.Resolution, ReferenceURLs: references,
+			IsExtension: request.IsVideoExtension, ExtendPostID: request.ExtendPostID,
+			ExtensionStartTime: request.ExtensionStart, OriginalPostID: request.OriginalPostID,
+			FileAttachmentID: request.FileAttachmentID, StitchWithExtend: request.StitchWithExtend == nil || *request.StitchWithExtend,
 		})
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
