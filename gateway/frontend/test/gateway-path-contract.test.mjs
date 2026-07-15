@@ -59,6 +59,14 @@ test("the actual router configuration resolves nested gateway docs URLs", async 
     assert.ok(matches, "the nested docs URL must match the actual router configuration");
     assert.equal(matches.at(-1)?.route.path, gatewayPaths.gatewayRoutePaths.docsEndpoint);
     assert.deepEqual(matches.at(-1)?.params, { category: "chat", endpoint: "completions" });
+
+	const cacheMatches = matchRoutes(
+	  routerModule.gatewayRouterRoutes,
+	  "/gateway/cache",
+	  routerModule.gatewayRouterOptions.basename,
+	);
+	assert.ok(cacheMatches, "the React cache URL must match the actual router configuration");
+	assert.equal(cacheMatches.at(-1)?.route.path, gatewayPaths.gatewayRoutePaths.cache);
   } finally {
     await server.close();
     await rm(cacheDir, { recursive: true, force: true });

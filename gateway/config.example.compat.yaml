@@ -19,6 +19,7 @@ frontend:
 
 legacy:
   staticPath: "/app/legacy-static"
+  cachePath: "/app/data/legacy-cache"
   assetVersion: "go"
   publicEnabled: true
   adminKey: "replace-with-the-existing-admin-app-key"

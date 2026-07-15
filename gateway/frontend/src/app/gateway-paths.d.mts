@@ -7,6 +7,7 @@ export const gatewayRoutePaths: Readonly<{
   models: "/models";
   clientKeys: "/client-keys";
   requestAudits: "/request-audits";
+  cache: "/cache";
   docs: "/docs";
   docsDefault: "/docs/chat/completions";
   docsEndpoint: "/docs/:category/:endpoint";

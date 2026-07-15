@@ -19,13 +19,26 @@ var legacyPageRoutes = map[string]string{
 	"/video":             "public/pages/video.html",
 	"/nsfw":              "public/pages/nsfw.html",
 	"/voice":             "public/pages/voice.html",
-	"/admin/login":       "admin/pages/login.html",
-	"/admin/token":       "admin/pages/token.html",
-	"/admin/config":      "admin/pages/config.html",
-	"/admin/cache":       "admin/pages/cache.html",
+}
+
+var legacyAdminRedirects = map[string]string{
+	"/admin":        "/gateway/dashboard",
+	"/admin/login":  "/gateway/login",
+	"/admin/token":  "/gateway/accounts",
+	"/admin/config": "/gateway/settings",
+	"/admin/cache":  "/gateway/cache",
 }
 
 func registerLegacyPages(router *gin.Engine, staticPath, assetVersion string, publicEnabled bool) {
+	redirectAdmin := func(c *gin.Context) {
+		destination := legacyAdminRedirects[c.Request.URL.Path]
+		if destination == "" {
+			destination = "/gateway/dashboard"
+		}
+		c.Redirect(http.StatusTemporaryRedirect, destination)
+	}
+	router.GET("/admin", redirectAdmin)
+	router.GET("/admin/*path", redirectAdmin)
 	root, ok := legacyRoot(staticPath)
 	if !ok {
 		return
@@ -40,17 +53,14 @@ func registerLegacyPages(router *gin.Engine, staticPath, assetVersion string, pu
 			c.Redirect(http.StatusTemporaryRedirect, "/login")
 			return
 		}
-		c.Redirect(http.StatusTemporaryRedirect, "/admin/login")
-	})
-	router.GET("/admin", func(c *gin.Context) {
-		c.Redirect(http.StatusTemporaryRedirect, "/admin/login")
+		c.Redirect(http.StatusTemporaryRedirect, "/gateway/login")
 	})
 
 	for route, relativePath := range legacyPageRoutes {
 		route := route
 		relativePath := relativePath
 		router.GET(route, func(c *gin.Context) {
-			if strings.HasPrefix(route, "/") && !strings.HasPrefix(route, "/admin/") && !publicEnabled {
+			if !publicEnabled {
 				c.Status(http.StatusNotFound)
 				return
 			}

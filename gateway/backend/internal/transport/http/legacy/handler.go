@@ -30,6 +30,7 @@ type Options struct {
 	VideoPollInterval time.Duration
 	Accounts          LegacyAccountService
 	Settings          *settingsapp.Service
+	VideoCache        LegacyVideoCache
 }
 
 type Handler struct {
@@ -49,6 +50,7 @@ type Handler struct {
 	promptTasks    map[string]*promptTask
 	promptTaskTTL  time.Duration
 	settings       *settingsapp.Service
+	videoCache     LegacyVideoCache
 }
 
 type ImageGenerator interface {
@@ -91,6 +93,7 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 		videoGateway: videoGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
 		batchTasks: make(map[string]*legacyBatchTask), promptGateway: promptGateway,
 		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute, settings: options.Settings,
+		videoCache: options.VideoCache,
 	}
 }
 

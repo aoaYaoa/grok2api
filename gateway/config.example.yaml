@@ -34,6 +34,18 @@ frontend:
   # [通常不要修改] Go 服务同源托管的前端构建目录。
   staticPath: "./frontend/dist"
 
+legacy:
+  # [通常不要修改] 保留优化后的 Chat / Image / Video 公共工作台静态资源。
+  staticPath: "./legacy-static"
+  # [按需修改] 旧版图片、视频和 media-meta 的迁移目录；相对路径以本配置文件所在目录为基准。
+  cachePath: "./data/legacy-cache"
+  assetVersion: "go"
+  publicEnabled: true
+  # [按需修改] 仅旧公共工作台兼容接口使用；React 管理端使用管理员会话。
+  adminKey: ""
+  publicKey: ""
+  clientKey: ""
+
 database:
   # [按需修改] 单实例使用 sqlite；多实例改为 postgres。
   driver: sqlite # sqlite | postgres

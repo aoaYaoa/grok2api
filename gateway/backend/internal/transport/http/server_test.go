@@ -162,6 +162,13 @@ func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	legacyCacheRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(legacyCacheRoot, "image"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCacheRoot, "image", "cached.png"), []byte("cached-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	router := New(Dependencies{
 		Logger:              slog.Default(),
@@ -169,6 +176,7 @@ func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
 		MaxBodyBytes:        1024,
 		FrontendStaticPath:  frontendRoot,
 		LegacyStaticPath:    legacyRoot,
+		LegacyCachePath:     legacyCacheRoot,
 		LegacyAssetVersion:  "test-version",
 		LegacyPublicEnabled: true,
 	})
@@ -184,12 +192,17 @@ func TestLegacyPagesAndGatewayFrontendAreServedByOneGoRouter(t *testing.T) {
 		{path: "/", status: http.StatusTemporaryRedirect, location: "/login"},
 		{path: "/login", status: http.StatusOK, body: "v=test-version", cache: "no-store"},
 		{path: "/chat", status: http.StatusOK, body: "<html>chat</html>", cache: "no-store"},
-		{path: "/admin", status: http.StatusTemporaryRedirect, location: "/admin/login"},
-		{path: "/admin/token", status: http.StatusOK, body: "admin token", cache: "no-store"},
+		{path: "/admin", status: http.StatusTemporaryRedirect, location: "/gateway/dashboard"},
+		{path: "/admin/login", status: http.StatusTemporaryRedirect, location: "/gateway/login"},
+		{path: "/admin/token", status: http.StatusTemporaryRedirect, location: "/gateway/accounts"},
+		{path: "/admin/config", status: http.StatusTemporaryRedirect, location: "/gateway/settings"},
+		{path: "/admin/cache", status: http.StatusTemporaryRedirect, location: "/gateway/cache"},
+		{path: "/admin/anything/deep", status: http.StatusTemporaryRedirect, location: "/gateway/dashboard"},
 		{path: "/static/common/js/app.js", status: http.StatusOK, body: "legacy", cache: "no-cache"},
 		{path: "/manifest.webmanifest", status: http.StatusOK, body: "legacy", contentType: "application/manifest+json"},
 		{path: "/sw.js", status: http.StatusOK, body: "install", contentType: "application/javascript"},
 		{path: "/favicon.ico", status: http.StatusOK, body: "icon", contentType: "image/x-icon"},
+		{path: "/v1/files/image/cached.png", status: http.StatusOK, body: "cached-image", contentType: "image/png"},
 		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "gateway", cache: "public"},
 		{path: "/gateway/dashboard", status: http.StatusOK, body: "<html>gateway</html>", cache: "no-cache"},
 	}

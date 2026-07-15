@@ -6,6 +6,7 @@ const AccountsPage = lazyNamed(() => import("@/features/accounts/accounts-page")
 const AppShell = lazyNamed(() => import("@/app/app-shell"), "AppShell");
 const RequestAuditsPage = lazyNamed(() => import("@/features/audits/request-audits-page"), "RequestAuditsPage");
 const ClientKeysPage = lazyNamed(() => import("@/features/client-keys/client-keys-page"), "ClientKeysPage");
+const CachePage = lazyNamed(() => import("@/features/cache/cache-page"), "CachePage");
 const DashboardPage = lazyNamed(() => import("@/features/dashboard/dashboard-page"), "DashboardPage");
 const ApiDocsPage = lazyNamed(() => import("@/features/docs/api-docs-page"), "ApiDocsPage");
 const ModelsPage = lazyNamed(() => import("@/features/models/models-page"), "ModelsPage");
@@ -41,6 +42,10 @@ export function DeferredClientKeysPage() {
 
 export function DeferredRequestAuditsPage() {
   return <DeferredPage page={RequestAuditsPage} />;
+}
+
+export function DeferredCachePage() {
+  return <DeferredPage page={CachePage} />;
 }
 
 export function DeferredApiDocsPage() {

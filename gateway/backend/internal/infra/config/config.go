@@ -68,6 +68,7 @@ type FrontendConfig struct {
 
 type LegacyConfig struct {
 	StaticPath    string `yaml:"staticPath"`
+	CachePath     string `yaml:"cachePath"`
 	AssetVersion  string `yaml:"assetVersion"`
 	PublicEnabled bool   `yaml:"publicEnabled"`
 	AdminKey      string `yaml:"adminKey"`
@@ -277,6 +278,10 @@ func resolveRelativePaths(cfg *Config, configPath string) error {
 	if legacyStaticPath != "" && !filepath.IsAbs(legacyStaticPath) {
 		cfg.Legacy.StaticPath = filepath.Clean(filepath.Join(baseDir, legacyStaticPath))
 	}
+	legacyCachePath := strings.TrimSpace(cfg.Legacy.CachePath)
+	if legacyCachePath != "" && !filepath.IsAbs(legacyCachePath) {
+		cfg.Legacy.CachePath = filepath.Clean(filepath.Join(baseDir, legacyCachePath))
+	}
 	return nil
 }
 
@@ -429,7 +434,7 @@ func defaultConfig() Config {
 			RequestTimeout: Duration(2 * time.Hour),
 		},
 		Frontend: FrontendConfig{PublicAPIBaseURL: "http://127.0.0.1:8000", StaticPath: "./frontend/dist"},
-		Legacy:   LegacyConfig{StaticPath: "./legacy-static", AssetVersion: "dev", PublicEnabled: true},
+		Legacy:   LegacyConfig{StaticPath: "./legacy-static", CachePath: "./data/legacy-cache", AssetVersion: "dev", PublicEnabled: true},
 		Database: DatabaseConfig{
 			Driver:   "sqlite",
 			SQLite:   SQLiteDatabaseConfig{Path: "./data/backend.db"},

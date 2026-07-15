@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "github.com/chenyme/grok2api/backend/docs"
@@ -21,6 +22,7 @@ import (
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
+	cachehttp "github.com/chenyme/grok2api/backend/internal/transport/http/cache"
 	clientkeyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/clientkey"
 	dashboardhttp "github.com/chenyme/grok2api/backend/internal/transport/http/dashboard"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
@@ -45,6 +47,7 @@ type Dependencies struct {
 	PublicAPIBaseURL    string
 	FrontendStaticPath  string
 	LegacyStaticPath    string
+	LegacyCachePath     string
 	LegacyAssetVersion  string
 	LegacyPublicEnabled bool
 	LegacyAdminKey      string
@@ -135,6 +138,16 @@ func New(deps Dependencies) *gin.Engine {
 		router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
 	mediahttp.NewHandler(deps.Media).RegisterPublic(router)
+	var cacheHandler *cachehttp.Handler
+	if strings.TrimSpace(deps.LegacyCachePath) != "" {
+		var err error
+		cacheHandler, err = cachehttp.NewHandler(deps.LegacyCachePath)
+		if err != nil {
+			deps.Logger.Warn("legacy cache disabled", "error", err)
+		} else {
+			cacheHandler.RegisterPublic(router)
+		}
+	}
 
 	adminRoot := router.Group("/api/admin/v1")
 	authHandler := adminauthhttp.NewHandler(deps.AdminAuth, deps.SecureCookies)
@@ -150,6 +163,9 @@ func New(deps Dependencies) *gin.Engine {
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
 	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
+	if cacheHandler != nil {
+		cacheHandler.RegisterAdmin(adminProtected)
+	}
 
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
 	v1 := router.Group("/v1")
@@ -175,7 +191,12 @@ func New(deps Dependencies) *gin.Engine {
 		AllowNSFW:     deps.LegacyAllowNSFW,
 		Accounts:      deps.Accounts,
 		Settings:      deps.Settings,
-	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, nil)
+		VideoCache:    newLegacyVideoCacheAdapter(cacheHandler),
+	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, func(admin *gin.RouterGroup) {
+		if cacheHandler != nil {
+			cacheHandler.RegisterLegacy(admin)
+		}
+	})
 	registerLegacyPages(router, deps.LegacyStaticPath, deps.LegacyAssetVersion, deps.LegacyPublicEnabled)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router

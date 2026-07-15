@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +19,32 @@ import (
 )
 
 type fakeLegacyVideoGateway struct {
-	created   []gateway.VideoInput
-	polls     map[string]int
-	cancelled []string
-	listed    []mediadomain.Job
+	created     []gateway.VideoInput
+	polls       map[string]int
+	cancelled   []string
+	listed      []mediadomain.Job
+	renamedID   string
+	renamedTo   string
+	renameError error
+}
+
+type fakeLegacyVideoCache struct {
+	items     []LegacyCachedVideo
 	renamedID string
 	renamedTo string
+	listError error
+}
+
+func (f *fakeLegacyVideoCache) ListVideos() ([]LegacyCachedVideo, error) {
+	if f.listError != nil {
+		return nil, f.listError
+	}
+	return f.items, nil
+}
+
+func (f *fakeLegacyVideoCache) RenameVideo(identifier, displayName string) (LegacyCachedVideo, error) {
+	f.renamedID, f.renamedTo = identifier, displayName
+	return LegacyCachedVideo{PostID: identifier, DisplayName: displayName, ViewURL: "/v1/files/video/local.mp4"}, nil
 }
 
 func (f *fakeLegacyVideoGateway) ListVideos(_ context.Context, _ clientkeydomain.Key, _, _ int) ([]mediadomain.Job, int64, error) {
@@ -31,8 +52,70 @@ func (f *fakeLegacyVideoGateway) ListVideos(_ context.Context, _ clientkeydomain
 }
 
 func (f *fakeLegacyVideoGateway) RenameVideo(_ context.Context, identifier, displayName string, _ clientkeydomain.Key) (mediadomain.Job, error) {
+	if f.renameError != nil {
+		return mediadomain.Job{}, f.renameError
+	}
 	f.renamedID, f.renamedTo = identifier, displayName
 	return mediadomain.Job{ID: "video-job-1", UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4", InputJSON: `{"display_name":"` + displayName + `"}`}, nil
+}
+
+func TestVideoRenameFallsBackToMigratedCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{renameError: gateway.ErrResponseNotFound}
+	videoCache := &fakeLegacyVideoCache{}
+	handler := NewHandler(Options{PublicEnabled: true, VideoCache: videoCache}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/rename", bytes.NewBufferString(`{"post_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","display_name":"Renamed local"}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || videoCache.renamedID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" || videoCache.renamedTo != "Renamed local" {
+		t.Fatalf("status=%d body=%s id=%q title=%q", recorder.Code, recorder.Body.String(), videoCache.renamedID, videoCache.renamedTo)
+	}
+}
+
+func TestVideoRenameDoesNotFallbackOnPersistentStoreFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{renameError: errors.New("database unavailable")}
+	videoCache := &fakeLegacyVideoCache{}
+	handler := NewHandler(Options{PublicEnabled: true, VideoCache: videoCache}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/rename", bytes.NewBufferString(`{"post_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","display_name":"Must fail"}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError || videoCache.renamedID != "" {
+		t.Fatalf("status=%d body=%s cacheID=%q", recorder.Code, recorder.Body.String(), videoCache.renamedID)
+	}
+}
+
+func TestVideoCacheListSurvivesLocalCacheFailureAndHugePage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{listed: []mediadomain.Job{{
+		ID: "video-job-1", Status: mediadomain.StatusCompleted, UpstreamURL: "https://example.com/video.mp4", UpdatedAt: time.Now(),
+	}}}
+	videoCache := &fakeLegacyVideoCache{listError: errors.New("cache unavailable")}
+	handler := NewHandler(Options{PublicEnabled: true, VideoCache: videoCache}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	page := strconv.Itoa(int(^uint(0) >> 1))
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/video/cache/list?page="+page+"&page_size=100", nil)
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"items":[]`) || !strings.Contains(recorder.Body.String(), `"total":1`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func (f *fakeLegacyVideoGateway) CancelVideo(_ context.Context, id string, _ clientkeydomain.Key) (mediadomain.Job, error) {
@@ -181,7 +264,11 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 		UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4",
 		InputJSON:   `{"image_urls":[],"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
 	}}}
-	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	videoCache := &fakeLegacyVideoCache{items: []LegacyCachedVideo{{
+		Name: "local.mp4", ViewURL: "/v1/files/video/local.mp4", PostID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		DisplayName: "Migrated title", SizeBytes: 42, ModifiedAtMS: 234567,
+	}}}
+	handler := NewHandler(Options{PublicEnabled: true, VideoCache: videoCache}, authenticator, videoGateway)
 	router := gin.New()
 	handler.Register(router, nil, nil)
 
@@ -189,7 +276,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	listRequest.Header.Set("Authorization", "Bearer g2-direct-key")
 	listRecorder := httptest.NewRecorder()
 	router.ServeHTTP(listRecorder, listRequest)
-	for _, expected := range []string{`"display_name":"Saved title"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`} {
+	for _, expected := range []string{`"display_name":"Saved title"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"total":2`} {
 		if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), expected) {
 			t.Fatalf("list status=%d body=%s missing=%s", listRecorder.Code, listRecorder.Body.String(), expected)
 		}

@@ -3,11 +3,13 @@ package legacy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,22 @@ type VideoGateway interface {
 	CancelVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
 	ListVideos(context.Context, clientkeydomain.Key, int, int) ([]mediadomain.Job, int64, error)
 	RenameVideo(context.Context, string, string, clientkeydomain.Key) (mediadomain.Job, error)
+}
+
+type LegacyCachedVideo struct {
+	Name           string
+	ViewURL        string
+	PostID         string
+	ShareLink      string
+	OriginalPostID string
+	DisplayName    string
+	SizeBytes      int64
+	ModifiedAtMS   int64
+}
+
+type LegacyVideoCache interface {
+	ListVideos() ([]LegacyCachedVideo, error)
+	RenameVideo(identifier, displayName string) (LegacyCachedVideo, error)
 }
 
 type videoTask struct {
@@ -70,38 +88,110 @@ func (h *Handler) videoCacheList(c *gin.Context) {
 	}
 	pageValue, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "100"))
-	values, total, err := h.videoGateway.ListVideos(c.Request.Context(), clientKey, pageValue, pageSize)
+	values, err := h.allCachedVideos(c.Request.Context(), clientKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to list videos"})
 		return
 	}
-	items := make([]gin.H, 0, len(values))
-	for _, job := range values {
-		if job.Status != mediadomain.StatusCompleted || strings.TrimSpace(job.UpstreamURL) == "" {
-			continue
-		}
-		postID := videoPostIDPattern.FindString(job.UpstreamURL)
-		displayName := strings.TrimSpace(job.DisplayName)
-		if displayName == "" {
-			var metadata struct {
-				DisplayName string `json:"display_name"`
-			}
-			_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
-			displayName = strings.TrimSpace(metadata.DisplayName)
-		}
-		name := job.ID + ".mp4"
-		if parsed, parseErr := url.Parse(job.UpstreamURL); parseErr == nil {
-			if base := path.Base(parsed.Path); base != "." && base != "/" && base != "" {
-				name = base
-			}
-		}
+	pageValue = max(pageValue, 1)
+	pageSize = min(max(pageSize, 1), 200)
+	total := len(values)
+	start, end := legacyPageRange(pageValue, pageSize, total)
+	items := make([]gin.H, 0, end-start)
+	for _, item := range values[start:end] {
 		items = append(items, gin.H{
-			"name": name, "view_url": job.UpstreamURL, "post_id": postID, "share_link": "",
-			"original_post_id": "", "display_name": displayName, "size_bytes": 0,
-			"mtime_ms": job.UpdatedAt.UnixMilli(), "task_id": job.ID,
+			"name": item.Name, "view_url": item.ViewURL, "post_id": item.PostID, "share_link": item.ShareLink,
+			"original_post_id": item.OriginalPostID, "display_name": item.DisplayName,
+			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "page": pageValue, "page_size": pageSize, "total": total})
+}
+
+func (h *Handler) allCachedVideos(ctx context.Context, clientKey clientkeydomain.Key) ([]LegacyCachedVideo, error) {
+	items := make([]LegacyCachedVideo, 0)
+	configuredSources := 0
+	succeededSources := 0
+	var sourceErrors []error
+	if h.videoCache != nil {
+		configuredSources++
+		localItems, err := h.videoCache.ListVideos()
+		if err != nil {
+			sourceErrors = append(sourceErrors, err)
+		} else {
+			succeededSources++
+			items = append(items, localItems...)
+		}
+	}
+	if h.videoGateway != nil {
+		configuredSources++
+		databaseSucceeded := false
+		for pageValue := 1; ; pageValue++ {
+			values, total, err := h.videoGateway.ListVideos(ctx, clientKey, pageValue, 200)
+			if err != nil {
+				sourceErrors = append(sourceErrors, err)
+				break
+			}
+			databaseSucceeded = true
+			for _, job := range values {
+				if item, ok := cachedVideoFromJob(job); ok {
+					items = append(items, item)
+				}
+			}
+			if len(values) == 0 || pageValue*200 >= int(total) {
+				break
+			}
+		}
+		if databaseSucceeded {
+			succeededSources++
+		}
+	}
+	if configuredSources > 0 && succeededSources == 0 {
+		return nil, errors.Join(sourceErrors...)
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].ModifiedAtMS > items[j].ModifiedAtMS })
+	return dedupeCachedVideos(items), nil
+}
+
+func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
+	if job.Status != mediadomain.StatusCompleted || strings.TrimSpace(job.UpstreamURL) == "" {
+		return LegacyCachedVideo{}, false
+	}
+	displayName := strings.TrimSpace(job.DisplayName)
+	if displayName == "" {
+		var metadata struct {
+			DisplayName string `json:"display_name"`
+		}
+		_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
+		displayName = strings.TrimSpace(metadata.DisplayName)
+	}
+	name := job.ID + ".mp4"
+	if parsed, parseErr := url.Parse(job.UpstreamURL); parseErr == nil {
+		if base := path.Base(parsed.Path); base != "." && base != "/" && base != "" {
+			name = base
+		}
+	}
+	return LegacyCachedVideo{
+		Name: name, ViewURL: job.UpstreamURL, PostID: videoPostIDPattern.FindString(job.UpstreamURL),
+		DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
+	}, true
+}
+
+func dedupeCachedVideos(items []LegacyCachedVideo) []LegacyCachedVideo {
+	result := make([]LegacyCachedVideo, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		key := strings.TrimSpace(item.ViewURL)
+		if key == "" {
+			key = strings.TrimSpace(item.Name)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (h *Handler) videoRename(c *gin.Context) {
@@ -128,15 +218,42 @@ func (h *Handler) videoRename(c *gin.Context) {
 	if identifier == "" {
 		identifier = strings.TrimSpace(request.Name)
 	}
-	job, err := h.videoGateway.RenameVideo(c.Request.Context(), identifier, request.DisplayName, clientKey)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Video not found"})
-		return
+	if h.videoGateway != nil {
+		job, err := h.videoGateway.RenameVideo(c.Request.Context(), identifier, request.DisplayName, clientKey)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{"status": "success", "result": gin.H{
+				"task_id": job.ID, "post_id": videoPostIDPattern.FindString(job.UpstreamURL),
+				"display_name": job.DisplayName, "view_url": job.UpstreamURL,
+			}})
+			return
+		}
+		if !errors.Is(err, gateway.ErrResponseNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to rename video"})
+			return
+		}
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "success", "result": gin.H{
-		"task_id": job.ID, "post_id": videoPostIDPattern.FindString(job.UpstreamURL),
-		"display_name": job.DisplayName, "view_url": job.UpstreamURL,
-	}})
+	if h.videoCache != nil {
+		item, err := h.videoCache.RenameVideo(identifier, request.DisplayName)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{"status": "success", "result": gin.H{
+				"post_id": item.PostID, "display_name": item.DisplayName, "view_url": item.ViewURL,
+			}})
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"detail": "Video not found"})
+}
+
+func legacyPageRange(page, pageSize, total int) (int, int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	maxPage := (total-1)/pageSize + 1
+	if page > maxPage {
+		return total, total
+	}
+	start := (page - 1) * pageSize
+	return start, min(start+pageSize, total)
 }
 
 func (h *Handler) videoStart(c *gin.Context) {

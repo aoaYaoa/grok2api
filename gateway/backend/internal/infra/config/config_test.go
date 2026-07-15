@@ -70,6 +70,10 @@ legacy:
 	if cfg.Legacy.StaticPath != expectedLegacyPath {
 		t.Fatalf("legacy static path = %q, want %q", cfg.Legacy.StaticPath, expectedLegacyPath)
 	}
+	expectedLegacyCachePath := filepath.Join(dir, "data", "legacy-cache")
+	if cfg.Legacy.CachePath != expectedLegacyCachePath {
+		t.Fatalf("legacy cache path = %q, want %q", cfg.Legacy.CachePath, expectedLegacyCachePath)
+	}
 	if cfg.Legacy.AssetVersion != "test-assets" || !cfg.Legacy.PublicEnabled || cfg.Legacy.AdminKey != "legacy-admin-key" || cfg.Legacy.PublicKey != "legacy-public-key" || cfg.Legacy.ClientKey != "g2-test-client-key" {
 		t.Fatalf("legacy config = %#v", cfg.Legacy)
 	}
