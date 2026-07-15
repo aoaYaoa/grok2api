@@ -13,5 +13,10 @@ cp "${GROK2API_CONFIG_SOURCE}" /app/config.yaml
 chown grok2api:grok2api /app/config.yaml
 chmod 0600 /app/config.yaml
 
-exec su-exec grok2api:grok2api "$@"
+frontend_root=/app/data/frontend-dist
+mkdir -p "${frontend_root}" /app/frontend
+cp -R /app/frontend-seed/dist/. "${frontend_root}/"
+chown -R grok2api:grok2api "${frontend_root}"
+ln -sfn "${frontend_root}" /app/frontend/dist
 
+exec su-exec grok2api:grok2api "$@"
