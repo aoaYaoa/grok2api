@@ -26,6 +26,17 @@ func TestParseImportedCredentialsAcceptsOneSSOTokenPerLine(t *testing.T) {
 	}
 }
 
+func TestParseImportedCredentialsAcceptsNamedCardExportLines(t *testing.T) {
+	adapter := &Adapter{}
+	values, err := adapter.ParseImportedCredentials([]byte("\ufeff卡密导出\n\nfirst@example.com----token-one\nsecond@example.com----sso=token-two\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].Name != "first@example.com" || values[0].AccessToken != "token-one" || values[1].Name != "second@example.com" || values[1].AccessToken != "token-two" {
+		t.Fatalf("credentials = %#v", values)
+	}
+}
+
 func TestParseImportedCredentialsRejectsOversizedPlainToken(t *testing.T) {
 	adapter := &Adapter{}
 	_, err := adapter.ParseImportedCredentials([]byte(strings.Repeat("x", maxSSOTokenBytes+1)))

@@ -87,6 +87,15 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	seen := make(map[string]struct{}, len(lines))
 	result := make([]provider.CredentialSeed, 0, len(lines))
 	for index, line := range lines {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+		if line == "" || line == "卡密导出" {
+			continue
+		}
+		name := ""
+		if exportedName, exportedToken, found := strings.Cut(line, "----"); found && strings.TrimSpace(exportedName) != "" && strings.TrimSpace(exportedToken) != "" {
+			name = strings.TrimSpace(exportedName)
+			line = exportedToken
+		}
 		token := sanitizeSSOToken(line)
 		if token == "" {
 			continue
@@ -98,9 +107,12 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 			continue
 		}
 		seen[token] = struct{}{}
+		if name == "" {
+			name = "Grok Web " + security.HashToken(token)[:8]
+		}
 		result = append(result, provider.CredentialSeed{
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierAuto,
-			Name: "Grok Web " + security.HashToken(token)[:8], SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
+			Name: name, SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
 		})
 		if len(result) > maxImportAccounts {
 			return nil, provider.ErrCredentialLimit
