@@ -241,7 +241,12 @@ func (s *Service) repairCompletedVideoOutputs(ctx context.Context) error {
 		return err
 	}
 	var result error
-	for _, job := range values {
+	for _, summary := range values {
+		job, loadErr := s.mediaJobs.GetMediaJob(ctx, summary.ID, summary.ClientKeyID)
+		if loadErr != nil {
+			result = firstError(result, fmt.Errorf("任务 %s 读取完整记录: %w", summary.ID, loadErr))
+			continue
+		}
 		if !protectedVideoOutput(job.UpstreamURL) {
 			continue
 		}

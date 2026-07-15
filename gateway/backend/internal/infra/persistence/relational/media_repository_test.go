@@ -83,6 +83,9 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 		t.Fatalf("completed total = %d", total)
 	}
 	assertMediaJobIDs(t, completed, "media_job_completed_new", "media_job_completed_old")
+	if completed[0].ClientKeyID != key.ID {
+		t.Fatalf("completed job client key = %d, want %d", completed[0].ClientKeyID, key.ID)
+	}
 
 	searched, total, err := jobRepo.ListMediaJobs(ctx, repository.MediaJobListQuery{
 		Page: repository.PageQuery{Offset: 0, Limit: 1, Search: "northern"},

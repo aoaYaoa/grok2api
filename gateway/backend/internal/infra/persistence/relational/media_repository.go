@@ -184,7 +184,7 @@ func (r *MediaJobRepository) ListMediaJobs(ctx context.Context, input repository
 		"completedAt": {expression: "completed_at", nullsLast: true, defaultDirection: repository.SortDescending},
 	}, sortSpec{expression: "created_at", defaultDirection: repository.SortDescending}, "id")
 	if err := query.Select(
-		"id", "client_key_name", "account_name", "model", "prompt", "seconds", "size", "quality",
+		"id", "client_key_id", "client_key_name", "account_name", "model", "prompt", "seconds", "size", "quality",
 		"status", "progress", "error_message", "created_at", "completed_at",
 	).Offset(input.Page.Offset).Limit(input.Page.Limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
