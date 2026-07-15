@@ -60,6 +60,7 @@ test("Go image contains admin and public React builds without legacy page assets
   assert.match(entrypoint, /\/app\/data\/frontend-dist/);
   assert.match(entrypoint, /frontend_root=\/app\/data\/frontend-dist/);
   assert.match(entrypoint, /cp -R \/app\/frontend-seed\/dist\/\. "\$\{frontend_root\}\/"/);
+  assert.match(entrypoint, /chmod 0755 \/app\/frontend "\$\{frontend_root\}"/);
   assert.doesNotMatch(entrypoint, /rm -rf[^\n]*frontend-dist/);
   assert.match(read("gateway/frontend/package.json"), /build:admin/);
   assert.match(read("gateway/frontend/package.json"), /build:public/);

@@ -15,6 +15,7 @@ chmod 0600 /app/config.yaml
 
 frontend_root=/app/data/frontend-dist
 mkdir -p "${frontend_root}" /app/frontend
+chmod 0755 /app/frontend "${frontend_root}"
 cp -R /app/frontend-seed/dist/. "${frontend_root}/"
 chown -R grok2api:grok2api "${frontend_root}"
 ln -sfn "${frontend_root}" /app/frontend/dist
