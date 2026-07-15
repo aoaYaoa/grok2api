@@ -867,13 +867,24 @@ func (a *Adapter) uploadImage(ctx context.Context, cfg Config, lease *egress.Lea
 		return uploadedFile{}, err
 	}
 	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if readErr != nil {
+		return uploadedFile{}, fmt.Errorf("读取图片上传响应失败: %w", readErr)
+	}
+	return parseUploadResponse(response.StatusCode, body)
+}
+
+func parseUploadResponse(statusCode int, body []byte) (uploadedFile, error) {
+	if statusCode < 200 || statusCode >= 300 {
+		return uploadedFile{}, fmt.Errorf("上传图片失败，上游返回 %d: %s", statusCode, summarizeUploadResponse(body))
+	}
 	var value struct {
 		FileMetadataID string `json:"fileMetadataId"`
 		FileID         string `json:"fileId"`
 		FileURI        string `json:"fileUri"`
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value) != nil {
-		return uploadedFile{}, fmt.Errorf("上传图片失败或上游响应无效")
+	if json.Unmarshal(body, &value) != nil {
+		return uploadedFile{}, fmt.Errorf("上传图片失败，上游响应无效 (%d): %s", statusCode, summarizeUploadResponse(body))
 	}
 	if value.FileMetadataID == "" {
 		value.FileMetadataID = value.FileID
@@ -886,6 +897,18 @@ func (a *Adapter) uploadImage(ctx context.Context, cfg Config, lease *egress.Lea
 		return uploadedFile{}, fmt.Errorf("上传图片成功但上游未返回文件标识")
 	}
 	return uploadedFile{ID: value.FileMetadataID, URI: fileURI}, nil
+}
+
+func summarizeUploadResponse(body []byte) string {
+	value := strings.Join(strings.Fields(string(body)), " ")
+	if value == "" {
+		return "空响应"
+	}
+	runes := []rune(value)
+	if len(runes) > 1024 {
+		return string(runes[:1024]) + "..."
+	}
+	return value
 }
 
 func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress.Lease, token, mediaType, mediaURL, prompt string) (string, error) {

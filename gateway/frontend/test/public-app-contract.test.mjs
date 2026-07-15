@@ -57,6 +57,18 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.doesNotMatch(grid, /onPlay=\{\(\) => onActivate/);
 });
 
+test("NSFW local references show a validated preview before task upload", async () => {
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+
+  assert.match(nsfw, /const \[localImage, setLocalImage\] = useState<UploadAsset \| null>\(null\)/);
+  assert.match(nsfw, /accept="image\/jpeg,image\/png,image\/webp,image\/gif"/);
+  assert.match(nsfw, /localImage\.data/);
+  assert.match(nsfw, /alt=\{localImage\.name\}/);
+  assert.match(nsfw, /setLocalImage\(null\)/);
+  assert.match(nsfw, /上传参考图并创建任务/);
+  assert.doesNotMatch(nsfw, /已加载本地参考图/);
+});
+
 test("public app retires legacy service workers and PWA caches", async () => {
   const publicMain = await readFile(path.join(root, "src/public-main.tsx"), "utf8");
   const worker = await readFile(path.join(root, "public/sw.js"), "utf8");

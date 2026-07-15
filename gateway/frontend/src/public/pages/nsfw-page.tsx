@@ -1,4 +1,4 @@
-import { ImagePlus, Play, Scissors, Sparkles, Square, Trash2 } from "lucide-react";
+import { ImagePlus, Play, Scissors, Sparkles, Square, Trash2, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,7 +11,15 @@ import { ImageGrid } from "@/public/components/image-grid";
 import { VideoGrid } from "@/public/components/video-grid";
 import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
-import { filesToAssets } from "@/public/lib/media";
+import { filesToAssets, type UploadAsset } from "@/public/lib/media";
+
+const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const maxLocalImageBytes = 20 * 1024 * 1024;
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -30,7 +38,7 @@ export function NsfwPage() {
   const [selected, setSelected] = useState<GeneratedImage | null>(null);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [activeVideo, setActiveVideo] = useState<VideoItem | null>(null);
-  const [localImage, setLocalImage] = useState("");
+  const [localImage, setLocalImage] = useState<UploadAsset | null>(null);
   const [imageStarting, setImageStarting] = useState(false);
   const [imageRunning, setImageRunning] = useState(false);
   const [videoStarting, setVideoStarting] = useState(false);
@@ -135,6 +143,27 @@ export function NsfwPage() {
     }
   }
 
+  async function selectLocalReference(files: FileList | File[]) {
+    const file = Array.from(files)[0];
+    if (!file) return;
+    if (!supportedLocalImageTypes.has(file.type.toLowerCase())) {
+      toast.error("仅支持 JPEG、PNG、WebP 或 GIF 图片");
+      return;
+    }
+    if (file.size > maxLocalImageBytes) {
+      toast.error("参考图不能超过 20 MB");
+      return;
+    }
+    try {
+      const [asset] = await filesToAssets([file], 1);
+      if (!asset?.data) throw new Error("图片内容为空");
+      setLocalImage(asset);
+      toast.success("本地参考图已就绪");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取本地参考图失败");
+    }
+  }
+
   function watchVideo(taskID: string, label: string, prompt: string) {
     const controller = new AbortController();
     videoControllers.current.set(taskID, controller);
@@ -151,7 +180,7 @@ export function NsfwPage() {
   }
 
   async function generateVideos(extension?: VideoItem) {
-    const source = localImage || selected?.sourceURL || selected?.url;
+    const source = localImage?.data || selected?.sourceURL || selected?.url;
     if (!source && !extension) return toast.error("请先选择候选图或上传本地参考图");
     if (extension && !extension.postID) return toast.error("当前视频缺少 postId");
     if (videoStartLock.current) return;
@@ -220,7 +249,7 @@ export function NsfwPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">NSFW 工作台</h1><p className="mt-1 text-sm text-muted-foreground">候选图、图生视频与时间轴延长集中处理</p></div>
-        <div className="flex gap-2"><Button variant="outline" onClick={() => { setImages([]); setSelected(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); }}><Trash2 className="size-4" />清空视频</Button></div>
+        <div className="flex gap-2"><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); }}><Trash2 className="size-4" />清空视频</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -236,11 +265,11 @@ export function NsfwPage() {
 
             <div className="workspace-control-group">
               <h2 className="mb-3 text-sm font-semibold">2. 编辑或选择参考图</h2>
-              {selected ? <img src={selected.url} alt={selected.prompt} className="aspect-video w-full rounded-md border bg-muted object-contain" /> : <div className="workspace-empty grid min-h-28 place-items-center text-sm text-muted-foreground">从右侧选择一张候选图</div>}
+              {localImage ? <div className="relative overflow-hidden rounded-md border bg-muted"><img src={localImage.data} alt={localImage.name} className="aspect-video w-full object-contain" /><Button type="button" variant="secondary" size="icon" className="absolute right-2 top-2 size-8 shadow-sm" onClick={() => setLocalImage(null)} aria-label="移除本地参考图"><X className="size-4" /></Button><div className="flex items-center justify-between gap-3 border-t bg-card px-3 py-2 text-xs"><span className="min-w-0 truncate font-medium">{localImage.name}</span><span className="shrink-0 text-muted-foreground">{localImage.mime.replace("image/", "").toUpperCase()}</span></div></div> : selected ? <img src={selected.url} alt={selected.prompt} className="aspect-video w-full rounded-md border bg-muted object-contain" /> : <div className="workspace-empty grid min-h-28 place-items-center text-sm text-muted-foreground">从右侧选择一张候选图</div>}
               <Textarea value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="输入图片编辑要求" />
               <Button variant="outline" className="mt-2 w-full" onClick={() => void editSelected()} disabled={editing || !selected || !editPrompt.trim()}><Sparkles className="size-4" />{editing ? "编辑中..." : "编辑选中图"}</Button>
-              <label className="mt-3 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border text-sm hover:bg-accent"><ImagePlus className="size-4" />上传本地参考图<input type="file" accept="image/*" className="hidden" onChange={(event) => void filesToAssets(event.target.files || [], 1).then((items) => setLocalImage(items[0]?.data || ""))} /></label>
-              {localImage && <p className="mt-2 text-xs text-muted-foreground">已加载本地参考图</p>}
+              <label className="mt-3 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border text-sm hover:bg-accent"><ImagePlus className="size-4" />{localImage ? "更换本地参考图" : "选择本地参考图"}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="hidden" onChange={(event) => { const input = event.currentTarget; void selectLocalReference(input.files || []).finally(() => { input.value = ""; }); }} /></label>
+              {localImage && <p className="mt-2 text-xs text-muted-foreground">{formatFileSize(Math.round((localImage.data.length * 3) / 4))} · 待任务上传</p>}
             </div>
 
             <div className="workspace-control-group">
@@ -248,7 +277,7 @@ export function NsfwPage() {
               <label className="workspace-field-label">视频提示词</label>
               <Textarea value={videoPrompt} onChange={(event) => setVideoPrompt(event.target.value)} className="min-h-28" placeholder="留空使用 spicy，填写则使用 custom" />
               <div className="mt-3 grid grid-cols-2 gap-3"><label><span className="workspace-field-label">并发任务</span><Select value={parallel} onValueChange={setParallel}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["1", "2", "3", "4"].map((value) => <SelectItem key={value} value={value}>{value} 路</SelectItem>)}</SelectContent></Select></label><label><span className="workspace-field-label">分辨率</span><Select value={resolution} onValueChange={setResolution}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["480p", "720p"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></label><label className="col-span-2"><span className="workspace-field-label">视频时长</span><Select value={length} onValueChange={setLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label></div>
-              {videoStarting ? <Button className="mt-3 w-full" disabled><Play className="size-4" />创建视频任务...</Button> : videoRunning ? <Button variant="destructive" className="mt-3 w-full" onClick={() => void stopVideoRun()}><Square className="size-4" />中断视频</Button> : <Button className="mt-3 w-full" onClick={() => void generateVideos()} disabled={!selected && !localImage}><Play className="size-4" />生成视频</Button>}
+              {videoStarting ? <Button className="mt-3 w-full" disabled><Play className="size-4" />上传参考图并创建任务...</Button> : videoRunning ? <Button variant="destructive" className="mt-3 w-full" onClick={() => void stopVideoRun()}><Square className="size-4" />中断视频</Button> : <Button className="mt-3 w-full" onClick={() => void generateVideos()} disabled={!selected && !localImage}><Play className="size-4" />生成视频</Button>}
             </div>
           </div>
 

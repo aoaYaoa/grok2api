@@ -637,6 +637,13 @@ func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	}
 }
 
+func TestVideoReferenceUploadPreservesUpstreamFailureDetail(t *testing.T) {
+	_, err := parseUploadResponse(http.StatusUnprocessableEntity, []byte(`{"error":{"message":"fileMimeType is required"}}`))
+	if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "fileMimeType is required") {
+		t.Fatalf("upload error = %v", err)
+	}
+}
+
 func TestParseVideoConcatenatedJSONFixture(t *testing.T) {
 	fixture := `{"result":{"conversation":{"conversationId":"conversation_1"}}}` +
 		`{"result":{"response":{"streamingVideoGenerationResponse":{"videoId":"video_1","progress":1,"videoPostId":"post_1","resolutionName":"720p"}}}}` +
