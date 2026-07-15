@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,4 +71,15 @@ test("the actual router configuration resolves nested gateway docs URLs", async 
     await server.close();
     await rm(cacheDir, { recursive: true, force: true });
   }
+});
+
+test("admin action menu links back to the public workspace", async () => {
+  const shell = await readFile(path.join(frontendRoot, "src/app/app-shell.tsx"), "utf8");
+  const translations = await readFile(path.join(frontendRoot, "src/shared/i18n/index.ts"), "utf8");
+
+  assert.match(shell, /publicRoutePaths\.chat/);
+  assert.match(shell, /href=\{publicRoutePaths\.chat\}/);
+  assert.match(shell, /shell\.backToWorkspace/);
+  assert.match(translations, /backToWorkspace: "返回工作台"/);
+  assert.match(translations, /backToWorkspace: "Back to workspace"/);
 });
