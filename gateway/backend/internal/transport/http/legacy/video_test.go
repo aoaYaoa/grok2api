@@ -205,7 +205,7 @@ func TestVideoExtensionMapsToNativeGoJob(t *testing.T) {
 	router := gin.New()
 	handler.Register(router, nil, nil)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"extend","is_video_extension":true,"extend_post_id":"123e4567-e89b-12d3-a456-426614174000","video_extension_start_time":5.25,"original_post_id":"223e4567-e89b-12d3-a456-426614174000","file_attachment_id":"223e4567-e89b-12d3-a456-426614174000","stitch_with_extend":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"extend","is_video_extension":true,"source_task_id":"source-task-1","extend_post_id":"123e4567-e89b-12d3-a456-426614174000","video_extension_start_time":5.25,"original_post_id":"223e4567-e89b-12d3-a456-426614174000","file_attachment_id":"223e4567-e89b-12d3-a456-426614174000","stitch_with_extend":true}`))
 	request.Header.Set("Authorization", "Bearer g2-direct-key")
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -217,8 +217,15 @@ func TestVideoExtensionMapsToNativeGoJob(t *testing.T) {
 		t.Fatalf("jobs=%d", len(videoGateway.created))
 	}
 	input := videoGateway.created[0]
-	if !input.IsExtension || input.ExtendPostID != "123e4567-e89b-12d3-a456-426614174000" || input.ExtensionStartTime != 5.25 || input.OriginalPostID != "223e4567-e89b-12d3-a456-426614174000" || !input.StitchWithExtend {
+	if !input.IsExtension || input.SourceTaskID != "source-task-1" || input.ExtendPostID != "123e4567-e89b-12d3-a456-426614174000" || input.ExtensionStartTime != 5.25 || input.OriginalPostID != "223e4567-e89b-12d3-a456-426614174000" || !input.StitchWithExtend {
 		t.Fatalf("input=%#v", input)
+	}
+}
+
+func TestLastVideoPostIDUsesGeneratedPostInsteadOfUserID(t *testing.T) {
+	value := "/v1/files/video/users-14610db1-ca48-4ba1-8509-c01304a4f508-generated-28455674-ccd9-4473-8b18-2fbeab04ae40-generated_video.mp4"
+	if got := lastVideoPostID(value); got != "28455674-ccd9-4473-8b18-2fbeab04ae40" {
+		t.Fatalf("post ID = %q", got)
 	}
 }
 
@@ -280,7 +287,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	listRequest.Header.Set("Authorization", "Bearer g2-direct-key")
 	listRecorder := httptest.NewRecorder()
 	router.ServeHTTP(listRecorder, listRequest)
-	for _, expected := range []string{`"display_name":"Saved title"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"total":2`} {
+	for _, expected := range []string{`"display_name":"Saved title"`, `"task_id":"request-1"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"total":2`} {
 		if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), expected) {
 			t.Fatalf("list status=%d body=%s missing=%s", listRecorder.Code, listRecorder.Body.String(), expected)
 		}

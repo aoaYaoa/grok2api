@@ -38,6 +38,7 @@ type VideoInput struct {
 	Resolution         string
 	ReferenceURLs      []string
 	IsExtension        bool
+	SourceTaskID       string
 	ExtendPostID       string
 	ExtensionStartTime float64
 	OriginalPostID     string
@@ -65,8 +66,20 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
+	var lease *accountLease
+	sourceAccountID, sourceFound, sourceErr := s.findExtensionSourceAccountID(ctx, input.ClientKey.ID, input.SourceTaskID)
+	if sourceErr != nil {
+		return media.Job{}, sourceErr
+	}
+	if input.IsExtension && sourceFound {
+		lease, err = s.selector.AcquirePinned(ctx, route.Provider, sourceAccountID, route.UpstreamModel, quotaMode, true)
+	} else {
+		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
+	}
 	if err != nil {
+		if input.IsExtension && sourceFound {
+			return media.Job{}, fmt.Errorf("%w: 原视频所属账号不可用，无法跨账号延长: %w", ErrNoAvailableAccount, err)
+		}
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 	}
 	accountID := lease.Credential.ID
@@ -101,6 +114,27 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		s.logger.Warn("video_job_queue_full", "job_id", job.ID)
 	}
 	return job, nil
+}
+
+func (s *Service) findExtensionSourceAccountID(ctx context.Context, clientKeyID uint64, sourceTaskID string) (uint64, bool, error) {
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	if sourceTaskID == "" || s.mediaJobs == nil {
+		return 0, false, nil
+	}
+	for offset := 0; ; offset += 200 {
+		values, total, err := s.mediaJobs.ListMediaJobsByClientKey(ctx, clientKeyID, offset, 200)
+		if err != nil {
+			return 0, false, err
+		}
+		for _, job := range values {
+			if job.RequestID == sourceTaskID || job.ID == sourceTaskID {
+				return job.AccountID, true, nil
+			}
+		}
+		if len(values) == 0 || offset+len(values) >= int(total) {
+			return 0, false, nil
+		}
+	}
 }
 
 func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (media.Job, error) {
@@ -599,6 +633,7 @@ type videoInputMetadata struct {
 	ImageURLs          []string `json:"image_urls"`
 	DisplayName        string   `json:"display_name,omitempty"`
 	IsExtension        bool     `json:"is_extension,omitempty"`
+	SourceTaskID       string   `json:"source_task_id,omitempty"`
 	ExtendPostID       string   `json:"extend_post_id,omitempty"`
 	ExtensionStartTime float64  `json:"extension_start_time,omitempty"`
 	OriginalPostID     string   `json:"original_post_id,omitempty"`
@@ -607,7 +642,7 @@ type videoInputMetadata struct {
 }
 
 func encodeVideoInput(input VideoInput) string {
-	return encodeVideoMetadata(videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend})
+	return encodeVideoMetadata(videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, SourceTaskID: input.SourceTaskID, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend})
 }
 
 func encodeVideoMetadata(metadata videoInputMetadata) string {

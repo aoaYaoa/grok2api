@@ -90,6 +90,18 @@ func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestFindExtensionSourceAccountUsesOriginalVideoTask(t *testing.T) {
+	repository := &videoRepairRepository{job: media.Job{
+		ID: "video-source", RequestID: "source-task-1", ClientKeyID: 9, AccountID: 42,
+		Status: media.StatusCompleted, UpstreamURL: "/v1/files/video/source.mp4",
+	}}
+	service := &Service{mediaJobs: repository}
+	accountID, found, err := service.findExtensionSourceAccountID(context.Background(), 9, "source-task-1")
+	if err != nil || !found || accountID != 42 {
+		t.Fatalf("accountID=%d found=%v err=%v", accountID, found, err)
+	}
+}
+
 func TestRecoverVideoJobsArchivesCompletedProtectedOutputs(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-repair.db"))

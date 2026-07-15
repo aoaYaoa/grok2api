@@ -33,6 +33,7 @@ type VideoGateway interface {
 
 type LegacyCachedVideo struct {
 	Name           string
+	TaskID         string
 	ViewURL        string
 	PostID         string
 	ShareLink      string
@@ -64,6 +65,7 @@ type videoStartRequest struct {
 	SourceImageURLs  []string        `json:"source_image_urls"`
 	ReferenceItems   []referenceItem `json:"reference_items"`
 	IsVideoExtension bool            `json:"is_video_extension"`
+	SourceTaskID     string          `json:"source_task_id"`
 	ExtendPostID     string          `json:"extend_post_id"`
 	ExtensionStart   float64         `json:"video_extension_start_time"`
 	OriginalPostID   string          `json:"original_post_id"`
@@ -104,7 +106,7 @@ func (h *Handler) videoCacheList(c *gin.Context) {
 	items := make([]gin.H, 0, end-start)
 	for _, item := range values[start:end] {
 		items = append(items, gin.H{
-			"name": item.Name, "view_url": item.ViewURL, "post_id": item.PostID, "share_link": item.ShareLink,
+			"name": item.Name, "task_id": item.TaskID, "view_url": item.ViewURL, "post_id": item.PostID, "share_link": item.ShareLink,
 			"original_post_id": item.OriginalPostID, "display_name": item.DisplayName,
 			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
 		})
@@ -176,7 +178,7 @@ func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
 		}
 	}
 	return LegacyCachedVideo{
-		Name: name, ViewURL: job.UpstreamURL, PostID: videoPostIDPattern.FindString(job.UpstreamURL),
+		Name: name, TaskID: job.RequestID, ViewURL: job.UpstreamURL, PostID: lastVideoPostID(job.UpstreamURL),
 		DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
 	}, true
 }
@@ -331,6 +333,7 @@ func (h *Handler) videoStart(c *gin.Context) {
 			Prompt: request.Prompt, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
 			Resolution: request.Resolution, ReferenceURLs: references,
 			IsExtension: request.IsVideoExtension, ExtendPostID: request.ExtendPostID,
+			SourceTaskID:       request.SourceTaskID,
 			ExtensionStartTime: request.ExtensionStart, OriginalPostID: request.OriginalPostID,
 			FileAttachmentID: request.FileAttachmentID, StitchWithExtend: request.StitchWithExtend == nil || *request.StitchWithExtend,
 		})
@@ -347,6 +350,14 @@ func (h *Handler) videoStart(c *gin.Context) {
 		"task_id": taskIDs[0], "task_ids": taskIDs, "concurrent": len(taskIDs),
 		"aspect_ratio": request.AspectRatio, "reference_count": len(references),
 	})
+}
+
+func lastVideoPostID(value string) string {
+	values := videoPostIDPattern.FindAllString(value, -1)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
 }
 
 func (h *Handler) videoSSE(c *gin.Context) {

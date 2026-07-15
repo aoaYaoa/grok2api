@@ -43,17 +43,29 @@ test("public source does not execute legacy imperative page scripts", async () =
 test("NSFW and video workspaces guard duplicate starts and expose timeline extension", async () => {
   const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
   const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const videoAPI = await readFile(path.join(root, "src/public/features/video/video-api.ts"), "utf8");
   const grid = await readFile(path.join(root, "src/public/components/video-grid.tsx"), "utf8");
 
   assert.match(nsfw, /imageStartLock/);
   assert.match(nsfw, /videoStartLock/);
   assert.match(nsfw, /video_extension_start_time: extendTime/);
+  assert.match(nsfw, /source_task_id: extension\?\.taskID/);
+  assert.match(nsfw, /extendLength/);
+  assert.match(nsfw, /listCachedVideos/);
+  assert.match(nsfw, /const \[cacheOpen, setCacheOpen\]/);
+  assert.match(nsfw, /<VideoGrid videos=\{cachedVideos\}/);
   assert.match(nsfw, /type="number"/);
   assert.match(video, /onExtend=/);
   assert.match(video, /scrollIntoView/);
+  assert.match(video, /source_task_id: active\.taskID/);
+  assert.match(video, /extendLength/);
   assert.match(video, /disabled=\{!prompt\.trim\(\) && !references\.length\}/);
+  assert.match(videoAPI, /matchAll/);
+  assert.match(videoAPI, /matches\.at\(-1\)/);
+  assert.match(videoAPI, /视频任务结束但未返回结果/);
   assert.match(grid, /onExtend\?:/);
   assert.match(grid, /<video[^>]*controls/);
+  assert.match(grid, /item\.status === "failed" \? "失败"/);
   assert.doesNotMatch(grid, /onPlay=\{\(\) => onActivate/);
 });
 
@@ -66,6 +78,8 @@ test("NSFW local references show a validated preview before task upload", async 
   assert.match(nsfw, /alt=\{localImage\.name\}/);
   assert.match(nsfw, /setLocalImage\(null\)/);
   assert.match(nsfw, /上传参考图并创建任务/);
+  assert.match(nsfw, /source_image_url: extension \? undefined : source/);
+  assert.doesNotMatch(nsfw, /\n\s+image_url: extension \? undefined : source/);
   assert.doesNotMatch(nsfw, /已加载本地参考图/);
 });
 

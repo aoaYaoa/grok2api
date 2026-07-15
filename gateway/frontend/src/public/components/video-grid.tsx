@@ -23,7 +23,7 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
             {item.url
               ? <video src={item.url} controls playsInline preload="metadata" className="size-full object-contain" />
               : <button className="grid size-full place-items-center text-sm text-muted-foreground" onClick={() => onActivate(item)}>{item.error || `进度 ${item.progress}%`}</button>}
-            <span className="pointer-events-none absolute left-2 top-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "completed" ? "完成" : `${item.progress}%`}</span>
+            <span className="pointer-events-none absolute left-2 top-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "failed" ? "失败" : item.status === "completed" ? "完成" : `${item.progress}%`}</span>
           </div>
           <div className="flex h-12 items-center gap-1 px-2">
             <span className="min-w-0 flex-1 truncate text-sm">{item.displayName}</span>

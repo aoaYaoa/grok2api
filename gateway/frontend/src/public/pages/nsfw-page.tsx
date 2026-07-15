@@ -1,8 +1,9 @@
-import { ImagePlus, Play, Scissors, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ImagePlus, Library, Play, Scissors, Sparkles, Square, Trash2, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,7 +11,7 @@ import { usePublicAuth } from "@/public/auth/public-auth";
 import { ImageGrid } from "@/public/components/image-grid";
 import { VideoGrid } from "@/public/components/video-grid";
 import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
-import { startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
+import { cachedVideo, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
 import { filesToAssets, type UploadAsset } from "@/public/lib/media";
 
 const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
@@ -37,7 +38,9 @@ export function NsfwPage() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [selected, setSelected] = useState<GeneratedImage | null>(null);
   const [videos, setVideos] = useState<VideoItem[]>([]);
+  const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
   const [activeVideo, setActiveVideo] = useState<VideoItem | null>(null);
+  const [cacheOpen, setCacheOpen] = useState(false);
   const [localImage, setLocalImage] = useState<UploadAsset | null>(null);
   const [imageStarting, setImageStarting] = useState(false);
   const [imageRunning, setImageRunning] = useState(false);
@@ -45,6 +48,7 @@ export function NsfwPage() {
   const [videoRunning, setVideoRunning] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editPrompt, setEditPrompt] = useState("");
+  const [extendLength, setExtendLength] = useState("6");
   const [extendTime, setExtendTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const imageTasks = useRef<string[]>([]);
@@ -194,13 +198,13 @@ export function NsfwPage() {
       const result = await startVideo(key, {
         prompt,
         aspect_ratio: ratio,
-        video_length: Number(length),
+        video_length: extension ? Number(extendLength) : Number(length),
         resolution_name: resolution,
         preset: prompt ? "custom" : "spicy",
         concurrent: extension ? 1 : Number(parallel),
-        image_url: extension ? undefined : source,
         source_image_url: extension ? undefined : source,
         is_video_extension: Boolean(extension),
+        source_task_id: extension?.taskID,
         extend_post_id: extension?.postID,
         original_post_id: extension?.originalPostID || extension?.postID,
         file_attachment_id: extension?.originalPostID || extension?.postID,
@@ -235,6 +239,16 @@ export function NsfwPage() {
     await stopVideos(key, tasks).catch(() => undefined);
   }
 
+  async function openCache() {
+    setCacheOpen(true);
+    try {
+      const payload = await listCachedVideos(key);
+      setCachedVideos((payload.items || []).map(cachedVideo));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取缓存失败");
+    }
+  }
+
   function selectVideo(item: VideoItem, scroll = false) {
     setActiveVideo(item);
     setExtendTime(0);
@@ -249,7 +263,7 @@ export function NsfwPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">NSFW 工作台</h1><p className="mt-1 text-sm text-muted-foreground">候选图、图生视频与时间轴延长集中处理</p></div>
-        <div className="flex gap-2"><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); }}><Trash2 className="size-4" />清空视频</Button></div>
+        <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); }}><Trash2 className="size-4" />清空视频</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -290,6 +304,7 @@ export function NsfwPage() {
                 <label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
+              <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
               <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
               <Button className="mt-3 w-full" onClick={() => void generateVideos(activeVideo)} disabled={videoStarting || videoRunning || !activeVideo.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
               {!activeVideo.postID && <p className="mt-2 text-xs text-warning">当前结果缺少 postId，无法延长</p>}
@@ -302,6 +317,7 @@ export function NsfwPage() {
           <div><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">视频结果</h2><span className="text-xs text-muted-foreground">{videos.length} 个</span></div><VideoGrid videos={videos} activeID={activeVideo?.id} onActivate={(item) => selectVideo(item)} onExtend={(item) => selectVideo(item, true)} /></div>
         </main>
       </div>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }

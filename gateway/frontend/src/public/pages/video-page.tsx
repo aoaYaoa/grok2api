@@ -36,6 +36,7 @@ export function VideoPage() {
   const [renameTarget, setRenameTarget] = useState<VideoItem | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [extendPrompt, setExtendPrompt] = useState("");
+  const [extendLength, setExtendLength] = useState("6");
   const [extendTime, setExtendTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const controllers = useRef(new Map<string, AbortController>());
@@ -147,7 +148,7 @@ export function VideoPage() {
 
   async function extend() {
     if (!active?.postID) return toast.error("当前视频没有可用 postId，请从缓存中选择");
-    await generate({ prompt: extendPrompt.trim(), concurrent: 1, video_length: Number(length), is_video_extension: true, extend_post_id: active.postID, video_extension_start_time: extendTime, original_post_id: active.originalPostID || active.postID, file_attachment_id: active.originalPostID || active.postID, stitch_with_extend: true });
+    await generate({ prompt: extendPrompt.trim(), concurrent: 1, video_length: Number(extendLength), is_video_extension: true, source_task_id: active.taskID, extend_post_id: active.postID, video_extension_start_time: extendTime, original_post_id: active.originalPostID || active.postID, file_attachment_id: active.originalPostID || active.postID, stitch_with_extend: true });
   }
 
   function activate(item: VideoItem, scroll = false) {
@@ -193,6 +194,7 @@ export function VideoPage() {
             <video src={active.url} controls playsInline className="aspect-video w-full rounded-md bg-black" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
             <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3"><label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-3 w-full" /></label><label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label></div>
             <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
+            <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
             <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
             <Button className="mt-3 w-full" onClick={() => void extend()} disabled={starting || running || !active.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
             {!active.postID && <p className="mt-2 text-xs text-warning">从缓存选择带 postId 的视频后可延长</p>}
