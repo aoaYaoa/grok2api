@@ -111,6 +111,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, err
 	}
+	legacyVideoStore, err := inframedia.NewLegacyVideoStore(cfg.Legacy.CachePath)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
 	var rateLimiter repository.RateLimiter
 	var concurrency repository.ConcurrencyLimiter
 	var sticky repository.StickySessionRepository
@@ -159,6 +164,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	cliAdapter.SetEgress(egressManager)
 	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, responseRepo, mediaService)
 	webAdapter.SetLogger(logger)
+	webAdapter.SetVideoAssetStore(legacyVideoStore)
 	consoleAdapter := consoleprovider.NewAdapter(consoleProviderConfig(cfg), egressManager, cipher)
 	providers := provider.NewRegistry(cliAdapter, webAdapter, consoleAdapter)
 	if err := providers.Validate(); err != nil {

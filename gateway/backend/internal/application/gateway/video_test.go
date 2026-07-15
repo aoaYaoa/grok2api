@@ -4,11 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
+	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -81,6 +88,109 @@ func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	if service.enqueueVideoJob("video_overflow") {
 		t.Fatal("queue accepted a job beyond its capacity")
 	}
+}
+
+func TestRecoverVideoJobsArchivesCompletedProtectedOutputs(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-repair.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web", SourceKey: "web",
+		EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC()
+	repository := &videoRepairRepository{job: media.Job{
+		ID: "video_repair", RequestID: "request-repair", ClientKeyID: 1, AccountID: credential.ID,
+		Provider: string(account.ProviderWeb), Model: "grok-imagine-video", ModelRouteID: 3, UpstreamModel: "Web/grok-imagine-video",
+		Seconds: 6, Size: "3:2", Quality: "480p", Status: media.StatusCompleted, Progress: 100,
+		UpstreamURL: "https://assets.grok.com/users/test/generated/video/generated_video.mp4", ContentType: "video/mp4",
+		InputJSON: `{}`, CreatedAt: completedAt.Add(-time.Minute), UpdatedAt: completedAt, CompletedAt: &completedAt, UsageRecordedAt: &completedAt,
+	}}
+	adapter := &videoRepairAdapter{}
+	registry := provider.NewRegistry(adapter)
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
+	service := &Service{
+		models:    videoRepairRouteResolver{route: modeldomain.Route{ID: 3, Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video", Enabled: true}},
+		providers: registry, selector: selector, mediaJobs: repository, logger: slog.Default(),
+	}
+	if err := service.RecoverVideoJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.archived != 1 || repository.job.UpstreamURL != "/v1/files/video/generated_video.mp4" {
+		t.Fatalf("archive calls=%d repaired URL=%q", adapter.archived, repository.job.UpstreamURL)
+	}
+}
+
+type videoRepairAdapter struct{ archived int }
+
+func (*videoRepairAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (*videoRepairAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
+	return provider.VideoResult{}, errors.New("not used")
+}
+func (a *videoRepairAdapter) ArchiveVideo(_ context.Context, _ account.Credential, result provider.VideoResult) (provider.VideoResult, error) {
+	a.archived++
+	result.URL = "/v1/files/video/generated_video.mp4"
+	return result, nil
+}
+
+type videoRepairRouteResolver struct{ route modeldomain.Route }
+
+func (r videoRepairRouteResolver) Get(context.Context, uint64) (modeldomain.Route, error) {
+	return r.route, nil
+}
+func (r videoRepairRouteResolver) GetByPublicID(context.Context, string) (modeldomain.Route, error) {
+	return r.route, nil
+}
+func (r videoRepairRouteResolver) GetByPublicIDCandidates(context.Context, string) ([]modeldomain.Route, error) {
+	return []modeldomain.Route{r.route}, nil
+}
+func (r videoRepairRouteResolver) GetByProviderUpstream(context.Context, account.Provider, string) (modeldomain.Route, error) {
+	return r.route, nil
+}
+
+type videoRepairRepository struct{ job media.Job }
+
+func (r *videoRepairRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
+func (r *videoRepairRepository) GetMediaJob(context.Context, string, uint64) (media.Job, error) {
+	return r.job, nil
+}
+func (r *videoRepairRepository) ListMediaJobsByClientKey(context.Context, uint64, int, int) ([]media.Job, int64, error) {
+	return []media.Job{r.job}, 1, nil
+}
+func (r *videoRepairRepository) UpdateMediaJob(_ context.Context, job media.Job) error {
+	r.job = job
+	return nil
+}
+func (r *videoRepairRepository) ListMediaJobs(_ context.Context, query repository.MediaJobListQuery) ([]media.Job, int64, error) {
+	if query.Filter.Status == string(media.StatusCompleted) {
+		return []media.Job{r.job}, 1, nil
+	}
+	return nil, 0, nil
+}
+func (*videoRepairRepository) SummarizeMediaJobs(context.Context) (repository.MediaJobStats, error) {
+	return repository.MediaJobStats{}, nil
+}
+func (*videoRepairRepository) ListRecoverableMediaJobs(context.Context, int) ([]media.Job, error) {
+	return nil, nil
+}
+func (*videoRepairRepository) ListUnrecordedTerminalMediaJobs(context.Context, int) ([]media.Job, error) {
+	return nil, nil
+}
+func (*videoRepairRepository) TryClaimMediaJob(context.Context, string, time.Time, time.Time, string) (media.Job, bool, error) {
+	return media.Job{}, false, nil
+}
+func (*videoRepairRepository) MarkMediaJobUsageRecorded(context.Context, string, time.Time) error {
+	return nil
 }
 
 type durableVideoAuditRecorder struct {

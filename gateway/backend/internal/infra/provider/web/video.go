@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
@@ -79,7 +81,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if result.URL == "" {
 		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
 	}
-	return result, nil
+	return a.ArchiveVideo(ctx, request.Credential, result)
 }
 
 func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *egress.Lease, token string, request provider.VideoRequest) (provider.VideoResult, error) {
@@ -126,7 +128,101 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 	if result.URL == "" {
 		return provider.VideoResult{}, fmt.Errorf("视频延长完成但没有返回内容 URL")
 	}
-	return result, nil
+	return a.ArchiveVideo(ctx, request.Credential, result)
+}
+
+// ArchiveVideo 使用生成账号的 SSO 会话下载受保护的视频，并返回本站文件地址。
+func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credential, result provider.VideoResult) (provider.VideoResult, error) {
+	if strings.HasPrefix(strings.TrimSpace(result.URL), "/v1/files/video/") {
+		return result, nil
+	}
+	if a.videos == nil {
+		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingStorage, fmt.Errorf("视频媒体存储未配置"))
+	}
+	cfg := a.config()
+	parsed, err := url.Parse(strings.TrimSpace(result.URL))
+	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.User != nil || !trustedVideoAssetHost(parsed.Hostname(), cfg.BaseURL) {
+		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, fmt.Errorf("视频内容 URL 不受信任"))
+	}
+	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
+	if err != nil {
+		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err)
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	defer cancel()
+	var lastErr error
+	lastStage := provider.MediaPostProcessingDownload
+	for attempt := 0; attempt < mediaOutputAttempts; attempt++ {
+		localURL, stage, retryable, attemptErr := a.archiveVideoAttempt(downloadCtx, credential.ID, token, parsed.String(), result.ContentType)
+		if attemptErr == nil {
+			result.URL = localURL
+			if result.ContentType == "" {
+				result.ContentType = "video/mp4"
+			}
+			return result, nil
+		}
+		lastErr, lastStage = attemptErr, stage
+		if !retryable || downloadCtx.Err() != nil || attempt+1 >= mediaOutputAttempts {
+			break
+		}
+		if err := waitMediaOutputRetry(downloadCtx, attempt); err != nil {
+			lastErr = err
+			break
+		}
+	}
+	return provider.VideoResult{}, provider.NewMediaPostProcessingError(lastStage, lastErr)
+}
+
+func (a *Adapter) archiveVideoAttempt(ctx context.Context, accountID uint64, token, rawURL, fallbackContentType string) (string, provider.MediaPostProcessingStage, bool, error) {
+	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWebAsset, fmt.Sprintf("%d", accountID))
+	if err != nil {
+		return "", provider.MediaPostProcessingDownload, true, err
+	}
+	defer lease.Release()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", provider.MediaPostProcessingDownload, false, err
+	}
+	request.Header = buildHeaders(token, lease, "")
+	request.Header.Del("Content-Type")
+	request.Header.Set("Range", "bytes=0-")
+	applyAppHeaders(request.Header, "https://grok.com", "https://grok.com/")
+	request.Header.Set("Sec-Fetch-Site", "same-site")
+	response, err := lease.Do(request)
+	if err != nil {
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		return "", provider.MediaPostProcessingDownload, ctx.Err() == nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent {
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		retryable := response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
+		return "", provider.MediaPostProcessingDownload, retryable, fmt.Errorf("下载视频返回 %d", response.StatusCode)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType == "" {
+		contentType = strings.ToLower(strings.TrimSpace(strings.Split(fallbackContentType, ";")[0]))
+	}
+	if contentType == "" {
+		contentType = "video/mp4"
+	}
+	if !strings.HasPrefix(contentType, "video/") {
+		return "", provider.MediaPostProcessingDownload, false, fmt.Errorf("上游视频 Content-Type 无效")
+	}
+	localURL, err := a.videos.SaveVideo(ctx, rawURL, contentType, response.Body)
+	if err != nil {
+		return "", provider.MediaPostProcessingStorage, ctx.Err() == nil, err
+	}
+	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	return localURL, provider.MediaPostProcessingStorage, false, nil
+}
+
+func trustedVideoAssetHost(host, baseURL string) bool {
+	if strings.EqualFold(host, "assets.grok.com") || strings.EqualFold(host, "imagine-public.x.ai") {
+		return true
+	}
+	parsed, err := url.Parse(baseURL)
+	return err == nil && parsed.Hostname() != "" && strings.EqualFold(host, parsed.Hostname())
 }
 
 func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {

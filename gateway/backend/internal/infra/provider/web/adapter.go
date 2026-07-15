@@ -33,6 +33,7 @@ type Adapter struct {
 	cipher  *security.Cipher
 	states  repository.ResponseRepository
 	assets  provider.ImageAssetStore
+	videos  provider.VideoAssetStore
 	statsig *statsigSigner
 	logger  *slog.Logger
 }
@@ -47,6 +48,8 @@ func (a *Adapter) SetLogger(logger *slog.Logger) {
 		a.logger = logger
 	}
 }
+
+func (a *Adapter) SetVideoAssetStore(store provider.VideoAssetStore) { a.videos = store }
 
 func (a *Adapter) log() *slog.Logger {
 	if a.logger != nil {

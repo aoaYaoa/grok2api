@@ -28,6 +28,7 @@ export function VideoPage() {
   const [preset, setPreset] = useState("normal");
   const [concurrent, setConcurrent] = useState("1");
   const [videos, setVideos] = useState<VideoItem[]>([]);
+  const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
   const [active, setActive] = useState<VideoItem | null>(null);
   const [starting, setStarting] = useState(false);
   const [running, setRunning] = useState(false);
@@ -125,10 +126,7 @@ export function VideoPage() {
     try {
       const payload = await listCachedVideos(key);
       const values = (payload.items || []).map(cachedVideo);
-      setVideos((items) => {
-        const seen = new Set(items.map((item) => item.url || item.id));
-        return [...items, ...values.filter((item) => !seen.has(item.url || item.id))];
-      });
+      setCachedVideos(values);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取缓存失败");
     }
@@ -139,6 +137,7 @@ export function VideoPage() {
     try {
       await renameVideo(key, renameTarget, renameValue.trim());
       setVideos((items) => items.map((item) => item.id === renameTarget.id ? { ...item, displayName: renameValue.trim() } : item));
+      setCachedVideos((items) => items.map((item) => item.id === renameTarget.id ? { ...item, displayName: renameValue.trim() } : item));
       setRenameTarget(null);
       toast.success("名称已更新");
     } catch (error) {
@@ -207,7 +206,7 @@ export function VideoPage() {
       </div>
 
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><DialogHeader><DialogTitle>重命名视频</DialogTitle></DialogHeader><Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button onClick={() => void saveRename()}>保存</Button></DialogContent></Dialog>
-      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={videos.filter((item) => item.status === "completed")} activeID={active?.id} onActivate={(item) => { setCacheOpen(false); activate(item, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true); }} /></div></DialogContent></Dialog>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={active?.id} onActivate={(item) => { setCacheOpen(false); activate(item, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }

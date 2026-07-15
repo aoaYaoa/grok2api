@@ -55,6 +55,16 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.match(grid, /onExtend\?:/);
 });
 
+test("video cache dialog does not merge the whole cache into session history", async () => {
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const openCache = video.slice(video.indexOf("async function openCache"), video.indexOf("async function saveRename"));
+
+  assert.match(video, /const \[cachedVideos, setCachedVideos\]/);
+  assert.match(openCache, /setCachedVideos/);
+  assert.doesNotMatch(openCache, /setVideos/);
+  assert.match(video, /<VideoGrid videos=\{cachedVideos\}/);
+});
+
 test("media workspaces keep controls on the left and results on the right", async () => {
   const pages = [
     "imagine-page.tsx",

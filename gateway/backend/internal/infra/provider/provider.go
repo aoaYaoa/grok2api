@@ -328,6 +328,11 @@ type ImageAssetStore interface {
 	PublicImageURL(id string) string
 }
 
+// VideoAssetStore 将受上游鉴权保护的视频流保存为本站可稳定读取的文件。
+type VideoAssetStore interface {
+	SaveVideo(ctx context.Context, sourceURL, mimeType string, body io.Reader) (string, error)
+}
+
 type VideoAdapter interface {
 	Adapter
 	GenerateVideo(ctx context.Context, request VideoRequest) (VideoResult, error)

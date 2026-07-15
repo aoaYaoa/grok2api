@@ -19,6 +19,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 const (
@@ -211,16 +212,74 @@ func (s *Service) RecoverVideoJobs(ctx context.Context) error {
 		return nil
 	}
 	usageErr := s.reconcileVideoUsage(ctx)
+	repairErr := s.repairCompletedVideoOutputs(ctx)
 	values, err := s.mediaJobs.ListRecoverableMediaJobs(ctx, 1000)
 	if err != nil {
-		return errors.Join(usageErr, err)
+		return errors.Join(usageErr, repairErr, err)
 	}
 	for _, job := range values {
 		if !s.enqueueVideoJob(job.ID) {
 			break
 		}
 	}
-	return usageErr
+	return errors.Join(usageErr, repairErr)
+}
+
+type videoOutputArchiver interface {
+	ArchiveVideo(context.Context, account.Credential, provider.VideoResult) (provider.VideoResult, error)
+}
+
+// repairCompletedVideoOutputs 补齐 Go 切换前后遗漏的受保护上游视频缓存。
+func (s *Service) repairCompletedVideoOutputs(ctx context.Context) error {
+	if s.models == nil || s.providers == nil || s.selector == nil {
+		return nil
+	}
+	values, _, err := s.mediaJobs.ListMediaJobs(ctx, repository.MediaJobListQuery{
+		Page: repository.PageQuery{Limit: 1000}, Filter: repository.MediaJobListFilter{Status: string(media.StatusCompleted)},
+	})
+	if err != nil {
+		return err
+	}
+	var result error
+	for _, job := range values {
+		if !protectedVideoOutput(job.UpstreamURL) {
+			continue
+		}
+		route, routeErr := s.models.Get(ctx, job.ModelRouteID)
+		if routeErr != nil {
+			result = firstError(result, fmt.Errorf("任务 %s 查询模型路由: %w", job.ID, routeErr))
+			continue
+		}
+		adapter, ok := s.providers.Videos(route.Provider)
+		if !ok {
+			continue
+		}
+		archiver, ok := adapter.(videoOutputArchiver)
+		if !ok {
+			continue
+		}
+		lease, leaseErr := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", false)
+		if leaseErr != nil {
+			result = firstError(result, fmt.Errorf("任务 %s 获取原账号: %w", job.ID, leaseErr))
+			continue
+		}
+		archived, archiveErr := archiver.ArchiveVideo(ctx, lease.Credential, provider.VideoResult{URL: job.UpstreamURL, ContentType: job.ContentType})
+		lease.Release()
+		if archiveErr != nil {
+			result = firstError(result, fmt.Errorf("任务 %s 保存视频: %w", job.ID, archiveErr))
+			continue
+		}
+		job.UpstreamURL, job.ContentType, job.UpdatedAt = archived.URL, archived.ContentType, time.Now().UTC()
+		if updateErr := s.mediaJobs.UpdateMediaJob(ctx, job); updateErr != nil {
+			result = firstError(result, fmt.Errorf("任务 %s 更新本地地址: %w", job.ID, updateErr))
+		}
+	}
+	return result
+}
+
+func protectedVideoOutput(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "https://assets.grok.com/") || strings.HasPrefix(value, "https://imagine-public.x.ai/")
 }
 
 // RunVideoWorkers 使用固定 Worker 处理持久化任务，避免突发请求按任务创建无界 goroutine。

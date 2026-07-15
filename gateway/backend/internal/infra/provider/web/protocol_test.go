@@ -654,6 +654,93 @@ func TestParseVideoConcatenatedJSONFixture(t *testing.T) {
 	}
 }
 
+func TestGenerateVideoDoesNotReturnProtectedUpstreamURLWithoutStorage(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/media/post/create":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
+		case "/rest/app-chat/conversations/new":
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/generated/video.mp4"}}}}`+"\n")
+		case "/generated/video.mp4":
+			writer.Header().Set("Content-Type", "video/mp4")
+			_, _ = writer.Write([]byte("video-bytes"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	_, err = adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
+	})
+	if err == nil || !provider.IsMediaPostProcessingError(err) {
+		t.Fatalf("protected upstream video was returned without local storage: %v", err)
+	}
+}
+
+func TestGenerateVideoArchivesProtectedOutputWithAccountSession(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/media/post/create":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
+		case "/rest/app-chat/conversations/new":
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/users/test/generated/video/generated_video.mp4"}}}}`+"\n")
+		case "/users/test/generated/video/generated_video.mp4":
+			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") || request.Header.Get("Range") != "bytes=0-" {
+				t.Errorf("video download headers = %#v", request.Header)
+			}
+			writer.Header().Set("Content-Type", "video/mp4")
+			_, _ = writer.Write([]byte("video-bytes"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &videoAssetStoreStub{}
+	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter.SetVideoAssetStore(store)
+	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.URL != "/v1/files/video/generated_video.mp4" || result.ContentType != "video/mp4" || string(store.data) != "video-bytes" {
+		t.Fatalf("result=%#v stored=%q", result, store.data)
+	}
+}
+
+type videoAssetStoreStub struct{ data []byte }
+
+func (s *videoAssetStoreStub) SaveVideo(_ context.Context, _ string, _ string, body io.Reader) (string, error) {
+	s.data, _ = io.ReadAll(body)
+	return "/v1/files/video/generated_video.mp4", nil
+}
+
 func MarshalJSONBytes(value any) []byte {
 	data, _ := json.Marshal(value)
 	return data
