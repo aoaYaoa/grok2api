@@ -4,7 +4,7 @@ import { imageSource } from "@/public/lib/media";
 export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
 export type ImageEvent = Record<string, unknown>;
 
-export async function startImage(key: string, body: { prompt: string; aspect_ratio: string; nsfw: boolean; pro: boolean }) { return publicFetch<{ task_id: string }>(key, publicEndpoints.imagineStart, { method: "POST", body: JSON.stringify(body) }); }
+export async function startImage(key: string, body: { prompt: string; aspect_ratio: string; nsfw: boolean; pro: boolean }, signal?: AbortSignal) { return publicFetch<{ task_id: string }>(key, publicEndpoints.imagineStart, { method: "POST", body: JSON.stringify(body), signal }); }
 export async function stopImages(key: string, taskIDs: string[]) { if (taskIDs.length) await publicFetch(key, publicEndpoints.imagineStop, { method: "POST", body: JSON.stringify({ task_ids: taskIDs }) }); }
 export function streamImage(key: string, taskID: string, onEvent: (event: ImageEvent) => void, signal: AbortSignal) { return publicSSE<ImageEvent>(key, `${publicEndpoints.imagineSSE}?task_id=${encodeURIComponent(taskID)}`, ({ data }) => { if (data && typeof data === "object") onEvent(data); }, signal); }
 

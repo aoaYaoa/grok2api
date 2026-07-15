@@ -24,6 +24,8 @@ const navigation = [
   { href: "/accounts", label: "nav.accounts", icon: Users },
   { href: "/client-keys", label: "nav.clientKeys", icon: KeyRound },
   { href: "/models", label: "nav.models", icon: Box },
+  { href: "/gallery", label: "nav.gallery", icon: Image },
+  { href: "/video-gallery", label: "nav.videoGallery", icon: Video },
   { href: "/request-audits", label: "nav.audits", icon: Eye },
   { href: "/cache", label: "nav.cache", icon: Database },
 ] as const;
@@ -93,8 +95,8 @@ export function AppShell() {
         to={href}
         onClick={() => setMobileOpen(false)}
         className={({ isActive }) => cn(
-          "group flex h-8 items-center gap-2 rounded-md px-2.5 text-xs font-normal text-muted-foreground transition-colors hover:bg-secondary/55 hover:text-foreground",
-          isActive && "bg-secondary/60 text-foreground",
+          "group flex h-9 items-center gap-2 rounded-md px-2.5 text-sm font-normal text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground",
+          isActive && "bg-primary/12 font-medium text-primary",
         )}
       >
         {({ isActive }) => (
@@ -145,7 +147,7 @@ export function AppShell() {
                     <span className="min-w-0 flex-1 truncate">{item.label}</span>
                     <span className={cn(
                       "shrink-0 font-mono text-[9px] font-medium text-muted-foreground/70",
-                      item.method === "GET" && "text-emerald-600 dark:text-emerald-400",
+                      item.method === "GET" && "text-sky-600 dark:text-sky-400",
                       item.method === "POST" && "text-sky-600 dark:text-sky-400",
                     )}>
                       {item.method}
@@ -211,7 +213,7 @@ export function AppShell() {
 
   return (
     <div className="min-h-screen bg-background">
-        <aside className="fixed inset-y-0 left-0 z-30 hidden h-screen w-[288px] flex-col overflow-hidden bg-sidebar px-4 py-6 lg:flex">
+        <aside className="fixed inset-y-0 left-0 z-30 hidden h-dvh w-[248px] flex-col overflow-hidden border-r border-sidebar-border bg-sidebar px-3 py-5 lg:flex">
           <div className="flex h-7 shrink-0 items-center justify-between px-2.5">
             <Link to="/dashboard" className="flex h-7 items-center text-base font-semibold text-foreground">
               {t("appName")}
@@ -226,7 +228,7 @@ export function AppShell() {
           <div className="relative z-10 mt-4 shrink-0 bg-sidebar pt-4">{accountControl}</div>
         </aside>
 
-        <div className="flex min-h-screen flex-col lg:pl-[288px]">
+        <div className="flex min-h-dvh flex-col lg:pl-[248px]">
           <header className="flex h-12 items-center justify-between border-b px-4 lg:hidden">
             <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
               <SheetTrigger asChild><Button variant="ghost" size="icon" className="size-8" aria-label={t("shell.openNavigation")}><Menu className="size-4" /></Button></SheetTrigger>
@@ -247,7 +249,7 @@ export function AppShell() {
             </Button>
           </header>
 
-          <main className="mx-auto w-full max-w-[1280px] flex-1 px-5 py-8 sm:px-8 lg:py-20">
+          <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
             <Outlet />
           </main>
           <SiteFooter />

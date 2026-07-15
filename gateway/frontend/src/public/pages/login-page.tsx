@@ -35,8 +35,8 @@ export function LoginPage() {
   }
 
   return (
-    <main className="grid min-h-dvh place-items-center bg-background p-5">
-      <section className="w-full max-w-sm border bg-card p-6 shadow-sm">
+    <main className="grid min-h-dvh place-items-center bg-background p-4 sm:p-6">
+      <section className="workspace-panel w-full max-w-sm border-t-4 border-t-primary p-6 shadow-md">
         <div className="mb-7 flex items-center justify-between">
           <div><h1 className="text-xl font-semibold">Grok2API</h1><p className="mt-1 text-sm text-muted-foreground">公共创作工作台</p></div>
           <a href="https://github.com/chenyme/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub" className="grid size-11 place-items-center rounded-md hover:bg-accent"><GitHubMark className="size-5" /></a>

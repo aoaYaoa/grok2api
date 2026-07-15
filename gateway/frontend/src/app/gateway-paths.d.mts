@@ -6,6 +6,8 @@ export const gatewayRoutePaths: Readonly<{
   accounts: "/accounts";
   models: "/models";
   clientKeys: "/client-keys";
+  gallery: "/gallery";
+  videoGallery: "/video-gallery";
   requestAudits: "/request-audits";
   cache: "/cache";
   docs: "/docs";

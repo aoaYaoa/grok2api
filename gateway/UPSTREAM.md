@@ -1,8 +1,8 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `dd6624cbb1d1243415baa93830870b82ebed2fb5`
-- Imported: `2026-07-14`
+- Commit: `d3dc3d8f10570f57bdaa3774583a53d508a31435`
+- Imported: `2026-07-15`
 
 ## Updating
 

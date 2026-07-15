@@ -61,6 +61,21 @@ test("Go image contains admin and public React builds without legacy page assets
   assert.doesNotMatch(dockerfile, /python/i);
 });
 
+test("repository no longer ships the retired Python runtime", () => {
+  const workflow = read(".github/workflows/docker.yml");
+  const appRoot = path.join(root, "app");
+  const appFiles = fs.existsSync(appRoot)
+    ? fs.readdirSync(appRoot, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name !== ".DS_Store" && !entry.name.includes(".bak_"))
+    : [];
+
+  assert.deepEqual(appFiles, []);
+  assert.equal(fs.existsSync(path.join(root, "main.py")), false);
+  assert.equal(fs.existsSync(path.join(root, "pyproject.toml")), false);
+  assert.equal(fs.existsSync(path.join(root, "Dockerfile")), false);
+  assert.equal(fs.readdirSync(path.join(root, "tests")).some((file) => file.endsWith(".py")), false);
+  assert.match(workflow, /file: \.\/gateway\/Dockerfile/);
+});
+
 test("Go configuration uses SQLite, memory, and direct root API URLs", () => {
   const config = read("gateway/config.example.compat.yaml");
   const gitignore = read(".gitignore");

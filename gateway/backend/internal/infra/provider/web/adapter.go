@@ -141,8 +141,11 @@ func (a *Adapter) QuotaProduct(upstreamModel string) (int, bool) {
 
 func (a *Adapter) PricingModel(upstreamModel string) string {
 	spec, ok := Resolve(upstreamModel)
-	if ok && spec.Capability == modeldomain.CapabilityChat {
-		return "grok-4.5"
+	if ok {
+		if spec.Capability == modeldomain.CapabilityChat {
+			return "grok-4.5"
+		}
+		return spec.PublicID
 	}
 	return upstreamModel
 }

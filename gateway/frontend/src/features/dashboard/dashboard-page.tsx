@@ -20,13 +20,13 @@ const USD_TICKS = 10_000_000_000;
 type TrendMetric = "tokens" | "billing";
 
 const MODEL_CHART_COLORS = [
-  { light: "oklch(0.76 0.1 205)", dark: "oklch(0.72 0.1 205)" },
-  { light: "oklch(0.77 0.1 160)", dark: "oklch(0.73 0.1 160)" },
+  { light: "oklch(0.7 0.12 250)", dark: "oklch(0.74 0.11 250)" },
+  { light: "oklch(0.7 0.11 285)", dark: "oklch(0.74 0.1 285)" },
   { light: "oklch(0.8 0.11 85)", dark: "oklch(0.76 0.11 85)" },
   { light: "oklch(0.77 0.11 30)", dark: "oklch(0.73 0.11 30)" },
   { light: "oklch(0.77 0.1 300)", dark: "oklch(0.73 0.1 300)" },
-  { light: "oklch(0.74 0.09 185)", dark: "oklch(0.7 0.09 185)" },
-  { light: "oklch(0.8 0.1 125)", dark: "oklch(0.76 0.1 125)" },
+  { light: "oklch(0.7 0.1 265)", dark: "oklch(0.74 0.09 265)" },
+  { light: "oklch(0.76 0.1 20)", dark: "oklch(0.72 0.1 20)" },
   { light: "oklch(0.78 0.1 345)", dark: "oklch(0.74 0.1 345)" },
   { light: "oklch(0.8 0.09 55)", dark: "oklch(0.76 0.09 55)" },
   { light: "oklch(0.76 0.09 275)", dark: "oklch(0.72 0.09 275)" },

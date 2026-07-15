@@ -59,8 +59,12 @@ func TestWebChatPricingUsesGrok45(t *testing.T) {
 			t.Fatalf("pricing model for %s = %q", upstreamModel, got)
 		}
 	}
-	for _, upstreamModel := range []string{"grok-imagine-image", "grok-imagine-image-quality", "imagine-image-edit", "grok-imagine-video"} {
-		if got := registry.PricingModel(account.ProviderWeb, upstreamModel); got != upstreamModel {
+	mediaModels := map[string]string{
+		"grok-imagine-image": "grok-imagine-image", "grok-imagine-image-quality": "grok-imagine-image-quality",
+		"imagine-image-edit": "grok-imagine-image-edit", "grok-imagine-video": "grok-imagine-video",
+	}
+	for upstreamModel, expected := range mediaModels {
+		if got := registry.PricingModel(account.ProviderWeb, upstreamModel); got != expected {
 			t.Fatalf("media pricing model for %s = %q", upstreamModel, got)
 		}
 	}
@@ -558,6 +562,31 @@ func TestImageStreamExtensionEventsAndPayloads(t *testing.T) {
 	}
 }
 
+func TestImageDataItemRetriesStorageWithoutRegenerating(t *testing.T) {
+	store := &imageAssetStoreRetryStub{failures: 2}
+	adapter := &Adapter{assets: store}
+	item, err := adapter.imageDataItem(context.Background(), account.Credential{ID: 42}, imagineImageValue{Blob: "aW1hZ2U="}, "url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.calls != mediaOutputAttempts || item["url"] != "https://api.example/v1/media/images/img_retry" {
+		t.Fatalf("storage retry calls=%d item=%#v", store.calls, item)
+	}
+}
+
+func TestImageDataItemClassifiesExhaustedStorageFailure(t *testing.T) {
+	store := &imageAssetStoreRetryStub{failures: mediaOutputAttempts}
+	adapter := &Adapter{assets: store}
+	_, err := adapter.imageDataItem(context.Background(), account.Credential{ID: 42}, imagineImageValue{Blob: "aW1hZ2U="}, "url")
+	if err == nil || !provider.IsMediaPostProcessingError(err) || store.calls != mediaOutputAttempts {
+		t.Fatalf("storage failure err=%v calls=%d", err, store.calls)
+	}
+	var processingErr *provider.MediaPostProcessingError
+	if !errors.As(err, &processingErr) || processingErr.Stage != provider.MediaPostProcessingStorage {
+		t.Fatalf("storage failure classification = %#v", processingErr)
+	}
+}
+
 type imageAssetStoreStub struct{}
 
 func (imageAssetStoreStub) SaveImage(context.Context, []byte) (mediadomain.Asset, error) {
@@ -566,6 +595,23 @@ func (imageAssetStoreStub) SaveImage(context.Context, []byte) (mediadomain.Asset
 
 func (imageAssetStoreStub) PublicImageURL(string) string {
 	return "https://api.example/v1/media/images/img_test"
+}
+
+type imageAssetStoreRetryStub struct {
+	failures int
+	calls    int
+}
+
+func (s *imageAssetStoreRetryStub) SaveImage(context.Context, []byte) (mediadomain.Asset, error) {
+	s.calls++
+	if s.calls <= s.failures {
+		return mediadomain.Asset{}, errors.New("temporary storage failure")
+	}
+	return mediadomain.Asset{ID: "img_retry", MIMEType: "image/jpeg"}, nil
+}
+
+func (*imageAssetStoreRetryStub) PublicImageURL(string) string {
+	return "https://api.example/v1/media/images/img_retry"
 }
 
 func TestParseVideoStreamFixture(t *testing.T) {
@@ -579,6 +625,15 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 	if progress != 100 || postID != "post_1" || result.URL != "https://assets.grok.com/videos/final.mp4" || result.ContentType != "video/mp4" {
 		t.Fatalf("result = %#v, post = %q, progress = %d", result, postID, progress)
+	}
+}
+
+func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader("limited"))}
+	_, _, err := parseVideoStream(response, nil)
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
 	}
 }
 

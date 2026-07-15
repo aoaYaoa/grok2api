@@ -17,8 +17,27 @@ const auditFlushDuration = durationSchema.refine((value) => {
   const seconds = durationSeconds(value);
   return seconds >= 0.01 && seconds <= 60;
 });
+const consoleChatDuration = durationSchema.refine((value) => {
+  const seconds = durationSeconds(value);
+  return seconds >= 5 && seconds <= 30 * 60;
+});
+
+function validPublicAPIBaseURL(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return true;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return false;
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 export const settingsSchema = z.object({
+  server: z.object({
+    maxConcurrentRequests: positiveInteger.max(100_000),
+  }),
   providerBuild: z.object({
     baseURL: z.url(),
     clientVersion: z.string().trim().min(1),
@@ -56,6 +75,11 @@ export const settingsSchema = z.object({
       }
     }
   }),
+  providerConsole: z.object({
+    baseURL: z.url().refine((value) => value.startsWith("https://")),
+    userAgent: z.string().trim().min(1).max(512),
+    chatTimeout: consoleChatDuration,
+  }),
   batch: z.object({
     importConcurrency: positiveInteger.max(50),
     conversionConcurrency: positiveInteger.max(50),
@@ -69,6 +93,9 @@ export const settingsSchema = z.object({
     cleanupThresholdPercent: z.number().int().min(50).max(95),
     cleanupInterval: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 86_400),
   }).refine((value) => byteSizeBytes(value.maxTotalSize) >= byteSizeBytes(value.maxImageSize), { path: ["maxTotalSize"] }),
+  frontend: z.object({
+    publicApiBaseURL: z.string().trim().max(2048).refine((value) => validPublicAPIBaseURL(value), { message: "invalid" }),
+  }),
   routing: z.object({
     stickyTTL: routingTTLDuration,
     cooldownBase: routingCooldownDuration,
@@ -85,6 +112,7 @@ export type SettingsForm = z.infer<typeof settingsSchema>;
 
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
   return {
+    server: config.server,
     providerBuild: { ...config.providerBuild, tokenAuth: "" },
     providerWeb: {
       ...config.providerWeb,
@@ -93,11 +121,15 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       imageTimeout: parseDuration(config.providerWeb.imageTimeout), videoTimeout: parseDuration(config.providerWeb.videoTimeout),
       recoveryBackoffBase: parseDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: parseDuration(config.providerWeb.recoveryBackoffMax),
     },
+    providerConsole: { ...config.providerConsole, chatTimeout: parseDuration(config.providerConsole.chatTimeout) },
     batch: { ...config.batch, randomDelay: parseDurationMilliseconds(config.batch.randomDelay) },
     media: {
       maxImageSize: parseByteSize(config.media.maxImageBytes), maxTotalSize: parseByteSize(config.media.maxTotalBytes),
       cleanupThresholdPercent: config.media.cleanupThresholdPercent,
       cleanupInterval: parseDuration(config.media.cleanupInterval),
+    },
+    frontend: {
+      publicApiBaseURL: config.frontend.publicApiBaseURL,
     },
     routing: {
       stickyTTL: parseDuration(config.routing.stickyTTL), cooldownBase: parseDuration(config.routing.cooldownBase),
@@ -110,6 +142,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
 
 export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
   return {
+    server: config.server,
     providerBuild: config.providerBuild,
     providerWeb: {
       ...config.providerWeb,
@@ -117,11 +150,15 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       imageTimeout: formatDuration(config.providerWeb.imageTimeout), videoTimeout: formatDuration(config.providerWeb.videoTimeout),
       recoveryBackoffBase: formatDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: formatDuration(config.providerWeb.recoveryBackoffMax),
     },
+    providerConsole: { ...config.providerConsole, chatTimeout: formatDuration(config.providerConsole.chatTimeout) },
     batch: { ...config.batch, randomDelay: `${config.batch.randomDelay}ms` },
     media: {
       maxImageBytes: byteSizeBytes(config.media.maxImageSize), maxTotalBytes: byteSizeBytes(config.media.maxTotalSize),
       cleanupThresholdPercent: config.media.cleanupThresholdPercent,
       cleanupInterval: formatDuration(config.media.cleanupInterval),
+    },
+    frontend: {
+      publicApiBaseURL: config.frontend.publicApiBaseURL.trim(),
     },
     routing: {
       stickyTTL: formatDuration(config.routing.stickyTTL), cooldownBase: formatDuration(config.routing.cooldownBase),

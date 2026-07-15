@@ -21,13 +21,26 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type settingsConfigDTO struct {
+	Server            serverConfigDTO            `json:"server"`
 	ProviderBuild     providerBuildConfigDTO     `json:"providerBuild"`
 	ProviderWeb       providerWebConfigDTO       `json:"providerWeb"`
+	ProviderConsole   providerConsoleConfigDTO   `json:"providerConsole"`
 	Batch             batchConfigDTO             `json:"batch"`
 	Media             mediaConfigDTO             `json:"media"`
+	Frontend          frontendConfigDTO          `json:"frontend"`
 	Routing           routingConfigDTO           `json:"routing"`
 	Audit             auditConfigDTO             `json:"audit"`
 	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
+}
+
+type serverConfigDTO struct {
+	MaxConcurrentRequests int `json:"maxConcurrentRequests"`
+}
+
+type providerConsoleConfigDTO struct {
+	BaseURL     string `json:"baseURL"`
+	UserAgent   string `json:"userAgent"`
+	ChatTimeout string `json:"chatTimeout"`
 }
 
 type mediaConfigDTO struct {
@@ -35,6 +48,10 @@ type mediaConfigDTO struct {
 	MaxTotalBytes           int64  `json:"maxTotalBytes"`
 	CleanupThresholdPercent int    `json:"cleanupThresholdPercent"`
 	CleanupInterval         string `json:"cleanupInterval"`
+}
+
+type frontendConfigDTO struct {
+	PublicAPIBaseURL string `json:"publicApiBaseURL"`
 }
 
 type providerBuildConfigDTO struct {
@@ -135,6 +152,7 @@ func (h *Handler) update(c *gin.Context) {
 
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 	return settingsapp.EditableConfig{
+		Server: settingsapp.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
 		ProviderBuild: settingsapp.ProviderBuildConfig{
 			BaseURL: value.ProviderBuild.BaseURL, ClientVersion: value.ProviderBuild.ClientVersion,
 			ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
@@ -149,6 +167,10 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 			RecoveryBackoffBase: value.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: value.ProviderWeb.RecoveryBackoffMax,
 		},
+		ProviderConsole: settingsapp.ProviderConsoleConfig{
+			BaseURL: value.ProviderConsole.BaseURL, UserAgent: value.ProviderConsole.UserAgent,
+			ChatTimeout: value.ProviderConsole.ChatTimeout,
+		},
 		Batch: settingsapp.BatchConfig{
 			ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 			SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
@@ -157,6 +179,9 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		Media: settingsapp.MediaConfig{
 			MaxImageBytes: value.Media.MaxImageBytes, MaxTotalBytes: value.Media.MaxTotalBytes,
 			CleanupThresholdPercent: value.Media.CleanupThresholdPercent, CleanupInterval: value.Media.CleanupInterval,
+		},
+		Frontend: settingsapp.FrontendConfig{
+			PublicAPIBaseURL: value.Frontend.PublicAPIBaseURL,
 		},
 		Routing: settingsapp.RoutingConfig{
 			StickyTTL: value.Routing.StickyTTL, CooldownBase: value.Routing.CooldownBase,
@@ -175,6 +200,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 	config := value.Config
 	return settingsResponse{
 		Config: settingsConfigDTO{
+			Server: serverConfigDTO{MaxConcurrentRequests: config.Server.MaxConcurrentRequests},
 			ProviderBuild: providerBuildConfigDTO{
 				BaseURL: config.ProviderBuild.BaseURL, ClientVersion: config.ProviderBuild.ClientVersion,
 				ClientIdentifier: config.ProviderBuild.ClientIdentifier, TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "",
@@ -189,6 +215,10 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				MediaConcurrency: config.ProviderWeb.MediaConcurrency, AllowNSFW: config.ProviderWeb.AllowNSFW,
 				RecoveryBackoffBase: config.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: config.ProviderWeb.RecoveryBackoffMax,
 			},
+			ProviderConsole: providerConsoleConfigDTO{
+				BaseURL: config.ProviderConsole.BaseURL, UserAgent: config.ProviderConsole.UserAgent,
+				ChatTimeout: config.ProviderConsole.ChatTimeout,
+			},
 			Batch: batchConfigDTO{
 				ImportConcurrency: config.Batch.ImportConcurrency, ConversionConcurrency: config.Batch.ConversionConcurrency,
 				SyncConcurrency: config.Batch.SyncConcurrency, RefreshConcurrency: config.Batch.RefreshConcurrency,
@@ -197,6 +227,9 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			Media: mediaConfigDTO{
 				MaxImageBytes: config.Media.MaxImageBytes, MaxTotalBytes: config.Media.MaxTotalBytes,
 				CleanupThresholdPercent: config.Media.CleanupThresholdPercent, CleanupInterval: config.Media.CleanupInterval,
+			},
+			Frontend: frontendConfigDTO{
+				PublicAPIBaseURL: config.Frontend.PublicAPIBaseURL,
 			},
 			Routing: routingConfigDTO{
 				StickyTTL: config.Routing.StickyTTL, CooldownBase: config.Routing.CooldownBase,

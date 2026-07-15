@@ -1,4 +1,4 @@
-import { Image, Images, LogOut, Menu, MessageSquare, Mic2, Moon, ShieldAlert, Sun, Video } from "lucide-react";
+import { Image, Images, LogOut, Menu, MessageSquare, Mic2, Moon, Settings, ShieldAlert, Sun, Video } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
@@ -27,11 +27,11 @@ export function PublicShell() {
   const logout = () => { auth.logout(); navigate(publicRoutePaths.login, { replace: true }); };
   return (
     <div className="min-h-dvh bg-background text-foreground">
-      <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-4 px-4">
-          <NavLink to={publicRoutePaths.chat} className="shrink-0 font-semibold">Grok2API</NavLink>
+      <header className="sticky top-0 z-40 border-b border-sidebar-border bg-sidebar/95 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-[1480px] items-center gap-4 px-3 sm:px-5">
+          <NavLink to={publicRoutePaths.chat} className="flex shrink-0 items-center gap-2 font-semibold"><span className="grid size-7 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">G</span><span>Grok2API</span></NavLink>
           <nav className="hidden min-w-0 flex-1 items-center gap-1 md:flex" aria-label="公共工作台">
-            {navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} className={({ isActive }) => cn("flex h-9 items-center gap-2 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground", isActive && "bg-accent text-foreground")}><Icon className="size-4" />{label}</NavLink>)}
+            {navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} className={({ isActive }) => cn("flex h-9 items-center gap-2 rounded-md px-3 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground", isActive && "bg-primary/12 font-medium text-primary")}><Icon className="size-4" />{label}</NavLink>)}
           </nav>
           <div className="ml-auto flex items-center gap-1">
             <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")} aria-label="切换主题">{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button></TooltipTrigger><TooltipContent>切换主题</TooltipContent></Tooltip>
@@ -40,10 +40,10 @@ export function PublicShell() {
           </div>
         </div>
       </header>
-      <main id="public-main" className="mx-auto max-w-[1600px] px-4 py-5 pb-24 md:pb-6"><Outlet /></main>
-      <nav className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t bg-background md:hidden" aria-label="手机工作台">
-        {navigation.slice(0, 4).map(({ to, label, short, icon: Icon }) => <NavLink key={to} to={to} className={({ isActive }) => cn("flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] text-muted-foreground", isActive && "text-foreground")}><Icon className="size-5" /><span>{short || label}</span></NavLink>)}
-        <Sheet open={moreOpen} onOpenChange={setMoreOpen}><SheetTrigger asChild><button className="flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] text-muted-foreground"><Menu className="size-5" /><span>更多</span></button></SheetTrigger><SheetContent side="bottom" className="rounded-none"><SheetHeader><SheetTitle>更多工作台</SheetTitle></SheetHeader><div className="grid gap-2 p-4">{navigation.slice(4).map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} onClick={() => setMoreOpen(false)} className="flex min-h-12 items-center gap-3 rounded-md border px-4"><Icon className="size-5" />{label}</NavLink>)}<a href="/gateway/login" className="flex min-h-12 items-center gap-3 rounded-md border px-4">管理后台</a><button onClick={logout} className="flex min-h-12 items-center gap-3 rounded-md border px-4 text-destructive"><LogOut className="size-5" />退出</button></div></SheetContent></Sheet>
+      <main id="public-main" className="mx-auto w-full max-w-[1480px] px-3 py-4 pb-[calc(4.5rem+env(safe-area-inset-bottom))] sm:px-5 md:py-6 md:pb-8"><Outlet /></main>
+      <nav className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden" aria-label="手机工作台">
+        {navigation.slice(0, 4).map(({ to, label, short, icon: Icon }) => <NavLink key={to} to={to} className={({ isActive }) => cn("flex h-14 flex-col items-center justify-center gap-0.5 text-[11px] text-muted-foreground transition-colors", isActive && "bg-primary/8 font-medium text-foreground")}><Icon className="size-4.5" /><span>{short || label}</span></NavLink>)}
+        <Sheet open={moreOpen} onOpenChange={setMoreOpen}><SheetTrigger asChild><button className={cn("flex h-14 flex-col items-center justify-center gap-0.5 text-[11px] text-muted-foreground", moreOpen && "bg-primary/8 text-foreground")}><Menu className="size-4.5" /><span>更多</span></button></SheetTrigger><SheetContent side="bottom" className="rounded-t-lg border-sidebar-border bg-background p-0 pb-[env(safe-area-inset-bottom)]"><SheetHeader className="border-b px-4 py-4 pr-14 text-left"><SheetTitle className="text-base">更多</SheetTitle></SheetHeader><div className="grid gap-1 p-3">{navigation.slice(4).map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} onClick={() => setMoreOpen(false)} className="flex min-h-11 items-center gap-3 rounded-md px-3 text-sm hover:bg-accent"><span className="grid size-8 place-items-center rounded-md bg-secondary"><Icon className="size-4" /></span>{label}</NavLink>)}<a href="/gateway/login" className="flex min-h-11 items-center gap-3 rounded-md px-3 text-sm hover:bg-accent"><span className="grid size-8 place-items-center rounded-md bg-secondary"><Settings className="size-4" /></span>管理后台</a><button onClick={logout} className="flex min-h-11 items-center gap-3 rounded-md px-3 text-left text-sm text-destructive hover:bg-destructive/8"><span className="grid size-8 place-items-center rounded-md bg-destructive/10"><LogOut className="size-4" /></span>退出</button></div></SheetContent></Sheet>
       </nav>
     </div>
   );

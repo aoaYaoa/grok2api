@@ -73,7 +73,7 @@ export function SettingsPage() {
 
           <SettingsPane value="providers">
           <SettingsSection
-            title={t("settings.provider.title")}
+            title={t("models.providerGrokBuild")}
             action={recommendedBuild ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -109,10 +109,10 @@ export function SettingsPage() {
                 <SettingsField controlId="web-statsig-manual" className="sm:col-span-2" label={t("settings.web.statsigValue")} badge={statsigManualConfigured ? t("settings.web.statsigConfigured") : undefined} error={form.formState.errors.providerWeb?.statsigManualValue?.message}>
                   <Input id="web-statsig-manual" type="password" autoComplete="off" placeholder={statsigManualConfigured ? t("settings.web.statsigKeepConfigured") : t("settings.web.statsigValuePlaceholder")} {...form.register("providerWeb.statsigManualValue")} />
                 </SettingsField>
-			  ) : (
-				<SettingsField controlId="web-statsig-url" className="sm:col-span-2" label={t("settings.web.statsigSignerURL")} error={form.formState.errors.providerWeb?.statsigSignerURL?.message}>
+              ) : (
+                <SettingsField controlId="web-statsig-url" className="sm:col-span-2" label={t("settings.web.statsigSignerURL")} error={form.formState.errors.providerWeb?.statsigSignerURL?.message}>
                   <Input id="web-statsig-url" type="url" placeholder="http://grok-signer-go:8788/sign" {...form.register("providerWeb.statsigSignerURL")} />
-				</SettingsField>
+                </SettingsField>
               )}
               <SettingsField controlId="web-quota-timeout" label={t("settings.web.quotaTimeout")} error={form.formState.errors.providerWeb?.quotaTimeout?.message}><Controller control={form.control} name="providerWeb.quotaTimeout" render={({ field }) => <DurationInput id="web-quota-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-chat-timeout" label={t("settings.web.chatTimeout")} error={form.formState.errors.providerWeb?.chatTimeout?.message}><Controller control={form.control} name="providerWeb.chatTimeout" render={({ field }) => <DurationInput id="web-chat-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
@@ -122,6 +122,14 @@ export function SettingsPage() {
               <SettingsField controlId="web-recovery-base" label={t("settings.web.recoveryBackoffBase")} error={form.formState.errors.providerWeb?.recoveryBackoffBase?.message}><Controller control={form.control} name="providerWeb.recoveryBackoffBase" render={({ field }) => <DurationInput id="web-recovery-base" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-recovery-max" label={t("settings.web.recoveryBackoffMax")} error={form.formState.errors.providerWeb?.recoveryBackoffMax?.message}><Controller control={form.control} name="providerWeb.recoveryBackoffMax" render={({ field }) => <DurationInput id="web-recovery-max" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-nsfw" label={t("settings.web.allowNSFW")}><Controller control={form.control} name="providerWeb.allowNSFW" render={({ field }) => <div className="flex h-8 items-center"><Switch id="web-nsfw" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("console.name")}>
+            <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
+              <SettingsField controlId="console-base-url" className="sm:col-span-2" label={t("console.baseURL")} error={form.formState.errors.providerConsole?.baseURL?.message}><Input id="console-base-url" type="url" {...form.register("providerConsole.baseURL")} /></SettingsField>
+              <SettingsField controlId="console-user-agent" className="sm:col-span-2" label={t("console.userAgent")} error={form.formState.errors.providerConsole?.userAgent?.message}><Input id="console-user-agent" {...form.register("providerConsole.userAgent")} /></SettingsField>
+              <SettingsField controlId="console-chat-timeout" label={t("console.chatTimeout")} error={form.formState.errors.providerConsole?.chatTimeout?.message}><Controller control={form.control} name="providerConsole.chatTimeout" render={({ field }) => <DurationInput id="console-chat-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
             </div>
           </SettingsSection>
           </SettingsPane>
@@ -144,6 +152,9 @@ export function SettingsPage() {
               <SettingsField controlId="media-cleanup-interval" label={t("settings.media.cleanupInterval")} error={form.formState.errors.media?.cleanupInterval?.message}>
                 <Controller control={form.control} name="media.cleanupInterval" render={({ field }) => <DurationInput id="media-cleanup-interval" value={field.value} onChange={field.onChange} />} />
               </SettingsField>
+              <SettingsField controlId="frontend-public-api-base-url" label={t("settings.media.publicApiBaseURL")} description={t("settings.media.publicApiBaseURLHelp")} error={form.formState.errors.frontend?.publicApiBaseURL?.message} className="sm:col-span-2">
+                <Input id="frontend-public-api-base-url" placeholder="https://api.example.com" {...form.register("frontend.publicApiBaseURL")} />
+              </SettingsField>
             </div>
           </SettingsSection>
 
@@ -153,6 +164,14 @@ export function SettingsPage() {
           </SettingsPane>
 
           <SettingsPane value="policies">
+          <SettingsSection title={t("settings.server.title")}>
+            <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
+              <SettingsField controlId="server-max-concurrent-requests" label={t("settings.server.maxConcurrentRequests")} description={t("settings.server.maxConcurrentRequestsHelp")} error={form.formState.errors.server?.maxConcurrentRequests?.message}>
+                <Input id="server-max-concurrent-requests" type="number" min={1} max={100_000} {...form.register("server.maxConcurrentRequests", { valueAsNumber: true })} />
+              </SettingsField>
+            </div>
+          </SettingsSection>
+
           <SettingsSection title={t("settings.batch.title")}>
             <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
               <SettingsField controlId="batch-import-concurrency" label={t("settings.batch.importConcurrency")} error={form.formState.errors.batch?.importConcurrency?.message}><Input id="batch-import-concurrency" type="number" min={1} max={50} {...form.register("batch.importConcurrency", { valueAsNumber: true })} /></SettingsField>
@@ -270,7 +289,7 @@ function SettingsSection({ title, action, wide = false, children }: { title: str
   );
 }
 
-function SettingsField({ controlId, label, badge, error, className, children }: { controlId: string; label: string; badge?: string; error?: string; className?: string; children: ReactNode }) {
+function SettingsField({ controlId, label, badge, description, error, className, children }: { controlId: string; label: string; badge?: string; description?: string; error?: string; className?: string; children: ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className={className}>
@@ -279,6 +298,7 @@ function SettingsField({ controlId, label, badge, error, className, children }: 
         {badge ? <span className="text-[11px] font-normal text-muted-foreground">{badge}</span> : null}
       </div>
       {children}
+      {description ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p> : null}
       {error ? <p className="mt-1 text-xs text-destructive">{t("settings.invalidValue")}</p> : null}
     </div>
   );
