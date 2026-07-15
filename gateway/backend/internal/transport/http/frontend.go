@@ -32,7 +32,17 @@ func registerFrontend(router *gin.Engine, staticPath string) {
 			files.ServeHTTP(c.Writer, c.Request)
 			return
 		}
-		if path.Ext(path.Clean(requestPath)) != "" {
+		cleanRequestPath := path.Clean("/" + requestPath)
+		if strings.HasPrefix(cleanRequestPath, "/assets/") && path.Ext(cleanRequestPath) == ".js" {
+			c.Header("Cache-Control", "no-store")
+			c.Header("Content-Type", "text/javascript; charset=utf-8")
+			c.Status(http.StatusOK)
+			if c.Request.Method != http.MethodHead {
+				_, _ = c.Writer.WriteString("globalThis.location.reload(); await new Promise(() => {});\n")
+			}
+			return
+		}
+		if path.Ext(cleanRequestPath) != "" {
 			c.Status(http.StatusNotFound)
 			return
 		}

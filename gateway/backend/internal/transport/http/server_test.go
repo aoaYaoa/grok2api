@@ -108,7 +108,7 @@ func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 	}{
 		{path: "/gateway/assets/app.js", status: http.StatusOK, body: "console.log('app')", cachePrefix: "public"},
 		{path: "/gateway/dashboard", status: http.StatusOK, body: "<html>app</html>", cachePrefix: "no-cache"},
-		{path: "/gateway/assets/missing.js", status: http.StatusNotFound},
+		{path: "/gateway/assets/missing.js", status: http.StatusOK, body: "location.reload()", cachePrefix: "no-store"},
 		{path: "/api/admin/v1/missing", status: http.StatusNotFound},
 		{path: "/swagger/index.html", status: http.StatusNotFound},
 	} {
@@ -126,6 +126,12 @@ func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 				t.Fatalf("cache-control = %q", recorder.Header().Get("Cache-Control"))
 			}
 		})
+	}
+	request := httptest.NewRequest(http.MethodGet, "/gateway/assets/missing.js", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/javascript") {
+		t.Fatalf("content-type = %q", contentType)
 	}
 }
 
