@@ -83,7 +83,11 @@ func (r *MediaAssetRepository) ListOldestMediaAssets(ctx context.Context, limit 
 		limit = 200
 	}
 	var rows []mediaAssetModel
-	if err := r.db.db.WithContext(ctx).Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
+	query := r.db.db.WithContext(ctx).Where(
+		"NOT EXISTS (SELECT 1 FROM media_jobs WHERE media_jobs.status IN ? AND instr(media_jobs.input_json, media_assets.id) > 0)",
+		[]media.Status{media.StatusQueued, media.StatusInProgress},
+	)
+	if err := query.Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	values := make([]media.Asset, 0, len(rows))

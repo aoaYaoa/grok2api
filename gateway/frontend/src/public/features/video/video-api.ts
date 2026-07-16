@@ -1,4 +1,5 @@
 import { publicEndpoints, publicFetch, publicSSE } from "@/public/api/client";
+import { sanitizePublicError } from "@/public/api/public-error.mjs";
 import { videoURLFromText } from "@/public/lib/media";
 
 export type VideoItem = { id: string; taskID: string; url: string; prompt: string; progress: number; status: "queued" | "running" | "completed" | "failed"; postID: string; displayName: string; error?: string; createdAt: number; originalPostID?: string };
@@ -17,7 +18,7 @@ export function streamVideo(key: string, taskID: string, onUpdate: (update: { pr
     }
     if (terminal) return;
     if (!data || typeof data !== "object") return;
-    if (data.error) { terminal = true; onUpdate({ error: String(data.error), done: true }); return; }
+		if (data.error) { terminal = true; onUpdate({ error: sanitizePublicError(String(data.error), "视频生成失败，请稍后重试"), done: true }); return; }
     const choice = (data.choices as Array<{ delta?: { content?: string }; finish_reason?: string }> | undefined)?.[0]; const content = choice?.delta?.content || ""; const url = videoURLFromText(content); const progress = Number(content.match(/(\d{1,3})%/)?.[1] || 0);
     if (url) resultSeen = true;
     if (choice?.finish_reason) {

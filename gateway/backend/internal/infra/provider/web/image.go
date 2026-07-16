@@ -876,7 +876,7 @@ func (a *Adapter) uploadImage(ctx context.Context, cfg Config, lease *egress.Lea
 
 func parseUploadResponse(statusCode int, body []byte) (uploadedFile, error) {
 	if statusCode < 200 || statusCode >= 300 {
-		return uploadedFile{}, fmt.Errorf("上传图片失败，上游返回 %d: %s", statusCode, summarizeUploadResponse(body))
+		return uploadedFile{}, &imageUploadError{status: statusCode, detail: summarizeUploadResponse(body)}
 	}
 	var value struct {
 		FileMetadataID string `json:"fileMetadataId"`
@@ -899,10 +899,27 @@ func parseUploadResponse(statusCode int, body []byte) (uploadedFile, error) {
 	return uploadedFile{ID: value.FileMetadataID, URI: fileURI}, nil
 }
 
+type imageUploadError struct {
+	status int
+	detail string
+}
+
+func (e *imageUploadError) Error() string {
+	return fmt.Sprintf("上传图片失败，上游返回 %d: %s", e.status, e.detail)
+}
+
+func (e *imageUploadError) HTTPStatusCode() int { return e.status }
+
+func (e *imageUploadError) MediaJobRetrySafe() bool { return true }
+
 func summarizeUploadResponse(body []byte) string {
 	value := strings.Join(strings.Fields(string(body)), " ")
 	if value == "" {
 		return "空响应"
+	}
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<html") || strings.Contains(lower, "just a moment") || strings.Contains(lower, "challenge-platform") {
+		return "Cloudflare 安全验证未通过"
 	}
 	runes := []rune(value)
 	if len(runes) > 1024 {
@@ -924,12 +941,23 @@ func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress
 		return "", err
 	}
 	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return "", fmt.Errorf("读取媒体 Post 响应失败: %w", err)
+	}
+	return parseMediaPostResponse(response.StatusCode, body)
+}
+
+func parseMediaPostResponse(statusCode int, body []byte) (string, error) {
+	if statusCode < 200 || statusCode >= 300 {
+		return "", &videoUpstreamError{status: statusCode, body: summarizeUploadResponse(body)}
+	}
 	var value struct {
 		Post struct {
 			ID string `json:"id"`
 		} `json:"post"`
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value) != nil || value.Post.ID == "" {
+	if json.Unmarshal(body, &value) != nil || value.Post.ID == "" {
 		return "", fmt.Errorf("创建媒体 Post 失败")
 	}
 	return value.Post.ID, nil

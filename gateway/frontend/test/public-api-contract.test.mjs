@@ -3,6 +3,7 @@ import test from "node:test";
 
 const contracts = await import("../src/public/api/contracts.mjs").catch(() => null);
 const stream = await import("../src/public/api/sse-parser.mjs").catch(() => null);
+const publicErrors = await import("../src/public/api/public-error.mjs").catch(() => null);
 
 test("public API contract preserves every active workspace endpoint", () => {
   assert.ok(contracts, "missing public API contract module");
@@ -44,4 +45,16 @@ test("public key helpers keep compatibility with the legacy storage name", () =>
   assert.equal(contracts.publicKeyStorage, "grok2api_public_key");
   assert.deepEqual(contracts.authHeaders(" key "), { Authorization: "Bearer key" });
   assert.deepEqual(contracts.authHeaders(""), {});
+});
+
+test("public errors hide database details and upstream challenge HTML", () => {
+  assert.ok(publicErrors, "missing public error sanitizer");
+  assert.equal(
+    publicErrors.sanitizePublicError("constraint failed: CHECK constraint failed: chk_media_jobs_input_json (275)"),
+    "服务暂时无法处理该任务，请稍后重试",
+  );
+  assert.equal(
+    publicErrors.sanitizePublicError("上传图片失败，上游返回 403: <!DOCTYPE html><title>Just a moment...</title>"),
+    "上游安全验证暂时未通过，请稍后重试",
+  );
 });

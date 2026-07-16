@@ -27,6 +27,16 @@ type HTTPStatusError interface {
 	HTTPStatusCode() int
 }
 
+type mediaJobRetrySafeError interface {
+	error
+	MediaJobRetrySafe() bool
+}
+
+func IsMediaJobRetrySafe(err error) bool {
+	var retrySafe mediaJobRetrySafeError
+	return errors.As(err, &retrySafe) && retrySafe.MediaJobRetrySafe()
+}
+
 // ErrorHTTPStatus 从 Provider 错误链中提取上游 HTTP 状态。
 func ErrorHTTPStatus(err error) (int, bool) {
 	var statusError HTTPStatusError
@@ -326,6 +336,10 @@ type ImageEditAdapter interface {
 type ImageAssetStore interface {
 	SaveImage(ctx context.Context, data []byte) (media.Asset, error)
 	PublicImageURL(id string) string
+}
+
+type ImageAssetReader interface {
+	OpenImage(ctx context.Context, id string) (media.Asset, io.ReadCloser, error)
 }
 
 // VideoAssetStore 将受上游鉴权保护的视频流保存为本站可稳定读取的文件。

@@ -13,6 +13,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
@@ -244,7 +245,13 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	if value == "" {
 		return "", fmt.Errorf("视频参考图片 URL 不能为空")
 	}
-	image, err := a.loadChatImage(ctx, lease, value, 20<<20)
+	var image provider.ImageInput
+	var err error
+	if assetID, ok := mediadomain.ParseImageReference(value); ok {
+		image, err = a.loadStoredVideoReference(ctx, assetID, 20<<20)
+	} else {
+		image, err = a.loadChatImage(ctx, lease, value, 20<<20)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -256,6 +263,30 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 		return "", fmt.Errorf("上传视频参考图片后未返回 fileUri")
 	}
 	return uploaded.URI, nil
+}
+
+func (a *Adapter) loadStoredVideoReference(ctx context.Context, assetID string, maxBytes int64) (provider.ImageInput, error) {
+	reader, ok := a.assets.(provider.ImageAssetReader)
+	if !ok {
+		return provider.ImageInput{}, fmt.Errorf("视频参考图存储不支持读取")
+	}
+	asset, body, err := reader.OpenImage(ctx, assetID)
+	if err != nil {
+		return provider.ImageInput{}, fmt.Errorf("读取视频参考图: %w", err)
+	}
+	defer body.Close()
+	if asset.SizeBytes <= 0 || asset.SizeBytes > maxBytes {
+		return provider.ImageInput{}, fmt.Errorf("视频参考图为空或超过 %d MiB", maxBytes>>20)
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil || int64(len(raw)) > maxBytes {
+		return provider.ImageInput{}, fmt.Errorf("读取视频参考图失败或超过 %d MiB", maxBytes>>20)
+	}
+	mimeType, err := validatedImageMIME(raw, asset.MIMEType)
+	if err != nil {
+		return provider.ImageInput{}, err
+	}
+	return provider.ImageInput{Filename: "image" + imageExtension(mimeType), MIMEType: mimeType, Data: raw}, nil
 }
 
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {

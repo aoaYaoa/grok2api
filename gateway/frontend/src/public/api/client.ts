@@ -1,4 +1,5 @@
 import { publicEndpoints } from "@/public/api/contracts.mjs";
+import { sanitizePublicError } from "@/public/api/public-error.mjs";
 import { createSSEParser, type SSEFrame } from "@/public/api/sse-parser.mjs";
 
 export class PublicAPIError extends Error {
@@ -6,13 +7,13 @@ export class PublicAPIError extends Error {
 }
 
 function errorMessage(value: unknown, fallback: string) {
-  if (!value || typeof value !== "object") return fallback;
+  if (!value || typeof value !== "object") return sanitizePublicError(typeof value === "string" ? value : "", fallback);
   const payload = value as Record<string, unknown>;
   const error = payload.error;
-  if (typeof payload.detail === "string") return payload.detail;
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && typeof (error as Record<string, unknown>).message === "string") return String((error as Record<string, unknown>).message);
-  return fallback;
+  if (typeof payload.detail === "string") return sanitizePublicError(payload.detail, fallback);
+  if (typeof error === "string") return sanitizePublicError(error, fallback);
+  if (error && typeof error === "object" && typeof (error as Record<string, unknown>).message === "string") return sanitizePublicError(String((error as Record<string, unknown>).message), fallback);
+  return sanitizePublicError("", fallback);
 }
 
 export async function publicFetch<T>(key: string, input: RequestInfo | URL, init: RequestInit = {}): Promise<T> {
@@ -35,7 +36,7 @@ export async function publicSSE<T>(key: string, url: string, onFrame: (frame: SS
   const response = await fetch(url, { headers, signal });
   if (!response.ok || !response.body) {
     const text = await response.text();
-    throw new PublicAPIError(response.status, text || `${response.status} ${response.statusText}`);
+    throw new PublicAPIError(response.status, sanitizePublicError(text, `${response.status} ${response.statusText}`));
   }
   const parser = createSSEParser();
   const reader = response.body.getReader();
@@ -53,7 +54,7 @@ export async function publicSSERequest<T>(key: string, url: string, init: Reques
   if (key) headers.set("Authorization", `Bearer ${key}`);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...init, headers, signal });
-  if (!response.ok || !response.body) throw new PublicAPIError(response.status, (await response.text()) || `${response.status} ${response.statusText}`);
+  if (!response.ok || !response.body) throw new PublicAPIError(response.status, sanitizePublicError(await response.text(), `${response.status} ${response.statusText}`));
   const parser = createSSEParser(); const reader = response.body.getReader(); const decoder = new TextDecoder();
   while (true) { const { done, value } = await reader.read(); for (const frame of parser.push(decoder.decode(value || new Uint8Array(), { stream: !done }))) onFrame(frame as SSEFrame<T>); if (done) break; }
 }

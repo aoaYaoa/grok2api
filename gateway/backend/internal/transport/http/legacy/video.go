@@ -2,9 +2,11 @@ package legacy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -46,6 +48,10 @@ type LegacyCachedVideo struct {
 type LegacyVideoCache interface {
 	ListVideos() ([]LegacyCachedVideo, error)
 	RenameVideo(identifier, displayName string) (LegacyCachedVideo, error)
+}
+
+type VideoReferenceStore interface {
+	SaveImage(context.Context, []byte) (mediadomain.Asset, error)
 }
 
 type videoTask struct {
@@ -321,6 +327,12 @@ func (h *Handler) videoStart(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
 		return
 	}
+	references, err := h.storeInlineVideoReferences(c.Request.Context(), references)
+	if err != nil {
+		slog.Error("legacy_video_reference_store_failed", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "参考图处理失败，请重新选择图片"})
+		return
+	}
 	taskIDs := make([]string, 0, request.Concurrent)
 	for index := 0; index < request.Concurrent; index++ {
 		taskID, err := newTaskID()
@@ -338,7 +350,8 @@ func (h *Handler) videoStart(c *gin.Context) {
 			FileAttachmentID: request.FileAttachmentID, StitchWithExtend: request.StitchWithExtend == nil || *request.StitchWithExtend,
 		})
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
+			slog.Error("legacy_video_create_failed", "request_id", taskID, "error", err)
+			c.JSON(http.StatusBadGateway, gin.H{"detail": publicVideoStartError(err)})
 			return
 		}
 		h.videoMu.Lock()
@@ -350,6 +363,65 @@ func (h *Handler) videoStart(c *gin.Context) {
 		"task_id": taskIDs[0], "task_ids": taskIDs, "concurrent": len(taskIDs),
 		"aspect_ratio": request.AspectRatio, "reference_count": len(references),
 	})
+}
+
+func (h *Handler) storeInlineVideoReferences(ctx context.Context, references []string) ([]string, error) {
+	if h.videoReferenceStore == nil {
+		return references, nil
+	}
+	stored := append([]string(nil), references...)
+	for index, reference := range stored {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reference)), "data:image/") {
+			continue
+		}
+		data, err := decodeInlineVideoReference(reference, 20<<20)
+		if err != nil {
+			return nil, err
+		}
+		asset, err := h.videoReferenceStore.SaveImage(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		referenceURL := mediadomain.ImageReference(asset.ID)
+		if referenceURL == "" {
+			return nil, fmt.Errorf("参考图存储标识无效")
+		}
+		stored[index] = referenceURL
+	}
+	return stored, nil
+}
+
+func decodeInlineVideoReference(value string, maxBytes int64) ([]byte, error) {
+	header, encoded, ok := strings.Cut(strings.TrimSpace(value), ",")
+	if !ok || !strings.HasPrefix(strings.ToLower(header), "data:image/") || !strings.Contains(strings.ToLower(header), ";base64") {
+		return nil, fmt.Errorf("参考图 data URI 无效")
+	}
+	encoded = strings.Join(strings.Fields(encoded), "")
+	if encoded == "" || int64(base64.StdEncoding.DecodedLen(len(encoded))) > maxBytes {
+		return nil, fmt.Errorf("参考图为空或超过 20 MB")
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		data, err = base64.RawStdEncoding.DecodeString(encoded)
+	}
+	if err != nil || len(data) == 0 || int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("参考图 Base64 无效")
+	}
+	return data, nil
+}
+
+func publicVideoStartError(err error) string {
+	if errors.Is(err, gateway.ErrModelNotFound) {
+		return "视频模型暂时不可用"
+	}
+	if errors.Is(err, gateway.ErrNoAvailableAccount) {
+		return "当前没有可用的视频账号，请稍后重试"
+	}
+	message := strings.TrimSpace(err.Error())
+	if strings.Contains(message, "必须提供 prompt") || strings.Contains(message, "图片生视频") {
+		return message
+	}
+	return "创建视频任务失败，请稍后重试"
 }
 
 func lastVideoPostID(value string) string {

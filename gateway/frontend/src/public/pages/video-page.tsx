@@ -165,7 +165,7 @@ export function VideoPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">Video 视频工作台</h1><p className="mt-1 text-sm text-muted-foreground">{starting ? "正在创建任务" : running ? "任务运行中" : `${videos.length} 个视频`}</p></div>
-        <div className="flex gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setVideos([]); setActive(null); }}><RotateCcw className="size-4" />清空</Button></div>
+        <div className="workspace-actions flex gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setVideos([]); setActive(null); }}><RotateCcw className="size-4" />清空</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -173,7 +173,7 @@ export function VideoPage() {
           <div className="workspace-panel p-4">
             <div className="workspace-control-group">
               <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*" multiple className="hidden" onChange={(event) => void filesToAssets(event.target.files || [], Math.max(0, 8 - references.length)).then((items) => setReferences((value) => [...value, ...items].slice(0, 8)))} /></label><div className="flex min-w-0 flex-1 gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="添加 parentPostId"><Plus className="size-4" /></Button></div></div>
-            {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
+            {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button data-slot="icon-button" className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
             </div>
             <div className="workspace-control-group">
               <label className="workspace-field-label">视频提示词</label><Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-32" placeholder="描述镜头、动作和风格" />

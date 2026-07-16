@@ -504,6 +504,19 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			s.deferVideoJob(parent, job)
 			return
 		}
+		if status, ok := provider.ErrorHTTPStatus(err); ok {
+			retrySafe := provider.IsMediaJobRetrySafe(err) && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider)
+			if delay, retry := videoRetryPlan(status, metadata.RetryCount, retrySafe); retry {
+				metadata.RetryCount++
+				job.InputJSON = encodeVideoMetadata(metadata)
+				applyMediaJobEgress(&job, egressTrace, route.Provider)
+				s.deferVideoJobFor(parent, job, delay)
+				if s.logger != nil {
+					s.logger.Warn("video_job_retry_scheduled", "job_id", job.ID, "retry", metadata.RetryCount, "delay", delay, "error", err)
+				}
+				return
+			}
+		}
 		failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
 		failureHandled := false
 		if errors.Is(err, provider.ErrUnauthorized) {
@@ -639,6 +652,7 @@ type videoInputMetadata struct {
 	OriginalPostID     string   `json:"original_post_id,omitempty"`
 	FileAttachmentID   string   `json:"file_attachment_id,omitempty"`
 	StitchWithExtend   bool     `json:"stitch_with_extend,omitempty"`
+	RetryCount         int      `json:"retry_count,omitempty"`
 }
 
 func encodeVideoInput(input VideoInput) string {
@@ -662,7 +676,10 @@ func decodeVideoMetadata(value string) videoInputMetadata {
 
 func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, err error) {
 	now := time.Now().UTC()
-	job.Status, job.ErrorCode, job.ErrorMessage = media.StatusFailed, code, err.Error()
+	if s.logger != nil {
+		s.logger.Warn("video_job_failed", "job_id", job.ID, "code", code, "error", err)
+	}
+	job.Status, job.ErrorCode, job.ErrorMessage = media.StatusFailed, code, publicVideoFailureMessage(err)
 	if len(job.ErrorMessage) > 512 {
 		job.ErrorMessage = job.ErrorMessage[:512]
 	}
@@ -678,8 +695,12 @@ func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, 
 }
 
 func (s *Service) deferVideoJob(ctx context.Context, job media.Job) {
+	s.deferVideoJobFor(ctx, job, 5*time.Minute)
+}
+
+func (s *Service) deferVideoJobFor(ctx context.Context, job media.Job, delay time.Duration) {
 	now := time.Now().UTC()
-	leaseUntil := now.Add(5 * time.Minute)
+	leaseUntil := now.Add(delay)
 	job.Status = media.StatusInProgress
 	job.LeaseUntil = &leaseUntil
 	job.UpdatedAt = now
@@ -688,6 +709,45 @@ func (s *Service) deferVideoJob(ctx context.Context, job media.Job) {
 	if err := s.persistVideoJobWithRetry(ctx, job); err != nil {
 		s.logger.Error("video_job_defer_write_failed", "job_id", job.ID, "error", err)
 	}
+}
+
+func videoRetryPlan(status, retryCount int, retryForbidden bool) (time.Duration, bool) {
+	if status != http.StatusForbidden || !retryForbidden {
+		return 0, false
+	}
+	delays := [...]time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}
+	if retryCount < 0 || retryCount >= len(delays) {
+		return 0, false
+	}
+	return delays[retryCount], true
+}
+
+func publicVideoFailureMessage(err error) string {
+	if err == nil {
+		return "视频生成失败，请稍后重试"
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return "上游认证失败，请检查账号状态"
+	}
+	if status, ok := provider.ErrorHTTPStatus(err); ok {
+		switch status {
+		case http.StatusForbidden:
+			return "上游安全验证暂时未通过，请稍后重试"
+		case http.StatusPaymentRequired, http.StatusTooManyRequests:
+			return "当前账号额度不足或请求过于频繁，请稍后重试"
+		case http.StatusNotFound:
+			return "上游未找到源视频，无法继续处理"
+		default:
+			if status >= http.StatusInternalServerError {
+				return "上游服务暂时不可用，请稍后重试"
+			}
+		}
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "<!doctype html") || strings.Contains(message, "<html") || strings.Contains(message, "just a moment") || strings.Contains(message, "challenge-platform") {
+		return "上游安全验证暂时未通过，请稍后重试"
+	}
+	return "视频生成失败，请稍后重试"
 }
 
 // persistVideoJobWithRetry 至少执行一次收尾写入；后续退避可被工作进程关闭信号取消。

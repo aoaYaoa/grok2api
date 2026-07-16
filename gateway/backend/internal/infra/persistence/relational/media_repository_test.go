@@ -122,6 +122,41 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 	}
 }
 
+func TestMediaAssetRepositoryOldestExcludesAssetsUsedByActiveVideoJobs(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	accountValue, _, err := NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, WebTier: accountdomain.WebTierBasic,
+		Name: "media-reference-account", SourceKey: "media-reference-account", EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := clientKeyModel{Name: "media-reference-key", Prefix: "media-reference-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
+	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	assetRepo := NewMediaAssetRepository(database)
+	for index, id := range []string{"img_active_reference_0001", "img_unused_reference_0002"} {
+		if err := assetRepo.CreateMediaAsset(ctx, mediadomain.Asset{ID: id, Kind: "image", StorageKey: "images/" + id + ".png", MIMEType: "image/png", SizeBytes: 100, SHA256: strings.Repeat("a", 64), CreatedAt: now.Add(time.Duration(index) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job := testMediaJob("media_job_active_reference", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
+	job.InputJSON = `{"image_urls":["grok2api-media://image/img_active_reference_0001"]}`
+	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	values, err := assetRepo.ListOldestMediaAssets(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].ID != "img_unused_reference_0002" {
+		t.Fatalf("cleanup candidates = %#v", values)
+	}
+}
+
 func TestMediaAssetRepositoryListMediaAssetsPaginatesAndCounts(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)

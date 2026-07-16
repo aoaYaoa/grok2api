@@ -107,6 +107,35 @@ test("video cache dialog does not merge the whole cache into session history", a
   assert.match(video, /<VideoGrid videos=\{cachedVideos\}/);
 });
 
+test("video cards lazy-load visible media and keep selected rings inside cards", async () => {
+  const grid = await readFile(path.join(root, "src/public/components/video-grid.tsx"), "utf8");
+  const imageGrid = await readFile(path.join(root, "src/public/components/image-grid.tsx"), "utf8");
+
+  assert.match(grid, /IntersectionObserver/);
+  assert.match(grid, /preload="none"/);
+  assert.match(grid, /video-preview-placeholder/);
+  assert.match(grid, /ring-inset/);
+  assert.match(imageGrid, /ring-inset/);
+});
+
+test("mobile dialogs, toasts, heading actions, and tabs keep controls inside their surfaces", async () => {
+  const dialog = await readFile(path.join(root, "src/components/ui/dialog.tsx"), "utf8");
+  const tabs = await readFile(path.join(root, "src/components/ui/tabs.tsx"), "utf8");
+  const button = await readFile(path.join(root, "src/components/ui/button.tsx"), "utf8");
+  const styles = await readFile(path.join(root, "src/index.css"), "utf8");
+
+  assert.match(dialog, /data-slot="dialog-close"/);
+  assert.match(dialog, /size-9/);
+  assert.match(tabs, /overflow-x-auto/);
+  assert.match(tabs, /shrink-0/);
+  assert.match(button, /data-slot/);
+  assert.match(styles, /\[data-sonner-toast\] \[data-close-button\]/);
+  assert.match(styles, /:not\(\[role="tab"\]\)/);
+  assert.match(styles, /:not\(\[data-slot="icon-button"\]\)/);
+  assert.match(styles, /\.workspace-actions/);
+  assert.doesNotMatch(styles, /workspace-heading > :last-child/);
+});
+
 test("media workspaces keep controls on the left and results on the right", async () => {
   const pages = [
     "imagine-page.tsx",

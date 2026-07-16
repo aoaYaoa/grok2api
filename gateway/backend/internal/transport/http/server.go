@@ -195,15 +195,16 @@ func New(deps Dependencies) *gin.Engine {
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
 	inferenceHandler.Register(v1)
 	legacyhttp.NewHandler(legacyhttp.Options{
-		PublicEnabled: deps.LegacyPublicEnabled,
-		AdminKey:      deps.LegacyAdminKey,
-		PublicKey:     deps.LegacyPublicKey,
-		ClientKey:     deps.LegacyClientKey,
-		StorageType:   "sqlite",
-		AllowNSFW:     deps.LegacyAllowNSFW,
-		Accounts:      deps.Accounts,
-		Settings:      deps.Settings,
-		VideoCache:    newLegacyVideoCacheAdapter(cacheHandler),
+		PublicEnabled:       deps.LegacyPublicEnabled,
+		AdminKey:            deps.LegacyAdminKey,
+		PublicKey:           deps.LegacyPublicKey,
+		ClientKey:           deps.LegacyClientKey,
+		StorageType:         "sqlite",
+		AllowNSFW:           deps.LegacyAllowNSFW,
+		Accounts:            deps.Accounts,
+		Settings:            deps.Settings,
+		VideoCache:          newLegacyVideoCacheAdapter(cacheHandler),
+		VideoReferenceStore: deps.Media,
 	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, func(admin *gin.RouterGroup) {
 		if cacheHandler != nil {
 			cacheHandler.RegisterLegacy(admin)

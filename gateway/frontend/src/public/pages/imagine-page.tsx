@@ -24,7 +24,7 @@ export function ImaginePage() {
   return <section className="workspace-page">
     <div className="workspace-heading">
       <div><h1 className="text-xl font-semibold">Imagine 瀑布流</h1><p className="mt-1 text-sm text-muted-foreground">{running ? `${activeCount} 路持续生成中` : `${images.length} 张图片`}</p></div>
-      <div className="flex gap-2">{selected.size > 0 && <Button variant="outline" onClick={downloadSelected}><Download className="size-4" />下载 {selected.size}</Button>}<Button variant="outline" onClick={() => { setImages([]); setSelected(new Set()); }}><Trash2 className="size-4" />清空</Button></div>
+      <div className="workspace-actions flex gap-2">{selected.size > 0 && <Button variant="outline" onClick={downloadSelected}><Download className="size-4" />下载 {selected.size}</Button>}<Button variant="outline" onClick={() => { setImages([]); setSelected(new Set()); }}><Trash2 className="size-4" />清空</Button></div>
     </div>
 
     <div className="workspace-split">

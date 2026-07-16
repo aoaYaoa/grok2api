@@ -21,37 +21,39 @@ type ClientAuthenticator interface {
 }
 
 type Options struct {
-	PublicEnabled     bool
-	AdminKey          string
-	PublicKey         string
-	ClientKey         string
-	StorageType       string
-	AllowNSFW         bool
-	VideoPollInterval time.Duration
-	Accounts          LegacyAccountService
-	Settings          *settingsapp.Service
-	VideoCache        LegacyVideoCache
+	PublicEnabled       bool
+	AdminKey            string
+	PublicKey           string
+	ClientKey           string
+	StorageType         string
+	AllowNSFW           bool
+	VideoPollInterval   time.Duration
+	Accounts            LegacyAccountService
+	Settings            *settingsapp.Service
+	VideoCache          LegacyVideoCache
+	VideoReferenceStore VideoReferenceStore
 }
 
 type Handler struct {
-	options        Options
-	clientAuth     ClientAuthenticator
-	imageGenerator ImageGenerator
-	imageMu        sync.Mutex
-	imageTasks     map[string]*imageTask
-	videoGateway   VideoGateway
-	voiceGateway   VoiceGateway
-	videoMu        sync.Mutex
-	videoTasks     map[string]*videoTask
-	accounts       LegacyAccountService
-	batchMu        sync.RWMutex
-	batchTasks     map[string]*legacyBatchTask
-	promptGateway  PromptGateway
-	promptMu       sync.Mutex
-	promptTasks    map[string]*promptTask
-	promptTaskTTL  time.Duration
-	settings       *settingsapp.Service
-	videoCache     LegacyVideoCache
+	options             Options
+	clientAuth          ClientAuthenticator
+	imageGenerator      ImageGenerator
+	imageMu             sync.Mutex
+	imageTasks          map[string]*imageTask
+	videoGateway        VideoGateway
+	voiceGateway        VoiceGateway
+	videoMu             sync.Mutex
+	videoTasks          map[string]*videoTask
+	accounts            LegacyAccountService
+	batchMu             sync.RWMutex
+	batchTasks          map[string]*legacyBatchTask
+	promptGateway       PromptGateway
+	promptMu            sync.Mutex
+	promptTasks         map[string]*promptTask
+	promptTaskTTL       time.Duration
+	settings            *settingsapp.Service
+	videoCache          LegacyVideoCache
+	videoReferenceStore VideoReferenceStore
 }
 
 type ImageGenerator interface {
@@ -98,7 +100,7 @@ func NewHandler(options Options, clientAuth ClientAuthenticator, imageGenerator 
 		videoGateway: videoGateway, voiceGateway: voiceGateway, videoTasks: make(map[string]*videoTask), accounts: options.Accounts,
 		batchTasks: make(map[string]*legacyBatchTask), promptGateway: promptGateway,
 		promptTasks: make(map[string]*promptTask), promptTaskTTL: 5 * time.Minute, settings: options.Settings,
-		videoCache: options.VideoCache,
+		videoCache: options.VideoCache, videoReferenceStore: options.VideoReferenceStore,
 	}
 }
 

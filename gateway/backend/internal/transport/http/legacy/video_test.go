@@ -20,12 +20,26 @@ import (
 
 type fakeLegacyVideoGateway struct {
 	created     []gateway.VideoInput
+	createError error
 	polls       map[string]int
 	cancelled   []string
 	listed      []mediadomain.Job
 	renamedID   string
 	renamedTo   string
 	renameError error
+}
+
+type fakeVideoReferenceStore struct {
+	saved [][]byte
+}
+
+func (f *fakeVideoReferenceStore) SaveImage(_ context.Context, data []byte) (mediadomain.Asset, error) {
+	f.saved = append(f.saved, append([]byte(nil), data...))
+	return mediadomain.Asset{ID: "stored-reference-1"}, nil
+}
+
+func (f *fakeVideoReferenceStore) PublicImageURL(id string) string {
+	return "https://grok.uonoe.com/v1/media/images/" + id
 }
 
 type fakeLegacyVideoCache struct {
@@ -128,9 +142,78 @@ func (f *fakeLegacyVideoGateway) GenerateImage(context.Context, gateway.ImageGen
 }
 
 func (f *fakeLegacyVideoGateway) CreateVideo(_ context.Context, input gateway.VideoInput) (mediadomain.Job, error) {
+	if f.createError != nil {
+		return mediadomain.Job{}, f.createError
+	}
 	f.created = append(f.created, input)
 	id := "video-job-" + string(rune('0'+len(f.created)))
 	return mediadomain.Job{ID: id, Status: mediadomain.StatusQueued, Progress: 0}, nil
+}
+
+func TestVideoStartStoresInlineReferencesBeforeCreatingPersistentJobs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	references := &fakeVideoReferenceStore{}
+	handler := NewHandler(Options{PublicEnabled: true, VideoReferenceStore: references}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	body := `{"prompt":"move","concurrent":2,"image_references":["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(body))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || len(references.saved) != 1 || len(videoGateway.created) != 2 {
+		t.Fatalf("status=%d body=%s saved=%d jobs=%d", recorder.Code, recorder.Body.String(), len(references.saved), len(videoGateway.created))
+	}
+	for _, input := range videoGateway.created {
+		if len(input.ReferenceURLs) != 1 || input.ReferenceURLs[0] != "grok2api-media://image/stored-reference-1" {
+			t.Fatalf("references=%v", input.ReferenceURLs)
+		}
+	}
+}
+
+func TestVideoStartStoresInlineReferencesIndependentlyOfPublicBaseURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	references := &fakeVideoReferenceStore{}
+	handler := NewHandler(Options{PublicEnabled: true, VideoReferenceStore: references}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	inline := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"move","image_references":["`+inline+`"]}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || len(references.saved) != 1 || len(videoGateway.created) != 1 || videoGateway.created[0].ReferenceURLs[0] != "grok2api-media://image/stored-reference-1" {
+		t.Fatalf("status=%d body=%s saved=%d references=%v", recorder.Code, recorder.Body.String(), len(references.saved), videoGateway.created)
+	}
+}
+
+func TestVideoStartHidesPersistenceErrorsFromPublicResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{createError: errors.New("constraint failed: CHECK constraint failed: chk_media_jobs_input_json (275)")}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{"prompt":"move"}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway || strings.Contains(strings.ToLower(recorder.Body.String()), "constraint") || !strings.Contains(recorder.Body.String(), "创建视频任务失败") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func (f *fakeLegacyVideoGateway) GetVideo(_ context.Context, id string, _ clientkeydomain.Key) (mediadomain.Job, error) {

@@ -254,7 +254,7 @@ select {
 }
 
 @media (pointer: coarse) {
-  button:not([role="switch"]):not([data-slot="sheet-close"]),
+  button:not([role="switch"]):not([role="tab"]):not([role="checkbox"]):not([role="radio"]):not([data-slot="sheet-close"]):not([data-slot="dialog-close"]):not([data-slot="icon-button"]):not([data-close-button]),
   input,
   [role="combobox"] {
     min-height: 44px;
@@ -270,15 +270,42 @@ input[type="range"] {
     min-height: calc(100dvh - 9rem);
   }
 
-  .workspace-heading > :last-child {
+  .workspace-actions {
     width: 100%;
-    overflow-x: auto;
-    padding-bottom: 0.125rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(8.5rem, 100%), 1fr));
+    gap: 0.5rem;
+    overflow: visible;
+    padding-bottom: 0;
   }
 
-  .workspace-heading > :last-child > * {
-    flex: 0 0 auto;
+  .workspace-actions > * {
+    min-width: 0;
+    width: 100%;
   }
+}
+
+[data-sonner-toaster] {
+  --width: min(22rem, calc(100vw - 1.5rem));
+}
+
+[data-sonner-toast] {
+  max-width: calc(100vw - 1.5rem);
+  overflow: hidden;
+  padding-right: 2.75rem !important;
+}
+
+[data-sonner-toast] [data-close-button] {
+  top: 0.5rem !important;
+  right: 0.5rem !important;
+  left: auto !important;
+  width: 1.75rem !important;
+  height: 1.75rem !important;
+  min-height: 1.75rem !important;
+  transform: none !important;
+  border-color: var(--border) !important;
+  background: var(--background) !important;
+  color: var(--muted-foreground) !important;
 }
 
 ::selection {

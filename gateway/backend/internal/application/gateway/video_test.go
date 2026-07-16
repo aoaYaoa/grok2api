@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,32 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
+
+func TestVideoForbiddenRetryPlanUsesBoundedBackoff(t *testing.T) {
+	for attempt, expected := range []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute} {
+		delay, ok := videoRetryPlan(http.StatusForbidden, attempt, true)
+		if !ok || delay != expected {
+			t.Fatalf("attempt %d: delay=%s retry=%v", attempt, delay, ok)
+		}
+	}
+	if _, ok := videoRetryPlan(http.StatusForbidden, 3, true); ok {
+		t.Fatal("fourth forbidden response must be terminal")
+	}
+	if _, ok := videoRetryPlan(http.StatusForbidden, 0, false); ok {
+		t.Fatal("providers without egress retries must fail immediately")
+	}
+}
+
+func TestPublicVideoFailureMessageHidesUpstreamHTML(t *testing.T) {
+	err := errors.New("上传图片失败，上游返回 403: <!DOCTYPE html><html><title>Just a moment...</title></html>")
+	message := publicVideoFailureMessage(err)
+	if message != "上游安全验证暂时未通过，请稍后重试" {
+		t.Fatalf("message = %q", message)
+	}
+	if strings.Contains(strings.ToLower(message), "doctype") || strings.Contains(strings.ToLower(message), "html") {
+		t.Fatalf("raw HTML leaked: %q", message)
+	}
+}
 
 func TestRecoverVideoJobsRetriesUsageWithoutRegeneratingVideo(t *testing.T) {
 	completedAt := time.Now().UTC()

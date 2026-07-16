@@ -52,6 +52,36 @@ func TestCatalogMatchesSupportedSurface(t *testing.T) {
 	}
 }
 
+func TestSummarizeUploadResponseHidesCloudflareChallengeHTML(t *testing.T) {
+	body := []byte(`<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>challenge-platform</body></html>`)
+	_, err := parseUploadResponse(http.StatusForbidden, body)
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusForbidden {
+		t.Fatalf("status = %d, classified = %v, error = %v", status, ok, err)
+	}
+	if !provider.IsMediaJobRetrySafe(err) {
+		t.Fatal("upload rejection must be safe for a whole-job retry")
+	}
+	message := summarizeUploadResponse(body)
+	if message != "Cloudflare 安全验证未通过" {
+		t.Fatalf("message = %q", message)
+	}
+	if strings.Contains(strings.ToLower(message), "doctype") || strings.Contains(strings.ToLower(message), "html") {
+		t.Fatalf("raw HTML leaked: %q", message)
+	}
+}
+
+func TestParseMediaPostResponsePreservesForbiddenWithoutRetryingWholeJob(t *testing.T) {
+	_, err := parseMediaPostResponse(http.StatusForbidden, []byte(`<!DOCTYPE html><title>Just a moment...</title>`))
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusForbidden {
+		t.Fatalf("status = %d, classified = %v, error = %v", status, ok, err)
+	}
+	if provider.IsMediaJobRetrySafe(err) {
+		t.Fatal("media Post rejection is not idempotent enough for a whole-job retry")
+	}
+}
+
 func TestWebChatPricingUsesGrok45(t *testing.T) {
 	registry := provider.NewRegistry(&Adapter{})
 	for _, upstreamModel := range []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy"} {
@@ -544,6 +574,15 @@ func TestGeneratedImageAssetHostsRemainStrict(t *testing.T) {
 	}
 }
 
+func TestLoadStoredVideoReferenceReadsMediaAssetWithoutHTTP(t *testing.T) {
+	raw, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	adapter := &Adapter{assets: readableImageAssetStoreStub{data: raw}}
+	image, err := adapter.loadStoredVideoReference(context.Background(), "img_test", 20<<20)
+	if err != nil || image.MIMEType != "image/png" || !bytes.Equal(image.Data, raw) {
+		t.Fatalf("image=%#v err=%v", image, err)
+	}
+}
+
 func TestImageStreamExtensionEventsAndPayloads(t *testing.T) {
 	adapter := &Adapter{assets: imageAssetStoreStub{}}
 	urlItem, err := adapter.imageDataItem(context.Background(), account.Credential{}, imagineImageValue{URL: "https://imgen.x.ai/image.jpg", Blob: "aW1hZ2U="}, "url")
@@ -595,6 +634,20 @@ func (imageAssetStoreStub) SaveImage(context.Context, []byte) (mediadomain.Asset
 
 func (imageAssetStoreStub) PublicImageURL(string) string {
 	return "https://api.example/v1/media/images/img_test"
+}
+
+type readableImageAssetStoreStub struct {
+	data []byte
+}
+
+func (s readableImageAssetStoreStub) SaveImage(context.Context, []byte) (mediadomain.Asset, error) {
+	return mediadomain.Asset{}, errors.New("not used")
+}
+
+func (s readableImageAssetStoreStub) PublicImageURL(string) string { return "" }
+
+func (s readableImageAssetStoreStub) OpenImage(context.Context, string) (mediadomain.Asset, io.ReadCloser, error) {
+	return mediadomain.Asset{ID: "img_test", MIMEType: "image/png", SizeBytes: int64(len(s.data))}, io.NopCloser(bytes.NewReader(s.data)), nil
 }
 
 type imageAssetStoreRetryStub struct {
