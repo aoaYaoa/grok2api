@@ -163,6 +163,7 @@ function WebChatQuotaSummary({ children, mediaWeeklyQuotaUnavailable = false }: 
 
 function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale: string; t: TFunction }) {
   const usedPercent = Math.max(0, Math.min(100, window.usagePercent));
+  const remainingPercent = Math.max(0, 100 - usedPercent);
   const products = normalizeWeeklyQuotaProducts(window.breakdown);
   const visibleProducts = products.slice(0, 3);
   return (
@@ -174,12 +175,12 @@ function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale:
               {visibleProducts.map((item) => <div key={item.productCode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate text-muted-foreground">{quotaProductLabel(item.productCode, t)}</span><span className="shrink-0 tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full", quotaProductColor(item.productCode))} style={{ width: `${item.remainingPercent}%` }} /></div></div>)}
             </div>
           ) : (
-            <><div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span><span className="shrink-0 tabular-nums">{formatNumber(usedPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${usedPercent}%` }} /></div></>
+            <><div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span><span className="shrink-0 tabular-nums">{formatNumber(remainingPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${remainingPercent}%` }} /></div></>
           )}
         </button>
       </TooltipTrigger>
       <TooltipContent>
-        <div>{t("accounts.webWeeklyQuotaUsage", { remaining: formatNumber(100 - usedPercent, locale, 1) })}</div>
+        <div>{t("accounts.webWeeklyQuotaUsage", { remaining: formatNumber(remainingPercent, locale, 1) })}</div>
         <div className="text-muted-foreground">{window.resetAt ? t("accounts.quotaResetAt", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.quotaResetUnknown")}</div>
         {window.syncedAt ? <div className="text-muted-foreground">{t("accounts.quotaSyncedAt", { time: formatDateTime(window.syncedAt, locale) })}</div> : null}
         {products.length > 0 ? <div className="mt-2 grid gap-1 border-t pt-2">{products.map((item) => <div key={item.productCode} className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><span className={cn("size-2 rounded-full", quotaProductColor(item.productCode))} />{quotaProductLabel(item.productCode, t)}</span><span className="tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div>)}</div> : null}

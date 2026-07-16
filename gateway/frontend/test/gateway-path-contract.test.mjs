@@ -107,6 +107,9 @@ test("web quota cells show official remaining capacity and disclose missing medi
   assert.match(quota, /formatNumber\(window\.remaining, locale, 0\).*formatNumber\(window\.total, locale, 0\)/s);
   assert.match(quota, /window\.remaining \/ window\.total \* 100/);
   assert.doesNotMatch(quota, /window\.total - window\.remaining/);
+  assert.match(quota, /const remainingPercent = Math\.max\(0, 100 - usedPercent\)/);
+  assert.match(quota, /formatNumber\(remainingPercent, locale, 1\)/);
+  assert.match(quota, /width: `\$\{remainingPercent\}%`/);
   assert.match(quota, /officialChatQuotaWindow/);
   assert.match(quota, /mediaWeeklyQuotaUnavailable/);
   assert.match(quota, /window\.syncedAt/);
