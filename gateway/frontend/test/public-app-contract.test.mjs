@@ -150,6 +150,9 @@ test("admin shell and cache keep mobile controls and video previews stable", asy
   assert.match(segmented, /leading-none/);
   assert.match(segmented, /border-transparent/);
   assert.match(segmented, /border-border bg-background/);
+  assert.match(segmented, /role="radiogroup"/);
+  assert.match(segmented, /role="radio"/);
+  assert.match(segmented, /aria-checked=\{selected\}/);
   assert.match(dashboard, /<SegmentedControl/);
   assert.doesNotMatch(dashboard, /inline-flex h-8 items-center rounded-md bg-muted/);
   assert.match(cache, /PersistentVideoPreview/);
@@ -206,6 +209,7 @@ test("mobile dialogs, toasts, heading actions, and tabs keep controls inside the
   assert.match(button, /data-slot/);
   assert.match(styles, /\[data-sonner-toast\] \[data-close-button\]/);
   assert.match(styles, /:not\(\[role="tab"\]\)/);
+  assert.match(styles, /:not\(\[role="radio"\]\)/);
   assert.match(styles, /:not\(\[data-slot="icon-button"\]\)/);
   assert.match(styles, /\.workspace-actions/);
   assert.doesNotMatch(styles, /workspace-heading > :last-child/);
