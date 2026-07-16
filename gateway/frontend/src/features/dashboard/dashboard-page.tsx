@@ -11,6 +11,7 @@ import { getDashboard, type DashboardPeriod, type DashboardDTO } from "@/feature
 import { useAuth } from "@/shared/auth/use-auth";
 import { ErrorState } from "@/shared/components/data-state";
 import { PeriodSelector } from "@/shared/components/period-selector";
+import { SegmentedControl } from "@/shared/components/segmented-control";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 import { PERIOD_DAYS, toPeriodValue, type PeriodDays } from "@/shared/lib/period";
@@ -182,9 +183,15 @@ function TrendPanel({ dashboard, metric, onMetricChange, locale, loading }: { da
     <section className="rounded-lg bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium">{t("dashboard.trend")}</h2>
-        <div className="inline-flex h-8 items-center rounded-md bg-muted p-0.5">
-          {(["tokens", "billing"] as const).map((value) => <Button key={value} type="button" variant="ghost" size="sm" className={cn("h-7 rounded-sm px-3 text-xs font-normal", metric === value && "bg-background shadow-sm hover:bg-background")} onClick={() => onMetricChange(value)}>{value === "tokens" ? t("dashboard.trendTokens") : t("dashboard.billing")}</Button>)}
-        </div>
+        <SegmentedControl
+          value={metric}
+          options={[
+            { value: "tokens", label: t("dashboard.trendTokens") },
+            { value: "billing", label: t("dashboard.billing") },
+          ] as const}
+          onChange={onMetricChange}
+          ariaLabel={t("dashboard.trend")}
+        />
       </div>
       <ChartContainer config={chartConfig} className={cn("mt-4 h-[280px] w-full aspect-auto", loading && "opacity-40")}>
         <ComposedChart accessibilityLayer data={chartData} margin={{ left: 4, right: 8, top: 8, bottom: 0 }}>

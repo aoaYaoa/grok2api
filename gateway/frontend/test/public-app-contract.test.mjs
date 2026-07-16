@@ -133,14 +133,25 @@ test("admin shell and cache keep mobile controls and video previews stable", asy
   const shell = await readFile(path.join(root, "src/app/app-shell.tsx"), "utf8");
   const tabs = await readFile(path.join(root, "src/components/ui/tabs.tsx"), "utf8");
   const period = await readFile(path.join(root, "src/shared/components/period-selector.tsx"), "utf8");
+  const segmented = await readFile(path.join(root, "src/shared/components/segmented-control.tsx"), "utf8");
+  const dashboard = await readFile(path.join(root, "src/features/dashboard/dashboard-page.tsx"), "utf8");
   const cache = await readFile(path.join(root, "src/features/cache/cache-page.tsx"), "utf8");
 
   assert.match(shell, /sticky top-0/);
   assert.match(shell, /env\(safe-area-inset-top\)/);
   assert.match(tabs, /overflow-y-hidden/);
-  assert.match(tabs, /ring-inset/);
-  assert.match(period, /overflow-hidden/);
-  assert.match(period, /shadow-none/);
+  assert.match(tabs, /items-stretch/);
+  assert.match(tabs, /h-full/);
+  assert.match(tabs, /border-transparent/);
+  assert.match(tabs, /data-\[state=active\]:border-border/);
+  assert.match(period, /SegmentedControl/);
+  assert.match(segmented, /h-9/);
+  assert.match(segmented, /items-stretch/);
+  assert.match(segmented, /leading-none/);
+  assert.match(segmented, /border-transparent/);
+  assert.match(segmented, /border-border bg-background/);
+  assert.match(dashboard, /<SegmentedControl/);
+  assert.doesNotMatch(dashboard, /inline-flex h-8 items-center rounded-md bg-muted/);
   assert.match(cache, /PersistentVideoPreview/);
   assert.match(cache, /thumbnailURL/);
 });
