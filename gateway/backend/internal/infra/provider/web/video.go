@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,20 @@ type videoMissingURLError struct {
 	kind     string
 	postID   string
 	progress int
+}
+
+var errVideoRecoveryTimeout = errors.New("视频结果恢复超过等待时限")
+
+type videoRecoveryPolicy struct {
+	MaxWait      time.Duration
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+}
+
+var defaultVideoRecoveryPolicy = videoRecoveryPolicy{
+	MaxWait:      5 * time.Minute,
+	InitialDelay: 5 * time.Second,
+	MaxDelay:     30 * time.Second,
 }
 
 func (e *videoMissingURLError) Error() string {
@@ -99,6 +114,12 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if parseErr != nil {
 		return provider.VideoResult{}, parseErr
 	}
+	if result.URL == "" && lastProgress >= 100 && postID != "" {
+		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postID)
+		if err != nil {
+			return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
+		}
+	}
 	if result.URL == "" {
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
 	}
@@ -152,10 +173,154 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 	if parseErr != nil {
 		return provider.VideoResult{}, parseErr
 	}
+	if result.URL == "" && lastProgress >= 100 && postID != "" {
+		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postID)
+		if err != nil {
+			return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
+		}
+	}
 	if result.URL == "" {
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
+}
+
+func (a *Adapter) recoverVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token, postID string) (provider.VideoResult, error) {
+	a.log().Warn("video_result_recovery_started", "post_id", postID, "max_wait", defaultVideoRecoveryPolicy.MaxWait)
+	result, err := pollVideoPostResult(ctx, defaultVideoRecoveryPolicy, func(lookupCtx context.Context) (provider.VideoResult, error) {
+		return a.lookupVideoPost(lookupCtx, cfg, lease, token, postID)
+	})
+	if err != nil {
+		a.log().Warn("video_result_recovery_failed", "post_id", postID, "error", err)
+		return provider.VideoResult{}, err
+	}
+	a.log().Info("video_result_recovered", "post_id", postID, "url", result.URL)
+	return result, nil
+}
+
+func (a *Adapter) lookupVideoPost(ctx context.Context, cfg Config, lease *egress.Lease, token, postID string) (provider.VideoResult, error) {
+	payload := map[string]any{
+		"id":                postID,
+		"isKidsMode":        false,
+		"isNsfwEnabled":     true,
+		"withContainerOnly": false,
+	}
+	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/media/post/get", payload, 30*time.Second, cfg.BaseURL+"/imagine/post/"+postID)
+	if err != nil {
+		return provider.VideoResult{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return provider.VideoResult{}, fmt.Errorf("读取视频媒体结果失败: %w", err)
+	}
+	return parseVideoPostResult(response.StatusCode, body)
+}
+
+func pollVideoPostResult(ctx context.Context, policy videoRecoveryPolicy, lookup func(context.Context) (provider.VideoResult, error)) (provider.VideoResult, error) {
+	if policy.MaxWait <= 0 {
+		return provider.VideoResult{}, errVideoRecoveryTimeout
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, policy.MaxWait)
+	defer cancel()
+	delay := policy.InitialDelay
+	if delay <= 0 {
+		delay = time.Second
+	}
+	maxDelay := policy.MaxDelay
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+	var lastErr error
+	for {
+		result, err := lookup(recoveryCtx)
+		if err == nil && result.URL != "" {
+			return result, nil
+		}
+		if err != nil {
+			lastErr = err
+			if errors.Is(err, provider.ErrUnauthorized) {
+				return provider.VideoResult{}, err
+			}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-recoveryCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if ctx.Err() != nil {
+				return provider.VideoResult{}, ctx.Err()
+			}
+			if lastErr != nil {
+				return provider.VideoResult{}, fmt.Errorf("%w: %v", errVideoRecoveryTimeout, lastErr)
+			}
+			return provider.VideoResult{}, errVideoRecoveryTimeout
+		case <-timer.C:
+		}
+		delay = min(delay*2, maxDelay)
+	}
+}
+
+func parseVideoPostResult(statusCode int, body []byte) (provider.VideoResult, error) {
+	if statusCode == http.StatusUnauthorized {
+		return provider.VideoResult{}, provider.ErrUnauthorized
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return provider.VideoResult{}, &videoUpstreamError{status: statusCode, body: summarizeUploadResponse(body)}
+	}
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return provider.VideoResult{}, fmt.Errorf("解析视频媒体结果失败: %w", err)
+	}
+	post, _ := root["post"].(map[string]any)
+	if post == nil {
+		return provider.VideoResult{}, nil
+	}
+	result, _ := videoResultFromPost(post)
+	return result, nil
+}
+
+func videoResultFromPost(post map[string]any) (provider.VideoResult, bool) {
+	mediaURL := firstNonEmptyString(post, "hd1080MediaUrl", "hdMediaUrl", "mediaUrl", "watermarkedMediaUrl")
+	mediaType := strings.ToUpper(firstNonEmptyString(post, "mediaType", "mimeType"))
+	if mediaURL != "" && (strings.Contains(mediaType, "VIDEO") || looksLikeVideoURL(mediaURL)) {
+		return provider.VideoResult{
+			URL:         absoluteVideoAssetURL(mediaURL),
+			PosterURL:   absoluteVideoAssetURL(firstNonEmptyString(post, "thumbnailImageUrl", "lastFrameThumbnailImageUrl")),
+			ContentType: "video/mp4",
+		}, true
+	}
+	for _, key := range []string{"videos", "childPosts"} {
+		items, _ := post[key].([]any)
+		for _, item := range items {
+			child, _ := item.(map[string]any)
+			if child == nil {
+				continue
+			}
+			if result, ok := videoResultFromPost(child); ok {
+				return result, true
+			}
+		}
+	}
+	if original, _ := post["originalPost"].(map[string]any); original != nil {
+		return videoResultFromPost(original)
+	}
+	return provider.VideoResult{}, false
+}
+
+func firstNonEmptyString(value map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if result, _ := value[key].(string); strings.TrimSpace(result) != "" {
+			return strings.TrimSpace(result)
+		}
+	}
+	return ""
+}
+
+func looksLikeVideoURL(value string) bool {
+	path := strings.ToLower(strings.SplitN(strings.TrimSpace(value), "?", 2)[0])
+	return strings.HasSuffix(path, ".mp4") || strings.HasSuffix(path, ".webm") || strings.HasSuffix(path, ".mov")
 }
 
 // ArchiveVideo 使用生成账号的 SSO 会话下载受保护的视频，并返回本站文件地址。
@@ -399,6 +564,9 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 
 func absoluteVideoAssetURL(value string) string {
 	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
 	if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
 		return value
 	}

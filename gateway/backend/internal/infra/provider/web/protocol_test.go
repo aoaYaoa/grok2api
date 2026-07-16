@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -701,6 +702,42 @@ func TestVideoMissingURLRetrySafetyUsesObservedProgress(t *testing.T) {
 	}
 }
 
+func TestParseVideoPostResultFindsCompletedNestedVideo(t *testing.T) {
+	result, err := parseVideoPostResult(http.StatusOK, []byte(`{
+		"post": {
+			"id": "post_1",
+			"mediaType": "MEDIA_POST_TYPE_VIDEO",
+			"mediaStatus": "MEDIA_STATUS_COMPLETED",
+			"videos": [{
+				"id": "video_1",
+				"mediaUrl": "users/user_1/generated/video_1/generated_video.mp4",
+				"thumbnailImageUrl": "users/user_1/generated/video_1/preview_image.jpg"
+			}]
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.URL != "https://assets.grok.com/users/user_1/generated/video_1/generated_video.mp4" || result.PosterURL != "https://assets.grok.com/users/user_1/generated/video_1/preview_image.jpg" || result.ContentType != "video/mp4" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestPollVideoPostResultStopsAtDeadline(t *testing.T) {
+	startedAt := time.Now()
+	calls := 0
+	_, err := pollVideoPostResult(context.Background(), videoRecoveryPolicy{MaxWait: 35 * time.Millisecond, InitialDelay: 5 * time.Millisecond, MaxDelay: 10 * time.Millisecond}, func(context.Context) (provider.VideoResult, error) {
+		calls++
+		return provider.VideoResult{}, nil
+	})
+	if !errors.Is(err, errVideoRecoveryTimeout) {
+		t.Fatalf("error = %v", err)
+	}
+	if calls < 2 || time.Since(startedAt) > 250*time.Millisecond {
+		t.Fatalf("calls=%d elapsed=%s", calls, time.Since(startedAt))
+	}
+}
+
 func TestVideoReferenceUploadPreservesUpstreamFailureDetail(t *testing.T) {
 	_, err := parseUploadResponse(http.StatusUnprocessableEntity, []byte(`{"error":{"message":"fileMimeType is required"}}`))
 	if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "fileMimeType is required") {
@@ -758,6 +795,59 @@ func TestGenerateVideoDoesNotReturnProtectedUpstreamURLWithoutStorage(t *testing
 	})
 	if err == nil || !provider.IsMediaPostProcessingError(err) {
 		t.Fatalf("protected upstream video was returned without local storage: %v", err)
+	}
+}
+
+func TestGenerateVideoRecoversCompletedPostWithoutStreamURL(t *testing.T) {
+	lookupCalls := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/media/post/create":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"post":{"id":"container_1"}}`)
+		case "/rest/app-chat/conversations/new":
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1"}}}}`+"\n")
+		case "/rest/media/post/get":
+			lookupCalls++
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body["id"] != "post_1" {
+				t.Errorf("lookup body = %#v, err = %v", body, err)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"post":{"id":"post_1","mediaType":"MEDIA_POST_TYPE_VIDEO","mediaUrl":"`+server.URL+`/generated/video.mp4","thumbnailImageUrl":"`+server.URL+`/generated/poster.jpg"}}`)
+		case "/generated/video.mp4":
+			writer.Header().Set("Content-Type", "video/mp4")
+			_, _ = writer.Write([]byte("recovered-video"))
+		case "/generated/poster.jpg":
+			writer.Header().Set("Content-Type", "image/jpeg")
+			_, _ = writer.Write([]byte("recovered-poster"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &videoAssetStoreStub{}
+	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	adapter.SetVideoAssetStore(store)
+	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookupCalls != 1 || result.URL != "/v1/files/video/generated_video.mp4" || result.PosterURL != "/v1/files/image/preview_image.jpg" || string(store.data) != "recovered-video" || string(store.poster) != "recovered-poster" {
+		t.Fatalf("lookups=%d result=%#v stored=%q poster=%q", lookupCalls, result, store.data, store.poster)
 	}
 }
 
