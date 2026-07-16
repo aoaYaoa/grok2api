@@ -23,6 +23,7 @@ import (
 )
 
 const capturedWeeklyCreditsHex = "00000000630a610d0000304112001a00220c089abbccd2061080f2d1fc012a0c089ab0f1d2061080f2d1fc013a07080515000020413a070804150000803f3a020802421e0802120c089abbccd2061080f2d1fc011a0c089ab0f1d2061080f2d1fc01580162006801800000000f677270632d7374617475733a300d0a"
+const capturedUnusedWeeklyCreditsHex = "000000005e0a5c12001a00220c089abbccd2061080f2d1fc012a0c089ab0f1d2061080f2d1fc013a07080515000020413a070804150000803f3a020802421e0802120c089abbccd2061080f2d1fc011a0c089ab0f1d2061080f2d1fc01580162006801800000000f677270632d7374617475733a300d0a"
 
 func TestParseCapturedWeeklyCreditsResponse(t *testing.T) {
 	body, err := hex.DecodeString(capturedWeeklyCreditsHex)
@@ -42,6 +43,20 @@ func TestParseCapturedWeeklyCreditsResponse(t *testing.T) {
 	}
 	if len(window.Breakdown) != 3 || window.Breakdown[0].ProductCode != account.QuotaProductImagine || window.Breakdown[0].UsagePercent != 10 || window.Breakdown[1].ProductCode != account.QuotaProductChat || window.Breakdown[1].UsagePercent != 1 || window.Breakdown[2].ProductCode != account.QuotaProductBuild || window.Breakdown[2].UsagePercent != 0 {
 		t.Fatalf("breakdown = %#v", window.Breakdown)
+	}
+}
+
+func TestParseWeeklyCreditsAcceptsOmittedProtoZeroUsage(t *testing.T) {
+	body, err := hex.DecodeString(capturedUnusedWeeklyCreditsHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := parseWeeklyCreditsResponse(body, 42, time.Date(2026, 7, 16, 7, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.UsagePercent != 0 || window.Remaining != 10000 || window.Total != 10000 {
+		t.Fatalf("window = %#v", window)
 	}
 }
 

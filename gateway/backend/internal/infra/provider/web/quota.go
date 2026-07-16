@@ -273,7 +273,6 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 		return account.QuotaWindow{}, fmt.Errorf("解析 Grok Web 周额度响应: %w", err)
 	}
 	var usagePercent float64
-	var usagePresent bool
 	var periodStart, periodEnd *time.Time
 	breakdown := make([]account.QuotaBreakdown, 0, 8)
 	for len(config) > 0 {
@@ -289,7 +288,6 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 				return account.QuotaWindow{}, fmt.Errorf("周额度使用率无效")
 			}
 			usagePercent = float64(math.Float32frombits(value))
-			usagePresent = true
 			config = config[consumed:]
 		case (number == 4 || number == 5) && fieldType == protowire.BytesType:
 			value, consumed := protowire.ConsumeBytes(config)
@@ -323,7 +321,9 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 			config = config[consumed:]
 		}
 	}
-	if !usagePresent || math.IsNaN(usagePercent) || math.IsInf(usagePercent, 0) || usagePercent < 0 || usagePercent > 100 {
+	// proto3 omits scalar fields whose value is zero. A missing usage field therefore
+	// means 0% used, which the Grok app presents as 100% remaining.
+	if math.IsNaN(usagePercent) || math.IsInf(usagePercent, 0) || usagePercent < 0 || usagePercent > 100 {
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 周额度响应缺少有效使用率")
 	}
 	if periodStart == nil || periodEnd == nil || !periodEnd.After(*periodStart) {
