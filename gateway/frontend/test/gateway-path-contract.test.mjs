@@ -99,3 +99,19 @@ test("account batch workflows expose quota and conversion strategy controls", as
   assert.match(translations, /accountTaskBatchSize: "单次全量任务账号数"/);
   assert.match(translations, /accountTaskBatchSize: "Accounts per all-task batch"/);
 });
+
+test("web quota cells show official remaining capacity and disclose missing media quota", async () => {
+  const quota = await readFile(path.join(frontendRoot, "src/features/accounts/account-quota.tsx"), "utf8");
+  const translations = await readFile(path.join(frontendRoot, "src/shared/i18n/index.ts"), "utf8");
+
+  assert.match(quota, /formatNumber\(window\.remaining, locale, 0\).*formatNumber\(window\.total, locale, 0\)/s);
+  assert.match(quota, /window\.remaining \/ window\.total \* 100/);
+  assert.doesNotMatch(quota, /window\.total - window\.remaining/);
+  assert.match(quota, /officialChatQuotaWindow/);
+  assert.match(quota, /mediaWeeklyQuotaUnavailable/);
+  assert.match(quota, /window\.syncedAt/);
+  assert.match(translations, /officialChatQuotaWindow: "官方 2 小时聊天额度"/);
+  assert.match(translations, /mediaWeeklyQuotaUnavailable: "媒体周额度未同步"/);
+  assert.match(translations, /officialChatQuotaWindow: "Official 2-hour chat quota"/);
+  assert.match(translations, /mediaWeeklyQuotaUnavailable: "Media weekly quota unavailable"/);
+});

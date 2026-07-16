@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import { Info } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -122,21 +123,43 @@ export function WebQuota({ windows, locale, tier }: { windows: NonNullable<Accou
   if (weekly) return <WeeklyWebQuota window={weekly} locale={locale} t={t} />;
 
   const fast = windowsByMode.get("fast");
-  if (tier === "basic" && fast) return <WebQuotaMode mode="Fast" window={fast} locale={locale} />;
+  if (tier === "basic" && fast) {
+    return (
+      <WebChatQuotaSummary>
+        <WebQuotaMode mode="Fast" window={fast} locale={locale} />
+      </WebChatQuotaSummary>
+    );
+  }
+  const mediaWeeklyQuotaUnavailable = tier === "super" || tier === "heavy";
   return (
-    <div className="grid w-full min-w-0 grid-cols-4 divide-x divide-border/70">
-      {visibleWebQuotaModes.map((mode) => {
-        const window = windowsByMode.get(mode);
-        if (!window) {
-          return <div key={mode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate capitalize text-muted-foreground">{mode}</span><span className="text-muted-foreground">-</span></div><div className="mt-1.5 h-1.5 rounded-full bg-muted" /></div>;
-        }
-        return <WebQuotaMode key={mode} mode={formatWebQuotaMode(mode)} window={window} locale={locale} compact />;
-      })}
-    </div>
+    <WebChatQuotaSummary mediaWeeklyQuotaUnavailable={mediaWeeklyQuotaUnavailable}>
+      <div className="grid w-full min-w-0 grid-cols-4 divide-x divide-border/70">
+        {visibleWebQuotaModes.map((mode) => {
+          const window = windowsByMode.get(mode);
+          if (!window) {
+            return <div key={mode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate capitalize text-muted-foreground">{mode}</span><span className="text-muted-foreground">-</span></div><div className="mt-1.5 h-1.5 rounded-full bg-muted" /></div>;
+          }
+          return <WebQuotaMode key={mode} mode={formatWebQuotaMode(mode)} window={window} locale={locale} compact />;
+        })}
+      </div>
+    </WebChatQuotaSummary>
   );
 }
 
 type WebQuotaWindow = NonNullable<AccountDTO["quotaWindows"]>[number];
+
+function WebChatQuotaSummary({ children, mediaWeeklyQuotaUnavailable = false }: { children: ReactNode; mediaWeeklyQuotaUnavailable?: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="w-full min-w-0 space-y-1.5">
+      {children}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4">
+        <span className="text-muted-foreground">{t("accounts.officialChatQuotaWindow")}</span>
+        {mediaWeeklyQuotaUnavailable ? <span className="font-medium text-amber-700 dark:text-amber-400">{t("accounts.mediaWeeklyQuotaUnavailable")}</span> : null}
+      </div>
+    </div>
+  );
+}
 
 function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale: string; t: TFunction }) {
   const usedPercent = Math.max(0, Math.min(100, window.usagePercent));
@@ -158,6 +181,7 @@ function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale:
       <TooltipContent>
         <div>{t("accounts.webWeeklyQuotaUsage", { remaining: formatNumber(100 - usedPercent, locale, 1) })}</div>
         <div className="text-muted-foreground">{window.resetAt ? t("accounts.quotaResetAt", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.quotaResetUnknown")}</div>
+        {window.syncedAt ? <div className="text-muted-foreground">{t("accounts.quotaSyncedAt", { time: formatDateTime(window.syncedAt, locale) })}</div> : null}
         {products.length > 0 ? <div className="mt-2 grid gap-1 border-t pt-2">{products.map((item) => <div key={item.productCode} className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><span className={cn("size-2 rounded-full", quotaProductColor(item.productCode))} />{quotaProductLabel(item.productCode, t)}</span><span className="tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div>)}</div> : null}
       </TooltipContent>
     </Tooltip>
@@ -166,17 +190,16 @@ function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale:
 
 function WebQuotaMode({ mode, window, locale, compact = false }: { mode: string; window: WebQuotaWindow; locale: string; compact?: boolean }) {
   const { t } = useTranslation();
-  const used = Math.max(0, window.total - window.remaining);
-  const percent = window.total > 0 ? Math.max(0, Math.min(100, used / window.total * 100)) : 0;
+  const percent = window.total > 0 ? Math.max(0, Math.min(100, window.remaining / window.total * 100)) : 0;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button type="button" className={cn("block w-full min-w-0 text-left", compact && "px-2 first:pl-0 last:pr-0")}>
-          <div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate text-muted-foreground">{mode}</span><span className="shrink-0 tabular-nums">{formatNumber(used, locale, 0)}/{formatNumber(window.total, locale, 0)}</span></div>
+          <div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate text-muted-foreground">{mode}</span><span className="shrink-0 tabular-nums">{formatNumber(window.remaining, locale, 0)}/{formatNumber(window.total, locale, 0)}</span></div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${percent}%` }} /></div>
         </button>
       </TooltipTrigger>
-      <TooltipContent><div>{t("accounts.webModeQuotaRemaining", { mode, remaining: formatNumber(window.remaining, locale, 0) })}</div><div className="text-muted-foreground">{window.resetAt ? t("accounts.quotaResetAt", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.quotaResetUnknown")}</div></TooltipContent>
+      <TooltipContent><div>{t("accounts.webModeQuotaRemaining", { mode, remaining: formatNumber(window.remaining, locale, 0) })}</div><div className="text-muted-foreground">{window.resetAt ? t("accounts.quotaResetAt", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.quotaResetUnknown")}</div>{window.syncedAt ? <div className="text-muted-foreground">{t("accounts.quotaSyncedAt", { time: formatDateTime(window.syncedAt, locale) })}</div> : null}</TooltipContent>
     </Tooltip>
   );
 }

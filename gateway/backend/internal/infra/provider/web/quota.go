@@ -44,6 +44,8 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 		if tier == account.WebTierSuper || tier == account.WebTierHeavy {
 			if weekly, weeklyErr := a.syncWeeklyCredits(ctx, credential); weeklyErr == nil {
 				windows = []account.QuotaWindow{weekly}
+			} else {
+				a.logWeeklyQuotaFallback(credential, weeklyErr)
 			}
 		}
 		return provider.QuotaSnapshot{Tier: tier, Windows: windows, SyncedAt: time.Now().UTC()}, nil
@@ -54,6 +56,7 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 		if weekly, weeklyErr := a.syncWeeklyCredits(ctx, credential); weeklyErr == nil {
 			return provider.QuotaSnapshot{Tier: credential.WebTier, Windows: []account.QuotaWindow{weekly}, SyncedAt: time.Now().UTC()}, nil
 		} else {
+			a.logWeeklyQuotaFallback(credential, weeklyErr)
 			return provider.QuotaSnapshot{}, weeklyErr
 		}
 	}
@@ -61,6 +64,18 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 		return provider.QuotaSnapshot{}, fastErr
 	}
 	return provider.QuotaSnapshot{}, autoErr
+}
+
+func (a *Adapter) logWeeklyQuotaFallback(credential account.Credential, err error) {
+	if err == nil {
+		return
+	}
+	a.log().Warn(
+		"web_weekly_quota_sync_failed",
+		"account_id", credential.ID,
+		"tier", credential.WebTier,
+		"error", err,
+	)
 }
 
 func resolveWebTierFromQuota(current account.WebTier, windows []account.QuotaWindow, weeklyAvailable bool) (account.WebTier, bool) {

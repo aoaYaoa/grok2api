@@ -1,14 +1,17 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,6 +91,15 @@ func TestSyncQuotaFetchesWeeklyOnlyAfterPaidTierIsConfirmed(t *testing.T) {
 	}
 	if snapshot.Tier != account.WebTierSuper || len(snapshot.Windows) != 1 || snapshot.Windows[0].Mode != weeklyQuotaMode || weeklyCalls.Load() != 1 {
 		t.Fatalf("snapshot = %#v, weekly calls = %d", snapshot, weeklyCalls.Load())
+	}
+}
+
+func TestSyncQuotaLogsWeeklyFallbackForPaidTier(t *testing.T) {
+	var logs bytes.Buffer
+	adapter := &Adapter{logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	adapter.logWeeklyQuotaFallback(account.Credential{ID: 8, WebTier: account.WebTierSuper}, errors.New("weekly endpoint unavailable"))
+	if !strings.Contains(logs.String(), "web_weekly_quota_sync_failed") || !strings.Contains(logs.String(), "account_id=8") || !strings.Contains(logs.String(), "weekly endpoint unavailable") {
+		t.Fatalf("logs=%s", logs.String())
 	}
 }
 
