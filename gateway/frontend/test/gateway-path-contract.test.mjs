@@ -83,3 +83,19 @@ test("admin action menu links back to the public workspace", async () => {
   assert.match(translations, /backToWorkspace: "返回工作台"/);
   assert.match(translations, /backToWorkspace: "Back to workspace"/);
 });
+
+test("account batch workflows expose quota and conversion strategy controls", async () => {
+  const api = await readFile(path.join(frontendRoot, "src/features/accounts/accounts-api.ts"), "utf8");
+  const page = await readFile(path.join(frontendRoot, "src/features/accounts/accounts-page.tsx"), "utf8");
+  const translations = await readFile(path.join(frontendRoot, "src/shared/i18n/index.ts"), "utf8");
+
+  assert.match(api, /export function refreshAccountsQuota/);
+  assert.match(api, /\/accounts\/batch\/refresh-quotas/);
+  assert.match(page, /refreshAccountsQuota\(\[\.\.\.selected\], provider\)/);
+  assert.match(page, /const \[conversionStrategy, setConversionStrategy\]/);
+  assert.match(page, /const \[webConsoleSyncStrategy, setWebConsoleSyncStrategy\]/);
+  assert.match(page, /strategy: conversionStrategy/);
+  assert.match(page, /strategy: webConsoleSyncStrategy/);
+  assert.match(translations, /accountTaskBatchSize: "单次全量任务账号数"/);
+  assert.match(translations, /accountTaskBatchSize: "Accounts per all-task batch"/);
+});

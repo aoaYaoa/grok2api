@@ -195,6 +195,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetLogger(logger)
 	accountService.SetQuotaRecoveryQueue(quotaQueue)
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
+	accountService.UpdateAccountTaskBatchSize(cfg.Batch.AccountTaskBatchSize)
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
 	if err != nil {
 		if runtimeStore != nil {
@@ -262,6 +263,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
 		syncPool.UpdateLimit(next.Batch.SyncConcurrency)
 		refreshPool.UpdateLimit(next.Batch.RefreshConcurrency)
+		accountService.UpdateAccountTaskBatchSize(next.Batch.AccountTaskBatchSize)
 		for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool} {
 			pool.UpdateJitter(next.Batch.RandomDelay.Value())
 		}

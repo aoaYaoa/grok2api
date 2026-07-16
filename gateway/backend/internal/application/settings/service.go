@@ -60,8 +60,9 @@ type ServerConfig struct {
 	MaxConcurrentRequests int
 }
 
-// BatchConfig 是管理接口使用的批量任务并发输入。
+// BatchConfig 是管理接口使用的批量任务输入。
 type BatchConfig struct {
+	AccountTaskBatchSize  int
 	ImportConcurrency     int
 	ConversionConcurrency int
 	SyncConcurrency       int
@@ -251,7 +252,10 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 }
 
 func applyDomainConfig(base config.Config, value settingsdomain.Config) config.Config {
-	base.Server.MaxConcurrentRequests = value.Server.MaxConcurrentRequests
+	// 旧版运行设置没有 Server 字段，反序列化后为零；升级时沿用当前配置默认值。
+	if value.Server.MaxConcurrentRequests > 0 {
+		base.Server.MaxConcurrentRequests = value.Server.MaxConcurrentRequests
+	}
 	capacityWait := value.Routing.CapacityWait
 	if capacityWait <= 0 {
 		capacityWait = base.Routing.CapacityWait.Value()
@@ -269,16 +273,24 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 		RecoveryBackoffBase: config.Duration(value.ProviderWeb.RecoveryBackoffBase), RecoveryBackoffMax: config.Duration(value.ProviderWeb.RecoveryBackoffMax),
 	}
-	base.Provider.Console = config.ConsoleProviderConfig{
-		BaseURL: value.ProviderConsole.BaseURL, UserAgent: value.ProviderConsole.UserAgent,
-		ChatTimeout: config.Duration(value.ProviderConsole.ChatTimeout),
+	// Console 是后续版本新增的完整配置段；旧 JSON 整段缺失时沿用代码默认值。
+	if value.ProviderConsole != (settingsdomain.ProviderConsoleConfig{}) {
+		base.Provider.Console = config.ConsoleProviderConfig{
+			BaseURL: value.ProviderConsole.BaseURL, UserAgent: value.ProviderConsole.UserAgent,
+			ChatTimeout: config.Duration(value.ProviderConsole.ChatTimeout),
+		}
 	}
 	randomDelay := time.Duration(-1)
 	if value.Batch.RandomDelay != nil {
 		randomDelay = *value.Batch.RandomDelay
 	}
+	accountTaskBatchSize := value.Batch.AccountTaskBatchSize
+	if accountTaskBatchSize <= 0 {
+		accountTaskBatchSize = base.Batch.AccountTaskBatchSize
+	}
 	base.Batch = config.BatchConfig{
-		ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
+		AccountTaskBatchSize: accountTaskBatchSize,
+		ImportConcurrency:    value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 		SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 		RandomDelay: config.Duration(randomDelay),
 	}
@@ -323,7 +335,8 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			ChatTimeout: value.Provider.Console.ChatTimeout.Value(),
 		},
 		Batch: settingsdomain.BatchConfig{
-			ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
+			AccountTaskBatchSize: value.Batch.AccountTaskBatchSize,
+			ImportConcurrency:    value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 			SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 			RandomDelay: &randomDelay,
 		},
@@ -389,8 +402,13 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.Provider.Web.AllowNSFW = input.ProviderWeb.AllowNSFW
 	next.Provider.Console.BaseURL = strings.TrimSpace(input.ProviderConsole.BaseURL)
 	next.Provider.Console.UserAgent = strings.TrimSpace(input.ProviderConsole.UserAgent)
+	accountTaskBatchSize := input.Batch.AccountTaskBatchSize
+	if accountTaskBatchSize <= 0 {
+		accountTaskBatchSize = current.Batch.AccountTaskBatchSize
+	}
 	next.Batch = config.BatchConfig{
-		ImportConcurrency: input.Batch.ImportConcurrency, ConversionConcurrency: input.Batch.ConversionConcurrency,
+		AccountTaskBatchSize: accountTaskBatchSize,
+		ImportConcurrency:    input.Batch.ImportConcurrency, ConversionConcurrency: input.Batch.ConversionConcurrency,
 		SyncConcurrency: input.Batch.SyncConcurrency, RefreshConcurrency: input.Batch.RefreshConcurrency,
 	}
 	next.Media.MaxImageBytes = input.Media.MaxImageBytes
@@ -458,7 +476,8 @@ func toEditable(cfg config.Config) EditableConfig {
 			ChatTimeout: cfg.Provider.Console.ChatTimeout.String(),
 		},
 		Batch: BatchConfig{
-			ImportConcurrency: cfg.Batch.ImportConcurrency, ConversionConcurrency: cfg.Batch.ConversionConcurrency,
+			AccountTaskBatchSize: cfg.Batch.AccountTaskBatchSize,
+			ImportConcurrency:    cfg.Batch.ImportConcurrency, ConversionConcurrency: cfg.Batch.ConversionConcurrency,
 			SyncConcurrency: cfg.Batch.SyncConcurrency, RefreshConcurrency: cfg.Batch.RefreshConcurrency,
 			RandomDelay: cfg.Batch.RandomDelay.String(),
 		},

@@ -80,6 +80,7 @@ type providerWebConfigDTO struct {
 }
 
 type batchConfigDTO struct {
+	AccountTaskBatchSize  int    `json:"accountTaskBatchSize"`
 	ImportConcurrency     int    `json:"importConcurrency"`
 	ConversionConcurrency int    `json:"conversionConcurrency"`
 	SyncConcurrency       int    `json:"syncConcurrency"`
@@ -172,7 +173,8 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			ChatTimeout: value.ProviderConsole.ChatTimeout,
 		},
 		Batch: settingsapp.BatchConfig{
-			ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
+			AccountTaskBatchSize: value.Batch.AccountTaskBatchSize,
+			ImportConcurrency:    value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 			SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 			RandomDelay: value.Batch.RandomDelay,
 		},
@@ -220,7 +222,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				ChatTimeout: config.ProviderConsole.ChatTimeout,
 			},
 			Batch: batchConfigDTO{
-				ImportConcurrency: config.Batch.ImportConcurrency, ConversionConcurrency: config.Batch.ConversionConcurrency,
+				AccountTaskBatchSize: config.Batch.AccountTaskBatchSize,
+				ImportConcurrency:    config.Batch.ImportConcurrency, ConversionConcurrency: config.Batch.ConversionConcurrency,
 				SyncConcurrency: config.Batch.SyncConcurrency, RefreshConcurrency: config.Batch.RefreshConcurrency,
 				RandomDelay: config.Batch.RandomDelay,
 			},

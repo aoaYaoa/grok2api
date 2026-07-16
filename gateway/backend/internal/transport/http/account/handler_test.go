@@ -92,6 +92,33 @@ func TestWriteBuildConversionEventUsesSSEFormat(t *testing.T) {
 	}
 }
 
+func TestConvertWebToBuildRejectsInvalidStrategy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest("POST", "/api/admin/v1/accounts/web/convert-to-build", strings.NewReader(`{"ids":["1"],"strategy":"invalid"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	new(Handler).convertWebToBuild(ctx)
+
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRegisterIncludesUnifiedBatchQuotaRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	new(Handler).Register(router.Group("/api/admin/v1"))
+
+	for _, route := range router.Routes() {
+		if route.Method == "POST" && route.Path == "/api/admin/v1/accounts/batch/refresh-quotas" {
+			return
+		}
+	}
+	t.Fatal("unified batch quota route was not registered")
+}
+
 func TestAccountProgressEventIncludesOptionalPhase(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

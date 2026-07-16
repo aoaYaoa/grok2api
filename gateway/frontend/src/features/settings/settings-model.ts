@@ -81,6 +81,7 @@ export const settingsSchema = z.object({
     chatTimeout: consoleChatDuration,
   }),
   batch: z.object({
+    accountTaskBatchSize: positiveInteger.max(1_000),
     importConcurrency: positiveInteger.max(50),
     conversionConcurrency: positiveInteger.max(50),
     syncConcurrency: positiveInteger.max(50),
