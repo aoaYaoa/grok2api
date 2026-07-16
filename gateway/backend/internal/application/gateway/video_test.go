@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -150,11 +151,11 @@ func TestVideoExtensionAccountMetadataTracksUniqueAttempts(t *testing.T) {
 
 func TestVideoExtensionSwitchesOnTerminalAccountFailures(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests} {
-		if !shouldSwitchVideoExtensionAccount(videoStatusError{status: status}) {
+		if !shouldSwitchVideoAccount(videoStatusError{status: status}) {
 			t.Fatalf("status %d should switch account", status)
 		}
 	}
-	if shouldSwitchVideoExtensionAccount(videoStatusError{status: http.StatusInternalServerError}) {
+	if shouldSwitchVideoAccount(videoStatusError{status: http.StatusInternalServerError}) {
 		t.Fatal("server failures must not consume another account")
 	}
 }
@@ -164,7 +165,7 @@ type videoStatusError struct{ status int }
 func (e videoStatusError) Error() string       { return http.StatusText(e.status) }
 func (e videoStatusError) HTTPStatusCode() int { return e.status }
 
-func TestAcquireVideoExtensionFallbackExcludesAttemptedAccounts(t *testing.T) {
+func TestAcquireVideoFallbackExcludesAttemptedAccountsForNormalGeneration(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-account-fallback.db"))
 	if err != nil {
@@ -187,10 +188,10 @@ func TestAcquireVideoExtensionFallbackExcludesAttemptedAccounts(t *testing.T) {
 	repository := &videoRepairRepository{}
 	service := &Service{selector: selector, mediaJobs: repository}
 	service.UpdateMaxAttempts(3)
-	metadata := videoInputMetadata{IsExtension: true, AttemptedAccountIDs: []uint64{first.ID}}
+	metadata := videoInputMetadata{AttemptedAccountIDs: []uint64{first.ID}}
 	job := media.Job{ID: "video_same_task", AccountID: first.ID, AccountName: first.Name, InputJSON: encodeVideoMetadata(metadata)}
 
-	lease, err := service.acquireVideoExtensionFallback(ctx, &job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"}, "", &metadata)
+	lease, err := service.acquireVideoAccountFallback(ctx, &job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"}, "", &metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +202,65 @@ func TestAcquireVideoExtensionFallbackExcludesAttemptedAccounts(t *testing.T) {
 	if metadata.AccountRetryCount != 1 || len(metadata.AttemptedAccountIDs) != 2 {
 		t.Fatalf("metadata = %#v", metadata)
 	}
+}
+
+func TestNormalVideoSwitchesAccountBeforeTerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-normal-failover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "second", SourceKey: "second", EncryptedAccessToken: "second", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &videoFailoverAdapter{failedAccountID: first.ID}
+	registry := provider.NewRegistry(adapter)
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
+	repository := &videoRepairRepository{}
+	service := &Service{providers: registry, selector: selector, mediaJobs: repository, audits: &durableVideoAuditRecorder{}, logger: slog.Default()}
+	service.UpdateMaxAttempts(3)
+	job := media.Job{
+		ID: "video_normal_failover", RequestID: "request_normal_failover", ClientKeyID: 1,
+		AccountID: first.ID, AccountName: first.Name, Provider: string(account.ProviderWeb), Model: "grok-imagine-video",
+		UpstreamModel: "grok-imagine-video", Seconds: 6, Status: media.StatusInProgress, InputJSON: `{}`, CreatedAt: time.Now().UTC(),
+	}
+	service.runVideoJob(ctx, job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"})
+
+	if !slices.Equal(adapter.accountIDs, []uint64{first.ID, second.ID}) {
+		t.Fatalf("account attempts = %#v", adapter.accountIDs)
+	}
+	if repository.job.Status != media.StatusCompleted || repository.job.AccountID != second.ID {
+		t.Fatalf("job = %#v", repository.job)
+	}
+	metadata := decodeVideoMetadata(repository.job.InputJSON)
+	if metadata.AccountRetryCount != 1 || !slices.Equal(metadata.AttemptedAccountIDs, []uint64{first.ID, second.ID}) {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+type videoFailoverAdapter struct {
+	failedAccountID uint64
+	accountIDs      []uint64
+}
+
+func (*videoFailoverAdapter) Provider() account.Provider { return account.ProviderWeb }
+
+func (a *videoFailoverAdapter) GenerateVideo(_ context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	a.accountIDs = append(a.accountIDs, request.Credential.ID)
+	if request.Credential.ID == a.failedAccountID {
+		return provider.VideoResult{}, videoStatusError{status: http.StatusForbidden}
+	}
+	return provider.VideoResult{URL: "/v1/files/video/failover.mp4", ContentType: "video/mp4"}, nil
 }
 
 func TestRecoverVideoJobsArchivesCompletedProtectedOutputs(t *testing.T) {

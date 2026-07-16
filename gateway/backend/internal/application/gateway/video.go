@@ -472,13 +472,14 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			s.deferVideoJob(parent, job)
 			return
 		}
-		if metadata.IsExtension {
-			fallback, fallbackErr := s.acquireVideoExtensionFallback(parent, &job, route, "", &metadata)
-			if fallbackErr == nil {
-				fallback.Release()
-				s.runVideoJob(parent, job, route)
-				return
+		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, "", &metadata)
+		if fallbackErr == nil {
+			if s.logger != nil {
+				s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
 			}
+			fallback.Release()
+			s.runVideoJob(parent, job, route)
+			return
 		}
 		s.failVideoJob(parent, job, "account_unavailable", err)
 		return
@@ -561,19 +562,19 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
-		if metadata.IsExtension && shouldSwitchVideoExtensionAccount(err) {
+		if shouldSwitchVideoAccount(err) {
 			lease.Release()
-			fallback, fallbackErr := s.acquireVideoExtensionFallback(parent, &job, route, lease.QuotaMode, &metadata)
+			fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata)
 			if fallbackErr == nil {
 				if s.logger != nil {
-					s.logger.Warn("video_extension_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "error", err)
+					s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
 				}
 				fallback.Release()
 				s.runVideoJob(parent, job, route)
 				return
 			}
 			if s.logger != nil {
-				s.logger.Warn("video_extension_account_switch_failed", "job_id", job.ID, "error", fallbackErr)
+				s.logger.Warn("video_account_switch_failed", "job_id", job.ID, "extension", metadata.IsExtension, "error", fallbackErr)
 			}
 		}
 		s.failVideoJob(parent, job, "generation_failed", err)
@@ -758,8 +759,8 @@ func (s *Service) videoAccountAttemptLimit() int {
 	return limit
 }
 
-func (s *Service) acquireVideoExtensionFallback(ctx context.Context, job *media.Job, route model.Route, quotaMode string, metadata *videoInputMetadata) (*accountLease, error) {
-	if job == nil || metadata == nil || !metadata.IsExtension {
+func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Job, route model.Route, quotaMode string, metadata *videoInputMetadata) (*accountLease, error) {
+	if job == nil || metadata == nil {
 		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 	}
 	metadata.markAccountAttempt(job.AccountID)
@@ -783,7 +784,7 @@ func (s *Service) acquireVideoExtensionFallback(ctx context.Context, job *media.
 	return lease, nil
 }
 
-func shouldSwitchVideoExtensionAccount(err error) bool {
+func shouldSwitchVideoAccount(err error) bool {
 	if err == nil || provider.IsMediaPostProcessingError(err) {
 		return false
 	}
