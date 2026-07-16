@@ -690,6 +690,17 @@ func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	}
 }
 
+func TestVideoMissingURLRetrySafetyUsesObservedProgress(t *testing.T) {
+	early := &videoMissingURLError{progress: 1}
+	if status, ok := provider.ErrorHTTPStatus(early); !ok || status != http.StatusBadGateway || !provider.IsMediaJobRetrySafe(early) {
+		t.Fatalf("early status=%d classified=%v retry=%v", status, ok, provider.IsMediaJobRetrySafe(early))
+	}
+	late := &videoMissingURLError{progress: 99}
+	if provider.IsMediaJobRetrySafe(late) {
+		t.Fatal("late incomplete stream must not regenerate a possible completed video")
+	}
+}
+
 func TestVideoReferenceUploadPreservesUpstreamFailureDetail(t *testing.T) {
 	_, err := parseUploadResponse(http.StatusUnprocessableEntity, []byte(`{"error":{"message":"fileMimeType is required"}}`))
 	if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "fileMimeType is required") {

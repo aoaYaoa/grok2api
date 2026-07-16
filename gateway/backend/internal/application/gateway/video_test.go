@@ -37,6 +37,18 @@ func TestVideoForbiddenRetryPlanUsesBoundedBackoff(t *testing.T) {
 	}
 }
 
+func TestVideoIncompleteStreamRetryPlanUsesBoundedBackoff(t *testing.T) {
+	for attempt, expected := range []time.Duration{15 * time.Second, time.Minute, 3 * time.Minute} {
+		delay, ok := videoRetryPlan(http.StatusBadGateway, attempt, true)
+		if !ok || delay != expected {
+			t.Fatalf("attempt %d: delay=%s retry=%v", attempt, delay, ok)
+		}
+	}
+	if _, ok := videoRetryPlan(http.StatusBadGateway, 3, true); ok {
+		t.Fatal("fourth incomplete stream response must be terminal")
+	}
+}
+
 func TestPublicVideoFailureMessageHidesUpstreamHTML(t *testing.T) {
 	err := errors.New("上传图片失败，上游返回 403: <!DOCTYPE html><html><title>Just a moment...</title></html>")
 	message := publicVideoFailureMessage(err)
@@ -248,10 +260,61 @@ func TestNormalVideoSwitchesAccountBeforeTerminalFailure(t *testing.T) {
 	}
 }
 
+func TestEarlyIncompleteVideoStreamDefersSameTask(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-incomplete-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &videoRetryAdapter{}
+	registry := provider.NewRegistry(adapter)
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
+	repository := &videoRepairRepository{}
+	service := &Service{providers: registry, selector: selector, mediaJobs: repository, logger: slog.Default()}
+	service.UpdateMaxAttempts(3)
+	job := media.Job{
+		ID: "video_incomplete_retry", RequestID: "request_incomplete_retry", ClientKeyID: 1,
+		AccountID: credential.ID, AccountName: credential.Name, Provider: string(account.ProviderWeb), Model: "grok-imagine-video",
+		UpstreamModel: "grok-imagine-video", Seconds: 6, Status: media.StatusInProgress, InputJSON: `{}`, CreatedAt: time.Now().UTC(),
+	}
+	service.runVideoJob(ctx, job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"})
+
+	metadata := decodeVideoMetadata(repository.job.InputJSON)
+	if repository.job.Status != media.StatusInProgress || repository.job.LeaseUntil == nil || metadata.RetryCount != 1 {
+		t.Fatalf("job=%#v metadata=%#v", repository.job, metadata)
+	}
+	if delay := repository.job.LeaseUntil.Sub(repository.job.UpdatedAt); delay != 15*time.Second {
+		t.Fatalf("retry delay = %s", delay)
+	}
+}
+
 type videoFailoverAdapter struct {
 	failedAccountID uint64
 	accountIDs      []uint64
 }
+
+type videoRetryAdapter struct{}
+
+func (*videoRetryAdapter) Provider() account.Provider { return account.ProviderWeb }
+
+func (*videoRetryAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
+	return provider.VideoResult{}, retrySafeVideoStatusError{status: http.StatusBadGateway}
+}
+
+type retrySafeVideoStatusError struct{ status int }
+
+func (e retrySafeVideoStatusError) Error() string         { return http.StatusText(e.status) }
+func (e retrySafeVideoStatusError) HTTPStatusCode() int   { return e.status }
+func (retrySafeVideoStatusError) MediaJobRetrySafe() bool { return true }
 
 func (*videoFailoverAdapter) Provider() account.Provider { return account.ProviderWeb }
 

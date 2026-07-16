@@ -29,6 +29,20 @@ func (e *videoUpstreamError) Error() string {
 
 func (e *videoUpstreamError) HTTPStatusCode() int { return e.status }
 
+type videoMissingURLError struct {
+	kind     string
+	postID   string
+	progress int
+}
+
+func (e *videoMissingURLError) Error() string {
+	return fmt.Sprintf("%s流结束但没有返回内容 URL (progress=%d, post_id=%s)", e.kind, e.progress, e.postID)
+}
+
+func (e *videoMissingURLError) HTTPStatusCode() int { return http.StatusBadGateway }
+
+func (e *videoMissingURLError) MediaJobRetrySafe() bool { return e.progress <= 1 }
+
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
@@ -74,13 +88,19 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	result, _, parseErr := parseVideoStream(response, request.Progress)
+	lastProgress := 0
+	result, postID, parseErr := parseVideoStream(response, func(value int) {
+		lastProgress = max(lastProgress, value)
+		if request.Progress != nil {
+			request.Progress(value)
+		}
+	})
 	_ = response.Body.Close()
 	if parseErr != nil {
 		return provider.VideoResult{}, parseErr
 	}
 	if result.URL == "" {
-		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
+		return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }
@@ -121,13 +141,19 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	result, _, parseErr := parseVideoStream(response, request.Progress)
+	lastProgress := 0
+	result, postID, parseErr := parseVideoStream(response, func(value int) {
+		lastProgress = max(lastProgress, value)
+		if request.Progress != nil {
+			request.Progress(value)
+		}
+	})
 	_ = response.Body.Close()
 	if parseErr != nil {
 		return provider.VideoResult{}, parseErr
 	}
 	if result.URL == "" {
-		return provider.VideoResult{}, fmt.Errorf("视频延长完成但没有返回内容 URL")
+		return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }

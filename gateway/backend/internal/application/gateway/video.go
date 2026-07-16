@@ -519,7 +519,10 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			return
 		}
 		if status, ok := provider.ErrorHTTPStatus(err); ok {
-			retrySafe := provider.IsMediaJobRetrySafe(err) && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider)
+			retrySafe := provider.IsMediaJobRetrySafe(err)
+			if status == http.StatusForbidden {
+				retrySafe = retrySafe && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider)
+			}
 			if delay, retry := videoRetryPlan(status, metadata.RetryCount, retrySafe); retry {
 				metadata.RetryCount++
 				job.InputJSON = encodeVideoMetadata(metadata)
@@ -850,11 +853,19 @@ func (s *Service) deferVideoJobFor(ctx context.Context, job media.Job, delay tim
 	}
 }
 
-func videoRetryPlan(status, retryCount int, retryForbidden bool) (time.Duration, bool) {
-	if status != http.StatusForbidden || !retryForbidden {
+func videoRetryPlan(status, retryCount int, retrySafe bool) (time.Duration, bool) {
+	if !retrySafe {
 		return 0, false
 	}
-	delays := [...]time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}
+	var delays []time.Duration
+	switch status {
+	case http.StatusForbidden:
+		delays = []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}
+	case http.StatusBadGateway:
+		delays = []time.Duration{15 * time.Second, time.Minute, 3 * time.Minute}
+	default:
+		return 0, false
+	}
 	if retryCount < 0 || retryCount >= len(delays) {
 		return 0, false
 	}
