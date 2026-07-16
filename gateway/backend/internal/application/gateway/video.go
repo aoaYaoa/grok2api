@@ -66,21 +66,26 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	metadata := videoMetadataFromInput(input)
 	var lease *accountLease
 	sourceAccountID, sourceFound, sourceErr := s.findExtensionSourceAccountID(ctx, input.ClientKey.ID, input.SourceTaskID)
 	if sourceErr != nil {
 		return media.Job{}, sourceErr
 	}
 	if input.IsExtension && sourceFound {
+		metadata.markAccountAttempt(sourceAccountID)
 		lease, err = s.selector.AcquirePinned(ctx, route.Provider, sourceAccountID, route.UpstreamModel, quotaMode, true)
+		if err != nil && metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+		}
 	} else {
 		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
 	}
 	if err != nil {
-		if input.IsExtension && sourceFound {
-			return media.Job{}, fmt.Errorf("%w: 原视频所属账号不可用，无法跨账号延长: %w", ErrNoAvailableAccount, err)
-		}
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
+	}
+	if input.IsExtension {
+		metadata.markAccountAttempt(lease.Credential.ID)
 	}
 	accountID := lease.Credential.ID
 	lease.Release()
@@ -95,7 +100,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoMetadata(metadata), CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(externalModel, input.Resolution, input.Duration); ok {
@@ -457,6 +462,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
 		s.logger.Warn("video_job_progress_write_failed", "job_id", job.ID, "error", err)
 	}
+	metadata := decodeVideoMetadata(job.InputJSON)
 	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
 	if err != nil {
 		if s.videoCancelled(job.ID) {
@@ -465,6 +471,14 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)
 			return
+		}
+		if metadata.IsExtension {
+			fallback, fallbackErr := s.acquireVideoExtensionFallback(parent, &job, route, "", &metadata)
+			if fallbackErr == nil {
+				fallback.Release()
+				s.runVideoJob(parent, job, route)
+				return
+			}
 		}
 		s.failVideoJob(parent, job, "account_unavailable", err)
 		return
@@ -476,7 +490,6 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	lastProgress := job.Progress
-	metadata := decodeVideoMetadata(job.InputJSON)
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
 		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
 		ReferenceURLs: metadata.ImageURLs, IsExtension: metadata.IsExtension, ExtendPostID: metadata.ExtendPostID,
@@ -548,6 +561,21 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
+		if metadata.IsExtension && shouldSwitchVideoExtensionAccount(err) {
+			lease.Release()
+			fallback, fallbackErr := s.acquireVideoExtensionFallback(parent, &job, route, lease.QuotaMode, &metadata)
+			if fallbackErr == nil {
+				if s.logger != nil {
+					s.logger.Warn("video_extension_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "error", err)
+				}
+				fallback.Release()
+				s.runVideoJob(parent, job, route)
+				return
+			}
+			if s.logger != nil {
+				s.logger.Warn("video_extension_account_switch_failed", "job_id", job.ID, "error", fallbackErr)
+			}
+		}
 		s.failVideoJob(parent, job, "generation_failed", err)
 		return
 	}
@@ -671,20 +699,102 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 }
 
 type videoInputMetadata struct {
-	ImageURLs          []string `json:"image_urls"`
-	DisplayName        string   `json:"display_name,omitempty"`
-	IsExtension        bool     `json:"is_extension,omitempty"`
-	SourceTaskID       string   `json:"source_task_id,omitempty"`
-	ExtendPostID       string   `json:"extend_post_id,omitempty"`
-	ExtensionStartTime float64  `json:"extension_start_time,omitempty"`
-	OriginalPostID     string   `json:"original_post_id,omitempty"`
-	FileAttachmentID   string   `json:"file_attachment_id,omitempty"`
-	StitchWithExtend   bool     `json:"stitch_with_extend,omitempty"`
-	RetryCount         int      `json:"retry_count,omitempty"`
+	ImageURLs           []string `json:"image_urls"`
+	DisplayName         string   `json:"display_name,omitempty"`
+	IsExtension         bool     `json:"is_extension,omitempty"`
+	SourceTaskID        string   `json:"source_task_id,omitempty"`
+	ExtendPostID        string   `json:"extend_post_id,omitempty"`
+	ExtensionStartTime  float64  `json:"extension_start_time,omitempty"`
+	OriginalPostID      string   `json:"original_post_id,omitempty"`
+	FileAttachmentID    string   `json:"file_attachment_id,omitempty"`
+	StitchWithExtend    bool     `json:"stitch_with_extend,omitempty"`
+	RetryCount          int      `json:"retry_count,omitempty"`
+	AccountRetryCount   int      `json:"account_retry_count,omitempty"`
+	AttemptedAccountIDs []uint64 `json:"attempted_account_ids,omitempty"`
 }
 
 func encodeVideoInput(input VideoInput) string {
-	return encodeVideoMetadata(videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, SourceTaskID: input.SourceTaskID, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend})
+	return encodeVideoMetadata(videoMetadataFromInput(input))
+}
+
+func videoMetadataFromInput(input VideoInput) videoInputMetadata {
+	return videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, SourceTaskID: input.SourceTaskID, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend}
+}
+
+func (m *videoInputMetadata) markAccountAttempt(accountID uint64) {
+	if accountID == 0 {
+		return
+	}
+	for _, attempted := range m.AttemptedAccountIDs {
+		if attempted == accountID {
+			return
+		}
+	}
+	if len(m.AttemptedAccountIDs) > 0 {
+		m.AccountRetryCount++
+	}
+	m.AttemptedAccountIDs = append(m.AttemptedAccountIDs, accountID)
+}
+
+func (m videoInputMetadata) excludedAccounts() map[uint64]bool {
+	excluded := make(map[uint64]bool, len(m.AttemptedAccountIDs))
+	for _, accountID := range m.AttemptedAccountIDs {
+		if accountID != 0 {
+			excluded[accountID] = true
+		}
+	}
+	return excluded
+}
+
+func (m videoInputMetadata) canTryAnotherAccount(limit int) bool {
+	return limit > 0 && len(m.excludedAccounts()) < limit
+}
+
+func (s *Service) videoAccountAttemptLimit() int {
+	limit := int(s.maxAttempts.Load())
+	if limit <= 0 {
+		return 3
+	}
+	return limit
+}
+
+func (s *Service) acquireVideoExtensionFallback(ctx context.Context, job *media.Job, route model.Route, quotaMode string, metadata *videoInputMetadata) (*accountLease, error) {
+	if job == nil || metadata == nil || !metadata.IsExtension {
+		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
+	}
+	metadata.markAccountAttempt(job.AccountID)
+	if !metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
+		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
+	}
+	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+	if err != nil {
+		return nil, err
+	}
+	metadata.RetryCount = 0
+	metadata.markAccountAttempt(lease.Credential.ID)
+	job.AccountID = lease.Credential.ID
+	job.AccountName = lease.Credential.Name
+	job.InputJSON = encodeVideoMetadata(*metadata)
+	job.UpdatedAt = time.Now().UTC()
+	if err := s.mediaJobs.UpdateMediaJob(ctx, *job); err != nil {
+		lease.Release()
+		return nil, err
+	}
+	return lease, nil
+}
+
+func shouldSwitchVideoExtensionAccount(err error) bool {
+	if err == nil || provider.IsMediaPostProcessingError(err) {
+		return false
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return true
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok {
+		return false
+	}
+	return status == http.StatusUnauthorized || status == http.StatusPaymentRequired || status == http.StatusForbidden || status == http.StatusTooManyRequests
 }
 
 func encodeVideoMetadata(metadata videoInputMetadata) string {

@@ -231,7 +231,7 @@ export function AppShell() {
         </aside>
 
         <div className="flex min-h-dvh flex-col lg:pl-[248px]">
-          <header className="flex h-12 items-center justify-between border-b px-4 lg:hidden">
+          <header className="sticky top-0 z-30 flex h-[calc(3rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b bg-background/95 px-4 pt-[env(safe-area-inset-top)] backdrop-blur supports-[backdrop-filter]:bg-background/85 lg:hidden">
             <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
               <SheetTrigger asChild><Button variant="ghost" size="icon" className="size-8" aria-label={t("shell.openNavigation")}><Menu className="size-4" /></Button></SheetTrigger>
               <SheetContent side="left" className="flex w-72 flex-col gap-0 bg-sidebar px-3 py-4 [&>button]:right-2 [&>button]:top-3.5 [&>button]:flex [&>button]:size-7 [&>button]:items-center [&>button]:justify-center [&>nav]:mt-5 [&>nav]:pr-1">

@@ -45,6 +45,7 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
   const videoAPI = await readFile(path.join(root, "src/public/features/video/video-api.ts"), "utf8");
   const grid = await readFile(path.join(root, "src/public/components/video-grid.tsx"), "utf8");
+  const persistentVideo = await readFile(path.join(root, "src/shared/components/persistent-video-preview.tsx"), "utf8");
 
   assert.match(nsfw, /imageStartLock/);
   assert.match(nsfw, /videoStartLock/);
@@ -64,7 +65,7 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.match(videoAPI, /matches\.at\(-1\)/);
   assert.match(videoAPI, /视频任务结束但未返回结果/);
   assert.match(grid, /onExtend\?:/);
-  assert.match(grid, /<video[^>]*controls/);
+  assert.match(persistentVideo, /<video[^>]*controls/);
   assert.match(grid, /item\.status === "failed" \? "失败"/);
   assert.doesNotMatch(grid, /onPlay=\{\(\) => onActivate/);
 });
@@ -109,19 +110,39 @@ test("video cache dialog does not merge the whole cache into session history", a
 
 test("video cards lazy-load visible media and keep selected rings inside cards", async () => {
   const grid = await readFile(path.join(root, "src/public/components/video-grid.tsx"), "utf8");
+  const persistentVideo = await readFile(path.join(root, "src/shared/components/persistent-video-preview.tsx"), "utf8");
   const videoAPI = await readFile(path.join(root, "src/public/features/video/video-api.ts"), "utf8");
   const imageGrid = await readFile(path.join(root, "src/public/components/image-grid.tsx"), "utf8");
 
-  assert.match(grid, /IntersectionObserver/);
-  assert.match(grid, /#t=0\.001/);
-  assert.match(grid, /preload="auto"/);
-  assert.match(grid, /poster=\{posterURL \|\| undefined\}/);
-  assert.match(grid, /video-preview-placeholder/);
+  assert.match(persistentVideo, /IntersectionObserver/);
+  assert.match(persistentVideo, /#t=0\.001/);
+  assert.match(persistentVideo, /preload=\{shouldLoad \? "auto" : "none"\}/);
+  assert.match(persistentVideo, /poster=\{posterURL \|\| undefined\}/);
+  assert.match(persistentVideo, /video-preview-placeholder/);
   assert.match(grid, /export function VideoPlayer/);
   assert.match(videoAPI, /posterURL/);
   assert.match(videoAPI, /data\.poster_url/);
   assert.match(grid, /ring-inset/);
   assert.match(imageGrid, /ring-inset/);
+  assert.match(persistentVideo, /loadedVideoURLs/);
+  assert.doesNotMatch(persistentVideo, /removeAttribute\("src"\)/);
+  assert.doesNotMatch(persistentVideo, /setFrameReady\(false\)/);
+});
+
+test("admin shell and cache keep mobile controls and video previews stable", async () => {
+  const shell = await readFile(path.join(root, "src/app/app-shell.tsx"), "utf8");
+  const tabs = await readFile(path.join(root, "src/components/ui/tabs.tsx"), "utf8");
+  const period = await readFile(path.join(root, "src/shared/components/period-selector.tsx"), "utf8");
+  const cache = await readFile(path.join(root, "src/features/cache/cache-page.tsx"), "utf8");
+
+  assert.match(shell, /sticky top-0/);
+  assert.match(shell, /env\(safe-area-inset-top\)/);
+  assert.match(tabs, /overflow-y-hidden/);
+  assert.match(tabs, /ring-inset/);
+  assert.match(period, /overflow-hidden/);
+  assert.match(period, /shadow-none/);
+  assert.match(cache, /PersistentVideoPreview/);
+  assert.match(cache, /thumbnailURL/);
 });
 
 test("failed video tasks are removed and reported as one task-group notice", async () => {

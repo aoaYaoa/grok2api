@@ -1,9 +1,10 @@
 import { Download, ExternalLink, Pencil, PlayCircle, Scissors } from "lucide-react";
-import { useEffect, useRef, useState, type ReactEventHandler } from "react";
+import type { ReactEventHandler } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { VideoItem } from "@/public/features/video/video-api";
 import { downloadURL } from "@/public/lib/media";
+import { PersistentVideoPreview } from "@/shared/components/persistent-video-preview";
 import { cn } from "@/shared/lib/cn";
 
 type VideoGridProps = {
@@ -19,7 +20,7 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {videos.map((item) => (
-        <article key={`${item.id}-${item.createdAt}`} className={cn("min-w-0 overflow-hidden rounded-md border bg-card shadow-sm", activeID === item.id && "ring-2 ring-inset ring-primary")}>
+        <article key={item.taskID || item.id} className={cn("min-w-0 overflow-hidden rounded-md border bg-card shadow-sm", activeID === item.id && "ring-2 ring-inset ring-primary")}>
           <div className="relative aspect-video w-full bg-muted">
             {item.url
               ? <LazyVideoPreview url={item.url} posterURL={item.posterURL} label={item.displayName} />
@@ -50,93 +51,9 @@ type VideoPlayerProps = {
 };
 
 export function VideoPlayer({ url, posterURL = "", label, className, onLoadedMetadata }: VideoPlayerProps) {
-  const video = useRef<HTMLVideoElement>(null);
-  const [readyURL, setReadyURL] = useState("");
-  const frameReady = Boolean(posterURL) || readyURL === url;
-
-  return (
-    <div className={cn("relative overflow-hidden bg-black", className)}>
-      <video
-        ref={video}
-        src={videoPreviewSource(url)}
-        poster={posterURL || undefined}
-        controls
-        playsInline
-        preload="auto"
-        className={cn("size-full object-contain transition-opacity", frameReady ? "opacity-100" : "opacity-0")}
-        onLoadedMetadata={(event) => {
-          onLoadedMetadata?.(event);
-          seekPreviewFrame(event.currentTarget);
-        }}
-        onLoadedData={() => setReadyURL(url)}
-        onCanPlay={() => setReadyURL(url)}
-        onSeeked={() => setReadyURL(url)}
-      />
-      {!frameReady ? <button type="button" className="video-preview-placeholder absolute inset-0 grid size-full place-items-center bg-muted text-muted-foreground" onClick={() => void video.current?.play().catch(() => undefined)} aria-label={`播放 ${label}`}><span className="grid justify-items-center gap-2 px-4 text-center text-xs"><PlayCircle className="size-10" strokeWidth={1.5} /><span className="line-clamp-2">正在加载封面</span></span></button> : null}
-    </div>
-  );
-}
-
-function videoPreviewSource(url: string) {
-  const hashIndex = url.indexOf("#");
-  return `${hashIndex >= 0 ? url.slice(0, hashIndex) : url}#t=0.001`;
-}
-
-function seekPreviewFrame(element: HTMLVideoElement) {
-  if (Number.isFinite(element.duration) && element.duration > 0 && element.currentTime < 0.001) {
-    element.currentTime = Math.min(0.001, element.duration / 2);
-  }
+  return <PersistentVideoPreview url={url} posterURL={posterURL} label={label} className={cn("bg-black", className)} eager onLoadedMetadata={onLoadedMetadata} />;
 }
 
 function LazyVideoPreview({ url, posterURL, label }: { url: string; posterURL: string; label: string }) {
-  const frame = useRef<HTMLDivElement>(null);
-  const video = useRef<HTMLVideoElement>(null);
-  const [nearViewport, setNearViewport] = useState(() => typeof window === "undefined" || !("IntersectionObserver" in window));
-  const [readyURL, setReadyURL] = useState("");
-  const frameReady = Boolean(nearViewport && posterURL) || readyURL === url;
-
-  useEffect(() => {
-    const node = frame.current;
-    if (!node) return;
-    if (!("IntersectionObserver" in window)) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      setNearViewport(entry.isIntersecting);
-      if (!entry.isIntersecting) setReadyURL("");
-    }, { rootMargin: "240px 0px" });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const element = video.current;
-    if (!nearViewport || !element) return;
-    element.preload = "auto";
-    element.src = videoPreviewSource(url);
-    element.load();
-    return () => {
-      element.pause();
-      element.removeAttribute("src");
-      element.load();
-    };
-  }, [nearViewport, url]);
-
-  return (
-    <div ref={frame} className="relative size-full overflow-hidden bg-muted">
-      <video
-        ref={video}
-        controls
-        playsInline
-        preload="auto"
-        poster={nearViewport ? posterURL || undefined : undefined}
-        className={cn("size-full object-contain transition-opacity", frameReady ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0")}
-        onLoadedMetadata={(event) => {
-          seekPreviewFrame(event.currentTarget);
-        }}
-        onLoadedData={() => setReadyURL(url)}
-        onCanPlay={() => setReadyURL(url)}
-        onSeeked={() => setReadyURL(url)}
-      />
-      {!frameReady ? <button type="button" className="video-preview-placeholder absolute inset-0 grid size-full place-items-center bg-muted text-muted-foreground" onClick={() => { setNearViewport(true); void video.current?.play().catch(() => undefined); }} aria-label={`播放 ${label}`}><span className="grid justify-items-center gap-2 px-4 text-center text-xs"><PlayCircle className="size-10" strokeWidth={1.5} /><span className="line-clamp-2">{nearViewport ? "正在加载封面" : label}</span></span></button> : null}
-    </div>
-  );
+  return <PersistentVideoPreview url={url} posterURL={posterURL} label={label} />;
 }

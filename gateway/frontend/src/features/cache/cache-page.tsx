@@ -13,6 +13,7 @@ import { clearCache, deleteCacheItem, getCacheStats, listCacheItems, renameCache
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
 import { Pagination } from "@/shared/components/pagination";
+import { PersistentVideoPreview } from "@/shared/components/persistent-video-preview";
 import { runtimeConfig } from "@/shared/config/runtime-config";
 
 export function CachePage() {
@@ -108,10 +109,12 @@ export function CachePage() {
           <div className="grid grid-cols-1 gap-x-5 gap-y-7 py-6 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {items.map((item) => (
               <article key={item.name} className="group min-w-0">
-                <a href={mediaURL(item.viewURL)} target="_blank" rel="noreferrer" className="relative block aspect-video overflow-hidden rounded-md bg-muted outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-                  {type === "image" ? <img src={mediaURL(item.previewURL ?? item.viewURL)} alt={item.displayName || item.name} loading="lazy" className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.02]" /> : <video src={mediaURL(item.viewURL)} preload="metadata" muted className="size-full object-cover" />}
-                  <span className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-md bg-background/90 text-foreground opacity-0 shadow-sm transition-opacity group-hover:opacity-100"><ExternalLink className="size-3.5" /></span>
-                </a>
+                <div className="relative aspect-video overflow-hidden rounded-md bg-muted">
+                  {type === "image" ? <img src={mediaURL(item.previewURL ?? item.viewURL)} alt={item.displayName || item.name} loading="lazy" className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.02]" /> : <PersistentVideoPreview url={mediaURL(item.viewURL)} posterURL={mediaURL(item.thumbnailURL ?? item.previewURL ?? "")} label={item.displayName || item.name} videoClassName="object-cover" />}
+                  <Button variant="secondary" size="icon" className="absolute right-2 top-2 size-7 opacity-100 shadow-sm sm:opacity-0 sm:group-hover:opacity-100" asChild>
+                    <a href={mediaURL(item.viewURL)} target="_blank" rel="noreferrer" aria-label="打开视频"><ExternalLink className="size-3.5" /></a>
+                  </Button>
+                </div>
                 <div className="mt-3 flex items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium" title={item.displayName || item.name}>{item.displayName || item.name}</div>
@@ -158,6 +161,8 @@ function CacheSummary({ icon: Icon, label, count, size, className = "" }: { icon
 }
 
 function mediaURL(path: string): string {
+  if (!path) return "";
+  if (/^(?:https?:)?\/\//i.test(path) || path.startsWith("data:") || path.startsWith("blob:")) return path;
   return `${runtimeConfig.apiBaseUrl}${path}`;
 }
 

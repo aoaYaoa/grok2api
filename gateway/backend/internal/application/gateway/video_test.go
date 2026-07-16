@@ -130,6 +130,79 @@ func TestFindExtensionSourceAccountUsesOriginalVideoTask(t *testing.T) {
 	}
 }
 
+func TestVideoExtensionAccountMetadataTracksUniqueAttempts(t *testing.T) {
+	metadata := videoInputMetadata{}
+	metadata.markAccountAttempt(12)
+	metadata.markAccountAttempt(12)
+	metadata.markAccountAttempt(34)
+
+	if metadata.AccountRetryCount != 1 {
+		t.Fatalf("account retry count = %d", metadata.AccountRetryCount)
+	}
+	if len(metadata.AttemptedAccountIDs) != 2 || metadata.AttemptedAccountIDs[0] != 12 || metadata.AttemptedAccountIDs[1] != 34 {
+		t.Fatalf("attempted accounts = %#v", metadata.AttemptedAccountIDs)
+	}
+	excluded := metadata.excludedAccounts()
+	if !excluded[12] || !excluded[34] || excluded[56] {
+		t.Fatalf("excluded accounts = %#v", excluded)
+	}
+}
+
+func TestVideoExtensionSwitchesOnTerminalAccountFailures(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests} {
+		if !shouldSwitchVideoExtensionAccount(videoStatusError{status: status}) {
+			t.Fatalf("status %d should switch account", status)
+		}
+	}
+	if shouldSwitchVideoExtensionAccount(videoStatusError{status: http.StatusInternalServerError}) {
+		t.Fatal("server failures must not consume another account")
+	}
+}
+
+type videoStatusError struct{ status int }
+
+func (e videoStatusError) Error() string       { return http.StatusText(e.status) }
+func (e videoStatusError) HTTPStatusCode() int { return e.status }
+
+func TestAcquireVideoExtensionFallbackExcludesAttemptedAccounts(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-account-fallback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "second", SourceKey: "second", EncryptedAccessToken: "second", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	repository := &videoRepairRepository{}
+	service := &Service{selector: selector, mediaJobs: repository}
+	service.UpdateMaxAttempts(3)
+	metadata := videoInputMetadata{IsExtension: true, AttemptedAccountIDs: []uint64{first.ID}}
+	job := media.Job{ID: "video_same_task", AccountID: first.ID, AccountName: first.Name, InputJSON: encodeVideoMetadata(metadata)}
+
+	lease, err := service.acquireVideoExtensionFallback(ctx, &job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"}, "", &metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.Credential.ID != second.ID || job.AccountID != second.ID || repository.job.ID != job.ID {
+		t.Fatalf("lease=%d job=%d persisted=%#v", lease.Credential.ID, job.AccountID, repository.job)
+	}
+	if metadata.AccountRetryCount != 1 || len(metadata.AttemptedAccountIDs) != 2 {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
 func TestRecoverVideoJobsArchivesCompletedProtectedOutputs(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-repair.db"))
