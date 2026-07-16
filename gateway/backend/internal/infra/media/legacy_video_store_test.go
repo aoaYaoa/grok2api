@@ -48,3 +48,27 @@ func TestLegacyVideoStoreRejectsUnsupportedExtension(t *testing.T) {
 		t.Fatal("unsupported video extension was accepted")
 	}
 }
+
+func TestLegacyVideoStoreSavesVideoPosterInImageCache(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewLegacyVideoStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localURL, err := store.SaveVideoPoster(
+		context.Background(),
+		"https://assets.grok.com/users/test/generated/123e4567-e89b-12d3-a456-426614174000/preview_image.jpg",
+		[]byte("poster-bytes"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "users-test-generated-123e4567-e89b-12d3-a456-426614174000-preview_image.jpg"
+	if localURL != "/v1/files/image/"+name {
+		t.Fatalf("poster URL = %q", localURL)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "image", name))
+	if err != nil || string(data) != "poster-bytes" {
+		t.Fatalf("stored poster = %q, err=%v", data, err)
+	}
+}

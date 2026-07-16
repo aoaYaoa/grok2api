@@ -302,13 +302,13 @@ func (s *Service) repairCompletedVideoOutputs(ctx context.Context) error {
 			result = firstError(result, fmt.Errorf("任务 %s 获取原账号: %w", job.ID, leaseErr))
 			continue
 		}
-		archived, archiveErr := archiver.ArchiveVideo(ctx, lease.Credential, provider.VideoResult{URL: job.UpstreamURL, ContentType: job.ContentType})
+		archived, archiveErr := archiver.ArchiveVideo(ctx, lease.Credential, provider.VideoResult{URL: job.UpstreamURL, PosterURL: videoPosterURL(job), ContentType: job.ContentType})
 		lease.Release()
 		if archiveErr != nil {
 			result = firstError(result, fmt.Errorf("任务 %s 保存视频: %w", job.ID, archiveErr))
 			continue
 		}
-		job.UpstreamURL, job.ContentType, job.UpdatedAt = archived.URL, archived.ContentType, time.Now().UTC()
+		job.UpstreamURL, job.ContentType, job.InputJSON, job.UpdatedAt = archived.URL, archived.ContentType, withVideoPosterURL(job.InputJSON, archived.PosterURL), time.Now().UTC()
 		if updateErr := s.mediaJobs.UpdateMediaJob(ctx, job); updateErr != nil {
 			result = firstError(result, fmt.Errorf("任务 %s 更新本地地址: %w", job.ID, updateErr))
 		}
@@ -556,6 +556,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	now := time.Now().UTC()
 	job.Status, job.Progress, job.UpstreamURL, job.ContentType = media.StatusCompleted, 100, result.URL, result.ContentType
+	job.InputJSON = withVideoPosterURL(job.InputJSON, result.PosterURL)
 	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
 	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
@@ -569,6 +570,33 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode == "weekly" {
 		s.accounts.QueueQuotaRefresh(job.AccountID, lease.QuotaMode)
 	}
+}
+
+func withVideoPosterURL(raw, posterURL string) string {
+	posterURL = strings.TrimSpace(posterURL)
+	if posterURL == "" {
+		return raw
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		metadata = make(map[string]any)
+	}
+	metadata["poster_url"] = posterURL
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func videoPosterURL(job media.Job) string {
+	var metadata struct {
+		PosterURL string `json:"poster_url"`
+	}
+	if json.Unmarshal([]byte(job.InputJSON), &metadata) != nil {
+		return ""
+	}
+	return strings.TrimSpace(metadata.PosterURL)
 }
 
 func (s *Service) videoCancelled(id string) bool {

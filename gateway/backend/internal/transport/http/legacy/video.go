@@ -37,6 +37,7 @@ type LegacyCachedVideo struct {
 	Name           string
 	TaskID         string
 	ViewURL        string
+	PosterURL      string
 	PostID         string
 	ShareLink      string
 	OriginalPostID string
@@ -112,7 +113,7 @@ func (h *Handler) videoCacheList(c *gin.Context) {
 	items := make([]gin.H, 0, end-start)
 	for _, item := range values[start:end] {
 		items = append(items, gin.H{
-			"name": item.Name, "task_id": item.TaskID, "view_url": item.ViewURL, "post_id": item.PostID, "share_link": item.ShareLink,
+			"name": item.Name, "task_id": item.TaskID, "view_url": item.ViewURL, "poster_url": item.PosterURL, "post_id": item.PostID, "share_link": item.ShareLink,
 			"original_post_id": item.OriginalPostID, "display_name": item.DisplayName,
 			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
 		})
@@ -185,22 +186,33 @@ func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
 	}
 	return LegacyCachedVideo{
 		Name: name, TaskID: job.RequestID, ViewURL: job.UpstreamURL, PostID: lastVideoPostID(job.UpstreamURL),
-		DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
+		PosterURL: videoJobPosterURL(job), DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
 	}, true
+}
+
+func videoJobPosterURL(job mediadomain.Job) string {
+	var metadata struct {
+		PosterURL string `json:"poster_url"`
+	}
+	_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
+	return strings.TrimSpace(metadata.PosterURL)
 }
 
 func dedupeCachedVideos(items []LegacyCachedVideo) []LegacyCachedVideo {
 	result := make([]LegacyCachedVideo, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
+	seen := make(map[string]int, len(items))
 	for _, item := range items {
 		key := strings.TrimSpace(item.ViewURL)
 		if key == "" {
 			key = strings.TrimSpace(item.Name)
 		}
-		if _, exists := seen[key]; exists {
+		if index, exists := seen[key]; exists {
+			if result[index].PosterURL == "" && item.PosterURL != "" {
+				result[index].PosterURL = item.PosterURL
+			}
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(result)
 		result = append(result, item)
 	}
 	return result
@@ -464,6 +476,9 @@ func (h *Handler) videoSSE(c *gin.Context) {
 		}
 		switch job.Status {
 		case mediadomain.StatusCompleted:
+			if posterURL := videoJobPosterURL(job); posterURL != "" {
+				writeLegacySSE(c, gin.H{"poster_url": posterURL})
+			}
 			writeVideoDelta(c, "[video]("+job.UpstreamURL+")", "")
 			writeVideoDelta(c, "", "stop")
 			writeLegacyDone(c)

@@ -1,5 +1,5 @@
 import { Download, ExternalLink, Pencil, PlayCircle, Scissors } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactEventHandler } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { VideoItem } from "@/public/features/video/video-api";
@@ -22,7 +22,7 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
         <article key={`${item.id}-${item.createdAt}`} className={cn("min-w-0 overflow-hidden rounded-md border bg-card shadow-sm", activeID === item.id && "ring-2 ring-inset ring-primary")}>
           <div className="relative aspect-video w-full bg-muted">
             {item.url
-              ? <LazyVideoPreview url={item.url} label={item.displayName} />
+              ? <LazyVideoPreview url={item.url} posterURL={item.posterURL} label={item.displayName} />
               : <button className="grid size-full place-items-center px-4 text-center text-sm text-muted-foreground" onClick={() => onActivate(item)}><span className="line-clamp-4 break-words">{item.error || `进度 ${item.progress}%`}</span></button>}
             <span className="pointer-events-none absolute left-2 top-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "failed" ? "失败" : item.status === "completed" ? "完成" : `${item.progress}%`}</span>
           </div>
@@ -41,12 +41,59 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
   );
 }
 
-function LazyVideoPreview({ url, label }: { url: string; label: string }) {
+type VideoPlayerProps = {
+  url: string;
+  posterURL?: string;
+  label: string;
+  className?: string;
+  onLoadedMetadata?: ReactEventHandler<HTMLVideoElement>;
+};
+
+export function VideoPlayer({ url, posterURL = "", label, className, onLoadedMetadata }: VideoPlayerProps) {
+  const video = useRef<HTMLVideoElement>(null);
+  const [readyURL, setReadyURL] = useState("");
+  const frameReady = Boolean(posterURL) || readyURL === url;
+
+  return (
+    <div className={cn("relative overflow-hidden bg-black", className)}>
+      <video
+        ref={video}
+        src={videoPreviewSource(url)}
+        poster={posterURL || undefined}
+        controls
+        playsInline
+        preload="auto"
+        className={cn("size-full object-contain transition-opacity", frameReady ? "opacity-100" : "opacity-0")}
+        onLoadedMetadata={(event) => {
+          onLoadedMetadata?.(event);
+          seekPreviewFrame(event.currentTarget);
+        }}
+        onLoadedData={() => setReadyURL(url)}
+        onCanPlay={() => setReadyURL(url)}
+        onSeeked={() => setReadyURL(url)}
+      />
+      {!frameReady ? <button type="button" className="video-preview-placeholder absolute inset-0 grid size-full place-items-center bg-muted text-muted-foreground" onClick={() => void video.current?.play().catch(() => undefined)} aria-label={`播放 ${label}`}><span className="grid justify-items-center gap-2 px-4 text-center text-xs"><PlayCircle className="size-10" strokeWidth={1.5} /><span className="line-clamp-2">正在加载封面</span></span></button> : null}
+    </div>
+  );
+}
+
+function videoPreviewSource(url: string) {
+  const hashIndex = url.indexOf("#");
+  return `${hashIndex >= 0 ? url.slice(0, hashIndex) : url}#t=0.001`;
+}
+
+function seekPreviewFrame(element: HTMLVideoElement) {
+  if (Number.isFinite(element.duration) && element.duration > 0 && element.currentTime < 0.001) {
+    element.currentTime = Math.min(0.001, element.duration / 2);
+  }
+}
+
+function LazyVideoPreview({ url, posterURL, label }: { url: string; posterURL: string; label: string }) {
   const frame = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const [nearViewport, setNearViewport] = useState(() => typeof window === "undefined" || !("IntersectionObserver" in window));
   const [readyURL, setReadyURL] = useState("");
-  const frameReady = readyURL === url;
+  const frameReady = Boolean(nearViewport && posterURL) || readyURL === url;
 
   useEffect(() => {
     const node = frame.current;
@@ -63,8 +110,8 @@ function LazyVideoPreview({ url, label }: { url: string; label: string }) {
   useEffect(() => {
     const element = video.current;
     if (!nearViewport || !element) return;
-    element.preload = "metadata";
-    element.src = url;
+    element.preload = "auto";
+    element.src = videoPreviewSource(url);
     element.load();
     return () => {
       element.pause();
@@ -79,15 +126,14 @@ function LazyVideoPreview({ url, label }: { url: string; label: string }) {
         ref={video}
         controls
         playsInline
-        preload="none"
+        preload="auto"
+        poster={nearViewport ? posterURL || undefined : undefined}
         className={cn("size-full object-contain transition-opacity", frameReady ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0")}
         onLoadedMetadata={(event) => {
-          const element = event.currentTarget;
-          if (Number.isFinite(element.duration) && element.duration > 0) {
-            element.currentTime = Math.min(0.05, element.duration / 2);
-          }
+          seekPreviewFrame(event.currentTarget);
         }}
         onLoadedData={() => setReadyURL(url)}
+        onCanPlay={() => setReadyURL(url)}
         onSeeked={() => setReadyURL(url)}
       />
       {!frameReady ? <button type="button" className="video-preview-placeholder absolute inset-0 grid size-full place-items-center bg-muted text-muted-foreground" onClick={() => { setNearViewport(true); void video.current?.play().catch(() => undefined); }} aria-label={`播放 ${label}`}><span className="grid justify-items-center gap-2 px-4 text-center text-xs"><PlayCircle className="size-10" strokeWidth={1.5} /><span className="line-clamp-2">{nearViewport ? "正在加载封面" : label}</span></span></button> : null}

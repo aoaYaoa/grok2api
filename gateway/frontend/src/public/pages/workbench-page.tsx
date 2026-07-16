@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
+import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
 import { editImage, imageFromEdit, resolveParentPost, type GeneratedImage } from "@/public/features/image/image-api";
 import { downloadURL, extractParentPostID, filesToAssets, imageSource, type UploadAsset } from "@/public/lib/media";
 
@@ -31,6 +32,7 @@ export function WorkbenchPage() {
           <div className="workspace-control-group">
             <label className="workspace-field-label">编辑提示词</label>
             <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-40" placeholder="例如：@Image 1 在左侧，@Image 2 在右侧，两人合照" />
+            <PromptEnhanceButton value={prompt} onEnhanced={setPrompt} disabled={running} />
             <Button className="mt-3 w-full" onClick={() => void submit()} disabled={running || !prompt.trim() || !references.length}><Sparkles className="size-4" />{running ? "编辑中..." : "执行编辑"}</Button>
             {progress > 0 && <div className="mt-3"><div className="h-2 overflow-hidden rounded bg-muted"><div className="h-full bg-primary transition-[width]" style={{ width: `${progress}%` }} /></div><p className="mt-1 text-xs text-muted-foreground">{status} {progress}%</p></div>}
           </div>

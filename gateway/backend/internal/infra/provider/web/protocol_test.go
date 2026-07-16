@@ -709,7 +709,7 @@ func TestParseVideoConcatenatedJSONFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(values, []int{1, 95, 100}) || postID != "post_1" || result.URL != "https://assets.grok.com/users/user_1/generated/video_1/generated_video.mp4" || result.ContentType != "video/mp4" {
+	if !slices.Equal(values, []int{1, 95, 100}) || postID != "post_1" || result.URL != "https://assets.grok.com/users/user_1/generated/video_1/generated_video.mp4" || result.PosterURL != "https://assets.grok.com/users/user_1/generated/video_1/preview_image.jpg" || result.ContentType != "video/mp4" {
 		t.Fatalf("result = %#v, post = %q, progress = %#v", result, postID, values)
 	}
 }
@@ -759,13 +759,19 @@ func TestGenerateVideoArchivesProtectedOutputWithAccountSession(t *testing.T) {
 			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
 		case "/rest/app-chat/conversations/new":
 			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/users/test/generated/video/generated_video.mp4"}}}}`+"\n")
+			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/users/test/generated/video/generated_video.mp4","thumbnailImageUrl":"`+server.URL+`/users/test/generated/video/preview_image.jpg"}}}}`+"\n")
 		case "/users/test/generated/video/generated_video.mp4":
 			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") || request.Header.Get("Range") != "bytes=0-" {
 				t.Errorf("video download headers = %#v", request.Header)
 			}
 			writer.Header().Set("Content-Type", "video/mp4")
 			_, _ = writer.Write([]byte("video-bytes"))
+		case "/users/test/generated/video/preview_image.jpg":
+			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") {
+				t.Errorf("poster download headers = %#v", request.Header)
+			}
+			writer.Header().Set("Content-Type", "image/jpeg")
+			_, _ = writer.Write([]byte("poster-bytes"))
 		default:
 			http.NotFound(writer, request)
 		}
@@ -789,7 +795,7 @@ func TestGenerateVideoArchivesProtectedOutputWithAccountSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.URL != "/v1/files/video/generated_video.mp4" || result.ContentType != "video/mp4" || string(store.data) != "video-bytes" {
+	if result.URL != "/v1/files/video/generated_video.mp4" || result.PosterURL != "/v1/files/image/preview_image.jpg" || result.ContentType != "video/mp4" || string(store.data) != "video-bytes" || string(store.poster) != "poster-bytes" {
 		t.Fatalf("result=%#v stored=%q", result, store.data)
 	}
 }
@@ -818,11 +824,19 @@ func TestArchiveVideoRejectsHTTPDowngradeAgainstHTTPSBaseURL(t *testing.T) {
 	}
 }
 
-type videoAssetStoreStub struct{ data []byte }
+type videoAssetStoreStub struct {
+	data   []byte
+	poster []byte
+}
 
 func (s *videoAssetStoreStub) SaveVideo(_ context.Context, _ string, _ string, body io.Reader) (string, error) {
 	s.data, _ = io.ReadAll(body)
 	return "/v1/files/video/generated_video.mp4", nil
+}
+
+func (s *videoAssetStoreStub) SaveVideoPoster(_ context.Context, _ string, body []byte) (string, error) {
+	s.poster = append([]byte(nil), body...)
+	return "/v1/files/image/preview_image.jpg", nil
 }
 
 func MarshalJSONBytes(value any) []byte {

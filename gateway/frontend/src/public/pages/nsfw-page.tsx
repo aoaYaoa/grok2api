@@ -9,8 +9,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { ImageGrid } from "@/public/components/image-grid";
-import { VideoGrid } from "@/public/components/video-grid";
+import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
+import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
 import { filesToAssets, type UploadAsset } from "@/public/lib/media";
 
@@ -61,6 +63,7 @@ export function NsfwPage() {
   const videoStartLock = useRef(false);
   const activeImageStreams = useRef(0);
   const extensionPanel = useRef<HTMLElement | null>(null);
+  const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
   async function stopCandidates() {
     imageStartController.current?.abort();
@@ -170,11 +173,23 @@ export function NsfwPage() {
 
   function watchVideo(taskID: string, label: string, prompt: string) {
     const controller = new AbortController();
+    let failureReason = "";
     videoControllers.current.set(taskID, controller);
-    setVideos((items) => [{ id: taskID, taskID, url: "", prompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
-    void streamVideo(key, taskID, (update) => setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, postID: videoPostID(update.url || item.url), status: update.error ? "failed" : update.url || update.done ? "completed" : "running", error: update.error })), controller.signal).catch((error) => {
-      if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "视频连接失败");
+    setVideos((items) => [{ id: taskID, taskID, url: "", posterURL: "", prompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
+    void streamVideo(key, taskID, (update) => {
+      if (update.error) {
+        failureReason = update.error;
+        setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        return;
+      }
+      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" : "running" }));
+    }, controller.signal).catch((error) => {
+      if (!controller.signal.aborted) {
+        failureReason = error instanceof Error ? error.message : "视频连接失败";
+        setVideos((items) => items.filter((item) => item.taskID !== taskID));
+      }
     }).finally(() => {
+      finishVideoTask(taskID, failureReason);
       videoControllers.current.delete(taskID);
       if (!videoControllers.current.size) {
         videoStartLock.current = false;
@@ -214,6 +229,7 @@ export function NsfwPage() {
       if (startController.signal.aborted) return;
       const ids = result.task_ids?.length ? result.task_ids : [result.task_id];
       videoTasks.current = ids;
+      beginVideoGroup(ids);
       setVideoStarting(false);
       ids.forEach((id, index) => watchVideo(id, extension ? "延长视频" : `NSFW 视频 ${index + 1}`, prompt));
     } catch (error) {
@@ -273,6 +289,7 @@ export function NsfwPage() {
               <h2 className="mb-3 text-sm font-semibold">1. 生成候选图</h2>
               <label className="workspace-field-label">候选图提示词</label>
               <Textarea value={imagePrompt} onChange={(event) => setImagePrompt(event.target.value)} className="min-h-32" placeholder="描述要生成的 NSFW 候选图" />
+              <PromptEnhanceButton value={imagePrompt} onEnhanced={setImagePrompt} disabled={imageStarting || imageRunning} />
               <label className="mt-3 block"><span className="workspace-field-label">画面比例</span><Select value={ratio} onValueChange={setRatio}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["16:9", "9:16", "3:2", "2:3", "1:1"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></label>
               {imageStarting ? <Button className="mt-3 w-full" disabled><Sparkles className="size-4" />创建任务中...</Button> : imageRunning ? <Button variant="destructive" className="mt-3 w-full" onClick={() => void stopCandidates()}><Square className="size-4" />停止候选</Button> : <Button className="mt-3 w-full" onClick={() => void generateCandidates()} disabled={!imagePrompt.trim()}><Sparkles className="size-4" />生成 6 张</Button>}
             </div>
@@ -281,6 +298,7 @@ export function NsfwPage() {
               <h2 className="mb-3 text-sm font-semibold">2. 编辑或选择参考图</h2>
               {localImage ? <div className="relative overflow-hidden rounded-md border bg-muted"><img src={localImage.data} alt={localImage.name} className="aspect-video w-full object-contain" /><Button type="button" variant="secondary" size="icon" className="absolute right-2 top-2 size-8 shadow-sm" onClick={() => setLocalImage(null)} aria-label="移除本地参考图"><X className="size-4" /></Button><div className="flex items-center justify-between gap-3 border-t bg-card px-3 py-2 text-xs"><span className="min-w-0 truncate font-medium">{localImage.name}</span><span className="shrink-0 text-muted-foreground">{localImage.mime.replace("image/", "").toUpperCase()}</span></div></div> : selected ? <img src={selected.url} alt={selected.prompt} className="aspect-video w-full rounded-md border bg-muted object-contain" /> : <div className="workspace-empty grid min-h-28 place-items-center text-sm text-muted-foreground">从右侧选择一张候选图</div>}
               <Textarea value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="输入图片编辑要求" />
+              <PromptEnhanceButton value={editPrompt} onEnhanced={setEditPrompt} disabled={editing} />
               <Button variant="outline" className="mt-2 w-full" onClick={() => void editSelected()} disabled={editing || !selected || !editPrompt.trim()}><Sparkles className="size-4" />{editing ? "编辑中..." : "编辑选中图"}</Button>
               <label className="mt-3 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border text-sm hover:bg-accent"><ImagePlus className="size-4" />{localImage ? "更换本地参考图" : "选择本地参考图"}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="hidden" onChange={(event) => { const input = event.currentTarget; void selectLocalReference(input.files || []).finally(() => { input.value = ""; }); }} /></label>
               {localImage && <p className="mt-2 text-xs text-muted-foreground">{formatFileSize(Math.round((localImage.data.length * 3) / 4))} · 待任务上传</p>}
@@ -290,6 +308,7 @@ export function NsfwPage() {
               <h2 className="mb-3 text-sm font-semibold">3. 生成视频</h2>
               <label className="workspace-field-label">视频提示词</label>
               <Textarea value={videoPrompt} onChange={(event) => setVideoPrompt(event.target.value)} className="min-h-28" placeholder="留空使用 spicy，填写则使用 custom" />
+              <PromptEnhanceButton value={videoPrompt} onEnhanced={setVideoPrompt} disabled={videoStarting || videoRunning} />
               <div className="mt-3 grid grid-cols-2 gap-3"><label><span className="workspace-field-label">并发任务</span><Select value={parallel} onValueChange={setParallel}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["1", "2", "3", "4"].map((value) => <SelectItem key={value} value={value}>{value} 路</SelectItem>)}</SelectContent></Select></label><label><span className="workspace-field-label">分辨率</span><Select value={resolution} onValueChange={setResolution}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["480p", "720p"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></label><label className="col-span-2"><span className="workspace-field-label">视频时长</span><Select value={length} onValueChange={setLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label></div>
               {videoStarting ? <Button className="mt-3 w-full" disabled><Play className="size-4" />上传参考图并创建任务...</Button> : videoRunning ? <Button variant="destructive" className="mt-3 w-full" onClick={() => void stopVideoRun()}><Square className="size-4" />中断视频</Button> : <Button className="mt-3 w-full" onClick={() => void generateVideos()} disabled={!selected && !localImage}><Play className="size-4" />生成视频</Button>}
             </div>
@@ -298,7 +317,7 @@ export function NsfwPage() {
           <section ref={extensionPanel} className="workspace-panel scroll-mt-20 p-4">
             <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><Scissors className="size-4 text-info" />视频时间轴延长</h2>
             {activeVideo?.url ? <>
-              <video src={activeVideo.url} controls playsInline className="aspect-video w-full rounded-md bg-black" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
+              <VideoPlayer url={activeVideo.url} posterURL={activeVideo.posterURL} label={activeVideo.displayName} className="aspect-video w-full rounded-md" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
               <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3">
                 <label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-3 w-full" /></label>
                 <label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label>
@@ -306,6 +325,7 @@ export function NsfwPage() {
               <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
               <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
               <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
+              <PromptEnhanceButton value={extendPrompt} onEnhanced={setExtendPrompt} disabled={videoStarting || videoRunning} />
               <Button className="mt-3 w-full" onClick={() => void generateVideos(activeVideo)} disabled={videoStarting || videoRunning || !activeVideo.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
               {!activeVideo.postID && <p className="mt-2 text-xs text-warning">当前结果缺少 postId，无法延长</p>}
             </> : <div className="workspace-empty grid min-h-48 place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}

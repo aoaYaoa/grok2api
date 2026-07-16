@@ -109,13 +109,56 @@ test("video cache dialog does not merge the whole cache into session history", a
 
 test("video cards lazy-load visible media and keep selected rings inside cards", async () => {
   const grid = await readFile(path.join(root, "src/public/components/video-grid.tsx"), "utf8");
+  const videoAPI = await readFile(path.join(root, "src/public/features/video/video-api.ts"), "utf8");
   const imageGrid = await readFile(path.join(root, "src/public/components/image-grid.tsx"), "utf8");
 
   assert.match(grid, /IntersectionObserver/);
-  assert.match(grid, /preload="none"/);
+  assert.match(grid, /#t=0\.001/);
+  assert.match(grid, /preload="auto"/);
+  assert.match(grid, /poster=\{posterURL \|\| undefined\}/);
   assert.match(grid, /video-preview-placeholder/);
+  assert.match(grid, /export function VideoPlayer/);
+  assert.match(videoAPI, /posterURL/);
+  assert.match(videoAPI, /data\.poster_url/);
   assert.match(grid, /ring-inset/);
   assert.match(imageGrid, /ring-inset/);
+});
+
+test("failed video tasks are removed and reported as one task-group notice", async () => {
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+  const failures = await readFile(path.join(root, "src/public/features/video/video-failure-notice.ts"), "utf8");
+
+  for (const source of [video, nsfw]) {
+    assert.match(source, /useVideoFailureNotice/);
+    assert.match(source, /beginVideoGroup\(ids\)/);
+    assert.match(source, /finishVideoTask\(taskID/);
+    assert.match(source, /items\.filter\(\(item\) => item\.taskID !== taskID\)/);
+    assert.doesNotMatch(source, /status: update\.error \? "failed"/);
+  }
+  assert.match(failures, /pending: new Set\(taskIDs\)/);
+  assert.match(failures, /个视频任务失败，已从列表移除/);
+});
+
+test("every visual prompt editor exposes the shared prompt enhancement action", async () => {
+  const pages = {
+    "imagine-page.tsx": 2,
+    "workbench-page.tsx": 1,
+    "video-page.tsx": 2,
+    "nsfw-page.tsx": 4,
+  };
+
+  for (const [page, minimum] of Object.entries(pages)) {
+    const source = await readFile(path.join(root, "src/public/pages", page), "utf8");
+    const count = source.match(/<PromptEnhanceButton/g)?.length || 0;
+    assert.ok(count >= minimum, `${page} must expose prompt enhancement for each visual prompt field`);
+  }
+
+  const enhancer = await readFile(path.join(root, "src/public/components/prompt-enhance-button.tsx"), "utf8");
+  assert.match(enhancer, /publicEndpoints\.promptEnhance/);
+  assert.match(enhancer, /优化中/);
+  assert.match(enhancer, /valueRef\.current\.trim\(\) !== prompt/);
+  assert.match(enhancer, /disabled=\{disabled \|\| loading \|\| !value\.trim\(\)\}/);
 });
 
 test("mobile dialogs, toasts, heading actions, and tabs keep controls inside their surfaces", async () => {

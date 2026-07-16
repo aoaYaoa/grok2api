@@ -291,3 +291,13 @@ func (r *videoUsageRepository) MarkMediaJobUsageRecorded(_ context.Context, _ st
 	r.job.UsageRecordedAt = &recordedAt
 	return nil
 }
+
+func TestVideoPosterMetadataRoundTrip(t *testing.T) {
+	raw := withVideoPosterURL(`{"reference_urls":[]}`, "/v1/files/image/poster.jpg")
+	if got := videoPosterURL(media.Job{InputJSON: raw}); got != "/v1/files/image/poster.jpg" {
+		t.Fatalf("poster URL = %q, input = %s", got, raw)
+	}
+	if got := withVideoPosterURL(raw, ""); got != raw {
+		t.Fatalf("empty poster changed metadata: %s", got)
+	}
+}

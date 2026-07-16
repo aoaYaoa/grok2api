@@ -8,8 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
-import { VideoGrid } from "@/public/components/video-grid";
+import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
+import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { resolveParentPost } from "@/public/features/image/image-api";
+import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, listCachedVideos, renameVideo, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
 import { extractParentPostID, filesToAssets, imageSource, type UploadAsset } from "@/public/lib/media";
 
@@ -44,6 +46,7 @@ export function VideoPage() {
   const startLock = useRef(false);
   const startController = useRef<AbortController | null>(null);
   const extensionPanel = useRef<HTMLElement | null>(null);
+  const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
   useEffect(() => {
     const paste = (event: ClipboardEvent) => {
@@ -70,11 +73,23 @@ export function VideoPage() {
 
   function watch(taskID: string, label: string, taskPrompt: string) {
     const controller = new AbortController();
+    let failureReason = "";
     controllers.current.set(taskID, controller);
-    setVideos((items) => [{ id: taskID, taskID, url: "", prompt: taskPrompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
-    void streamVideo(key, taskID, (update) => setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, postID: videoPostID(update.url || item.url), status: update.error ? "failed" : update.url || update.done ? "completed" : "running", error: update.error })), controller.signal).catch((error) => {
-      if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "视频连接失败");
+    setVideos((items) => [{ id: taskID, taskID, url: "", posterURL: "", prompt: taskPrompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
+    void streamVideo(key, taskID, (update) => {
+      if (update.error) {
+        failureReason = update.error;
+        setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        return;
+      }
+      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" : "running" }));
+    }, controller.signal).catch((error) => {
+      if (!controller.signal.aborted) {
+        failureReason = error instanceof Error ? error.message : "视频连接失败";
+        setVideos((items) => items.filter((item) => item.taskID !== taskID));
+      }
     }).finally(() => {
+      finishVideoTask(taskID, failureReason);
       controllers.current.delete(taskID);
       if (!controllers.current.size) {
         startLock.current = false;
@@ -97,6 +112,7 @@ export function VideoPage() {
       if (controller.signal.aborted) return;
       const ids = result.task_ids?.length ? result.task_ids : [result.task_id];
       taskIDs.current = ids;
+      beginVideoGroup(ids);
       setStarting(false);
       ids.forEach((id, index) => watch(id, bodyOverride ? "延长视频" : `视频 ${videos.length + index + 1}`, taskPrompt));
     } catch (error) {
@@ -177,6 +193,7 @@ export function VideoPage() {
             </div>
             <div className="workspace-control-group">
               <label className="workspace-field-label">视频提示词</label><Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-32" placeholder="描述镜头、动作和风格" />
+              <PromptEnhanceButton value={prompt} onEnhanced={setPrompt} disabled={starting || running} />
               <div className="mt-3 grid grid-cols-2 gap-3">
                 <label><span className="workspace-field-label">画面比例</span><Select value={ratio} onValueChange={setRatio}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["3:2", "2:3", "16:9", "9:16", "1:1"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></label>
                 <label><span className="workspace-field-label">视频时长</span><Select value={length} onValueChange={setLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
@@ -191,11 +208,12 @@ export function VideoPage() {
           <section ref={extensionPanel} className="workspace-panel scroll-mt-20 p-4">
           <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><Scissors className="size-4 text-info" />当前视频与延长</h2>
           {active?.url ? <>
-            <video src={active.url} controls playsInline className="aspect-video w-full rounded-md bg-black" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
+            <VideoPlayer url={active.url} posterURL={active.posterURL} label={active.displayName} className="aspect-video w-full rounded-md" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
             <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3"><label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-3 w-full" /></label><label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label></div>
             <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
             <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
             <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
+            <PromptEnhanceButton value={extendPrompt} onEnhanced={setExtendPrompt} disabled={starting || running} />
             <Button className="mt-3 w-full" onClick={() => void extend()} disabled={starting || running || !active.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
             {!active.postID && <p className="mt-2 text-xs text-warning">从缓存选择带 postId 的视频后可延长</p>}
           </> : <div className="workspace-empty grid min-h-64 place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}

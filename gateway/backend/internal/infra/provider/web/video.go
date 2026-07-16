@@ -135,7 +135,7 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 // ArchiveVideo 使用生成账号的 SSO 会话下载受保护的视频，并返回本站文件地址。
 func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credential, result provider.VideoResult) (provider.VideoResult, error) {
 	if strings.HasPrefix(strings.TrimSpace(result.URL), "/v1/files/video/") {
-		return result, nil
+		return a.archiveVideoPoster(ctx, credential, result), nil
 	}
 	if a.videos == nil {
 		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingStorage, fmt.Errorf("视频媒体存储未配置"))
@@ -160,7 +160,7 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 			if result.ContentType == "" {
 				result.ContentType = "video/mp4"
 			}
-			return result, nil
+			return a.archiveVideoPoster(ctx, credential, result), nil
 		}
 		lastErr, lastStage = attemptErr, stage
 		if !retryable || downloadCtx.Err() != nil || attempt+1 >= mediaOutputAttempts {
@@ -172,6 +172,32 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 		}
 	}
 	return provider.VideoResult{}, provider.NewMediaPostProcessingError(lastStage, lastErr)
+}
+
+func (a *Adapter) archiveVideoPoster(ctx context.Context, credential account.Credential, result provider.VideoResult) provider.VideoResult {
+	posterURL := strings.TrimSpace(result.PosterURL)
+	if posterURL == "" || strings.HasPrefix(posterURL, "/v1/files/image/") {
+		return result
+	}
+	store, ok := a.videos.(provider.VideoPosterStore)
+	if !ok {
+		result.PosterURL = ""
+		return result
+	}
+	raw, err := a.downloadImage(ctx, credential, posterURL)
+	if err != nil {
+		a.log().Warn("video_poster_download_failed", "url", posterURL, "error", err)
+		result.PosterURL = ""
+		return result
+	}
+	localURL, err := store.SaveVideoPoster(ctx, posterURL, raw)
+	if err != nil {
+		a.log().Warn("video_poster_store_failed", "url", posterURL, "error", err)
+		result.PosterURL = ""
+		return result
+	}
+	result.PosterURL = localURL
+	return result
 }
 
 func (a *Adapter) archiveVideoAttempt(ctx context.Context, accountID uint64, token, rawURL, fallbackContentType string) (string, provider.MediaPostProcessingStage, bool, error) {
@@ -318,6 +344,9 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		moderated, _ := stream["moderated"].(bool)
 		if moderated {
 			return false, nil
+		}
+		if value, _ := stream["thumbnailImageUrl"].(string); value != "" {
+			result.PosterURL = absoluteVideoAssetURL(value)
 		}
 		if value, _ := stream["videoUrl"].(string); value != "" {
 			result.URL = absoluteVideoAssetURL(value)

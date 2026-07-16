@@ -18,6 +18,7 @@ import (
 const (
 	maxPromptResponseBytes = 4 << 20
 	maxPromptTasks         = 256
+	promptEnhanceModel     = "grok-chat-fast"
 )
 
 const promptEnhanceSystemPrompt = `你是一个智能视觉提示词增强器 + 敏感概念翻译器 + 图生视频适配器，专为Grok Imagine（FLUX.1）及官方Img2Vid功能深度优化。
@@ -147,7 +148,7 @@ func (h *Handler) promptEnhance(c *gin.Context) {
 	}()
 
 	body, err := json.Marshal(gin.H{
-		"model": "grok-4.1-fast", "stream": false, "temperature": temperature, "top_p": 0.95,
+		"model": promptEnhanceModel, "stream": false, "temperature": temperature, "top_p": 0.95,
 		"messages": []gin.H{
 			{"role": "system", "content": promptEnhanceSystemPrompt},
 			{"role": "user", "content": promptEnhanceUserMessage(request.Prompt)},
@@ -158,7 +159,7 @@ func (h *Handler) promptEnhance(c *gin.Context) {
 		return
 	}
 	result, err := h.promptGateway.CreateChatCompletion(taskContext, gateway.Input{
-		RequestID: requestID, ClientKey: clientKey, PublicModel: "grok-4.1-fast", Body: body, Streaming: false,
+		RequestID: requestID, ClientKey: clientKey, PublicModel: promptEnhanceModel, Body: body, Streaming: false,
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || taskContext.Err() != nil {
@@ -173,7 +174,7 @@ func (h *Handler) promptEnhance(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"enhanced_prompt": enhanced, "model": "grok-4.1-fast", "request_id": requestID})
+	c.JSON(http.StatusOK, gin.H{"enhanced_prompt": enhanced, "model": promptEnhanceModel, "request_id": requestID})
 }
 
 func (h *Handler) promptEnhanceStop(c *gin.Context) {
@@ -212,6 +213,7 @@ func (h *Handler) promptEnhanceStop(c *gin.Context) {
 func promptEnhanceUserMessage(prompt string) string {
 	return "请严格按系统模板输出结果，并仅处理 RAW_PROMPT 中的内容。\n" +
 		"如果 RAW_PROMPT 中出现 `[[IMAGE_TAG_n]]` 占位符，返回结果时必须保留这些占位符，逐字原样输出。\n" +
+		"如果 RAW_PROMPT 中出现 `@Image 1`、`@Image 2` 这类参考图标记，也必须逐字保留标记及其顺序。\n" +
 		"RAW_PROMPT:\n<RAW_PROMPT>\n" + prompt + "\n</RAW_PROMPT>"
 }
 

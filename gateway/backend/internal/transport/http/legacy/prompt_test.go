@@ -129,12 +129,12 @@ func TestPromptEnhanceUsesGoGatewayAndPreservesContract(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.EnhancedPrompt != "enhanced result" || response.Model != "grok-4.1-fast" || response.RequestID != "body-request" {
+	if response.EnhancedPrompt != "enhanced result" || response.Model != "grok-chat-fast" || response.RequestID != "body-request" {
 		t.Fatalf("response=%+v", response)
 	}
 
 	input := backend.lastInput(t)
-	if input.PublicModel != "grok-4.1-fast" || input.RequestID != "body-request" || input.Streaming {
+	if input.PublicModel != "grok-chat-fast" || input.RequestID != "body-request" || input.Streaming {
 		t.Fatalf("input=%#v", input)
 	}
 	if input.ClientKey.ID != 42 || input.ClientKey.Name != "legacy-prompt" {
@@ -153,7 +153,7 @@ func TestPromptEnhanceUsesGoGatewayAndPreservesContract(t *testing.T) {
 	if err := json.Unmarshal(input.Body, &upstream); err != nil {
 		t.Fatalf("decode gateway body: %v", err)
 	}
-	if upstream.Model != "grok-4.1-fast" || upstream.Stream || upstream.Temperature != 0.7 || upstream.TopP != 0.95 {
+	if upstream.Model != "grok-chat-fast" || upstream.Stream || upstream.Temperature != 0.7 || upstream.TopP != 0.95 {
 		t.Fatalf("upstream=%+v", upstream)
 	}
 	if len(upstream.Messages) != 2 || upstream.Messages[0].Role != "system" || upstream.Messages[1].Role != "user" {
@@ -165,6 +165,7 @@ func TestPromptEnhanceUsesGoGatewayAndPreservesContract(t *testing.T) {
 	}
 	wantUser := "请严格按系统模板输出结果，并仅处理 RAW_PROMPT 中的内容。\n" +
 		"如果 RAW_PROMPT 中出现 `[[IMAGE_TAG_n]]` 占位符，返回结果时必须保留这些占位符，逐字原样输出。\n" +
+		"如果 RAW_PROMPT 中出现 `@Image 1`、`@Image 2` 这类参考图标记，也必须逐字保留标记及其顺序。\n" +
 		"RAW_PROMPT:\n<RAW_PROMPT>\n[[IMAGE_TAG_1]] draw this\n</RAW_PROMPT>"
 	if upstream.Messages[1].Content != wantUser {
 		t.Fatalf("user message=%q", upstream.Messages[1].Content)

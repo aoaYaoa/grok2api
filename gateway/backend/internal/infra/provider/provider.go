@@ -246,6 +246,7 @@ type VideoRequest struct {
 
 type VideoResult struct {
 	URL         string
+	PosterURL   string
 	ContentType string
 }
 
@@ -345,6 +346,10 @@ type ImageAssetReader interface {
 // VideoAssetStore 将受上游鉴权保护的视频流保存为本站可稳定读取的文件。
 type VideoAssetStore interface {
 	SaveVideo(ctx context.Context, sourceURL, mimeType string, body io.Reader) (string, error)
+}
+
+type VideoPosterStore interface {
+	SaveVideoPoster(ctx context.Context, sourceURL string, body []byte) (string, error)
 }
 
 type VideoAdapter interface {
