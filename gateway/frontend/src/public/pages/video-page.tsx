@@ -1,5 +1,5 @@
 import { ImagePlus, Library, Play, Plus, RotateCcw, Scissors, Square, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { resolveParentPost } from "@/public/features/image/image-api";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, listCachedVideos, renameVideo, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
-import { extractParentPostID, filesToAssets, imageSource, type UploadAsset } from "@/public/lib/media";
+import { extractParentPostID, filesToAssets, imageSource, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -48,14 +48,23 @@ export function VideoPage() {
   const extensionPanel = useRef<HTMLElement | null>(null);
   const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
+  const appendReferenceFiles = useCallback(async (files: FileList | File[]) => {
+    try {
+      const items = await filesToAssets(files, Math.max(0, 8 - references.length));
+      setReferences((value) => [...value, ...items].slice(0, 8));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取参考图失败");
+    }
+  }, [references.length]);
+
   useEffect(() => {
     const paste = (event: ClipboardEvent) => {
-      const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
-      if (files.length) void filesToAssets(files, Math.max(0, 8 - references.length)).then((items) => setReferences((value) => [...value, ...items].slice(0, 8)));
+      const files = Array.from(event.clipboardData?.files || []).filter(isImageUploadFile);
+      if (files.length) void appendReferenceFiles(files);
     };
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
-  }, [references.length]);
+  }, [appendReferenceFiles]);
 
   async function addParent() {
     const id = extractParentPostID(parentInput);
@@ -188,7 +197,7 @@ export function VideoPage() {
         <aside className="workspace-controls">
           <div className="workspace-panel p-4">
             <div className="workspace-control-group">
-              <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*" multiple className="hidden" onChange={(event) => void filesToAssets(event.target.files || [], Math.max(0, 8 - references.length)).then((items) => setReferences((value) => [...value, ...items].slice(0, 8)))} /></label><div className="flex min-w-0 flex-1 gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="添加 parentPostId"><Plus className="size-4" /></Button></div></div>
+              <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} /></label><div className="flex min-w-0 flex-1 gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="添加 parentPostId"><Plus className="size-4" /></Button></div></div>
             {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button data-slot="icon-button" className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
             </div>
             <div className="workspace-control-group">

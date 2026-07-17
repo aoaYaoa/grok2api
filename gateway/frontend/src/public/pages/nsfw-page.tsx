@@ -14,9 +14,9 @@ import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
-import { filesToAssets, type UploadAsset } from "@/public/lib/media";
+import { filesToAssets, isHEICFile, type UploadAsset } from "@/public/lib/media";
 
-const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"]);
 const maxLocalImageBytes = 20 * 1024 * 1024;
 
 function formatFileSize(bytes: number) {
@@ -153,8 +153,8 @@ export function NsfwPage() {
   async function selectLocalReference(files: FileList | File[]) {
     const file = Array.from(files)[0];
     if (!file) return;
-    if (!supportedLocalImageTypes.has(file.type.toLowerCase())) {
-      toast.error("仅支持 JPEG、PNG、WebP 或 GIF 图片");
+    if (!supportedLocalImageTypes.has(file.type.toLowerCase()) && !isHEICFile(file)) {
+      toast.error("仅支持 JPEG、PNG、WebP、GIF 或 HEIC 图片");
       return;
     }
     if (file.size > maxLocalImageBytes) {
@@ -300,7 +300,7 @@ export function NsfwPage() {
               <Textarea value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="输入图片编辑要求" />
               <PromptEnhanceButton value={editPrompt} onEnhanced={setEditPrompt} disabled={editing} />
               <Button variant="outline" className="mt-2 w-full" onClick={() => void editSelected()} disabled={editing || !selected || !editPrompt.trim()}><Sparkles className="size-4" />{editing ? "编辑中..." : "编辑选中图"}</Button>
-              <label className="mt-3 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border text-sm hover:bg-accent"><ImagePlus className="size-4" />{localImage ? "更换本地参考图" : "选择本地参考图"}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="hidden" onChange={(event) => { const input = event.currentTarget; void selectLocalReference(input.files || []).finally(() => { input.value = ""; }); }} /></label>
+              <label className="mt-3 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border text-sm hover:bg-accent"><ImagePlus className="size-4" />{localImage ? "更换本地参考图" : "选择本地参考图"}<input type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif" className="hidden" onChange={(event) => { const input = event.currentTarget; void selectLocalReference(input.files || []).finally(() => { input.value = ""; }); }} /></label>
               {localImage && <p className="mt-2 text-xs text-muted-foreground">{formatFileSize(Math.round((localImage.data.length * 3) / 4))} · 待任务上传</p>}
             </div>
 

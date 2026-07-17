@@ -74,7 +74,7 @@ test("NSFW local references show a validated preview before task upload", async 
   const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
 
   assert.match(nsfw, /const \[localImage, setLocalImage\] = useState<UploadAsset \| null>\(null\)/);
-  assert.match(nsfw, /accept="image\/jpeg,image\/png,image\/webp,image\/gif"/);
+  assert.match(nsfw, /accept="image\/jpeg,image\/png,image\/webp,image\/gif,image\/heic,image\/heif/);
   assert.match(nsfw, /localImage\.data/);
   assert.match(nsfw, /alt=\{localImage\.name\}/);
   assert.match(nsfw, /setLocalImage\(null\)/);
@@ -82,6 +82,24 @@ test("NSFW local references show a validated preview before task upload", async 
   assert.match(nsfw, /source_image_url: extension \? undefined : source/);
   assert.doesNotMatch(nsfw, /\n\s+image_url: extension \? undefined : source/);
   assert.doesNotMatch(nsfw, /已加载本地参考图/);
+});
+
+test("public media uploads convert HEIC references before preview and submission", async () => {
+  const packageJSON = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const media = await readFile(path.join(root, "src/public/lib/media.ts"), "utf8");
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const workbench = await readFile(path.join(root, "src/public/pages/workbench-page.tsx"), "utf8");
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+
+  assert.ok(packageJSON.dependencies.heic2any);
+  assert.match(media, /isHEICFile/);
+  assert.match(media, /import\("heic2any"\)/);
+  assert.match(media, /toType:\s*"image\/jpeg"/);
+  assert.match(media, /HEIC 图片转换失败/);
+  assert.match(media, /isImageUploadFile/);
+  assert.match(video, /isImageUploadFile/);
+  assert.match(workbench, /isImageUploadFile/);
+  assert.match(nsfw, /image\/heic,image\/heif/);
 });
 
 test("public app retires legacy service workers and PWA caches", async () => {

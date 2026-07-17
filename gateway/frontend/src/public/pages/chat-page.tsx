@@ -97,6 +97,16 @@ export function ChatPage() {
     await run(next);
   }
 
+  async function selectFiles(input: HTMLInputElement) {
+    try {
+      setFiles(await filesToAssets(input.files || []));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取附件失败");
+    } finally {
+      input.value = "";
+    }
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -145,7 +155,7 @@ export function ChatPage() {
         <div className="rounded-2xl bg-secondary p-1.5 shadow-none ring-1 ring-black/5 dark:ring-white/10">
           <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={onKeyDown} className="max-h-36 min-h-12 resize-none border-0 bg-transparent px-2.5 py-2 shadow-none focus-visible:ring-0" placeholder="询问任何内容" />
           <div className="flex min-w-0 items-center gap-0.5 px-0.5 pb-0.5">
-            <label className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="添加附件"><FilePlus2 className="size-4" /><input type="file" multiple className="hidden" onChange={(event) => void filesToAssets(event.target.files || []).then(setFiles)} /></label>
+            <label className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="添加附件"><FilePlus2 className="size-4" /><input type="file" multiple className="hidden" onChange={(event) => void selectFiles(event.currentTarget)} /></label>
             <Select value={model} onValueChange={setModel}><SelectTrigger className="h-9 min-w-0 max-w-44 border-0 bg-transparent px-2 text-xs shadow-none focus-visible:ring-0"><SelectValue placeholder="选择模型" /></SelectTrigger><SelectContent>{models.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
             <Button variant="ghost" size="icon" className={cn("size-9 shrink-0", settings && "bg-accent text-foreground")} onClick={() => setSettings((value) => !value)} aria-label="聊天设置"><Settings2 className="size-4" /></Button>
             <div className="ml-auto shrink-0">{running ? <Button size="icon" variant="destructive" className="size-9 rounded-full" onClick={() => abortRef.current?.abort()} aria-label="停止生成"><Square className="size-4" /></Button> : <Button size="icon" className="size-9 rounded-full" onClick={() => void send()} disabled={!prompt.trim() && !files.length} aria-label="发送"><Send className="size-4" /></Button>}</div>
