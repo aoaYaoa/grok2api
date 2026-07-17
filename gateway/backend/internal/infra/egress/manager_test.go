@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -178,6 +180,82 @@ func TestConfiguredWebNodeKeepsChromeBrowserTransport(t *testing.T) {
 	defer lease.Release()
 	if _, ok := lease.client.(*browserClient); !ok || lease.browser == nil || lease.Scope != domain.ScopeWeb {
 		t.Fatalf("web lease client=%T browser=%p scope=%q", lease.client, lease.browser, lease.Scope)
+	}
+}
+
+func TestAcquireCredentialRendersAccountProxyAndOverridesNodeCookie(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeCookie, err := cipher.Encrypt("cf_clearance=node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountCookie, err := cipher.Encrypt("cf_clearance=account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
+		EncryptedProxyURL: proxyURL, EncryptedCloudflareCookie: nodeCookie,
+	}}}, cipher)
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: accountCookie,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.ProxyURL != "socks5h://Default.grok_web_42:token@resin:2260" {
+		t.Fatalf("proxy URL = %q", lease.ProxyURL)
+	}
+	if lease.CFCookies != "cf_clearance=account" || !lease.sticky {
+		t.Fatalf("cookies=%q sticky=%v", lease.CFCookies, lease.sticky)
+	}
+}
+
+func TestConsoleFallsBackToWebAndSharesSSOProxyIdentity(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "shared-web-console-sso"
+	encryptedToken, err := cipher.Encrypt(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 7, Name: "shared-web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL,
+	}}}, cipher)
+	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer web.Release()
+	console, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
+		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer console.Release()
+	wantAccount := "sso_" + security.HashToken(token)[:32]
+	if web.NodeID != 7 || console.NodeID != 7 {
+		t.Fatalf("nodes web=%d console=%d", web.NodeID, console.NodeID)
+	}
+	if !strings.Contains(web.ProxyURL, "Default."+wantAccount+":") || web.ProxyURL != console.ProxyURL {
+		t.Fatalf("proxy identities web=%q console=%q", web.ProxyURL, console.ProxyURL)
 	}
 }
 

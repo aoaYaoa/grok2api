@@ -20,6 +20,6 @@ func (a *Adapter) Definition() provider.Definition {
 		Conversation: provider.ConversationSurface{
 			Responses: true, ChatCompletions: true, Messages: true,
 		},
-		Inference: provider.InferencePolicy{Usage: provider.UsageUpstream},
+		Inference: provider.InferencePolicy{Usage: provider.UsageUpstream, RetryForbiddenAsEgress: true},
 	}
 }

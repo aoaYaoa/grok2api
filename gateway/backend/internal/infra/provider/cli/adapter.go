@@ -109,7 +109,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, request.Method, a.url(request.Path), bodyReader)
+	requestCtx := infraegress.WithAccount(ctx, string(account.ProviderBuild), request.Credential.ID)
+	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.url(request.Path), bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +247,8 @@ func (a *Adapter) ListModels(ctx context.Context, credential account.Credential)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url("/models"), nil)
+	requestCtx := infraegress.WithAccount(ctx, string(account.ProviderBuild), credential.ID)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, a.url("/models"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +332,8 @@ func (a *Adapter) RefreshCredential(ctx context.Context, credential account.Cred
 	if strings.TrimSpace(refreshToken) == "" {
 		return provider.RefreshedCredential{}, &provider.CredentialRefreshError{Code: "missing_refresh_token", Permanent: true}
 	}
-	tokens, err := a.oauth.refresh(ctx, refreshToken)
+	refreshCtx := infraegress.WithAccount(ctx, string(account.ProviderBuild), credential.ID)
+	tokens, err := a.oauth.refresh(refreshCtx, refreshToken)
 	if err != nil {
 		return provider.RefreshedCredential{}, err
 	}
@@ -515,7 +518,8 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 	if query != "" {
 		endpoint += "?" + query
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	requestCtx := infraegress.WithAccount(ctx, string(account.ProviderBuild), credential.ID)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return account.Billing{}, err
 	}

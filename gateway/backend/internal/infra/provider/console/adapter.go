@@ -129,7 +129,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	cfg := a.config()
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
-	lease, err := a.egress.Acquire(requestCtx, egressdomain.ScopeConsole, strconv.FormatUint(request.Credential.ID, 10))
+	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeConsole, request.Credential)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -278,13 +278,14 @@ func applyHeaders(request *http.Request, token, configuredUserAgent string, leas
 	if userAgent == "" {
 		userAgent = strings.TrimSpace(configuredUserAgent)
 	}
-	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Accept", "*/*")
 	request.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	request.Header.Set("Authorization", "Bearer anonymous")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Cookie", infraegress.BuildSSOCookie(token, lease.CFCookies))
 	request.Header.Set("Origin", "https://console.x.ai")
+	request.Header.Set("Priority", "u=1, i")
 	request.Header.Set("Referer", "https://console.x.ai/")
 	request.Header.Set("Sec-Fetch-Dest", "empty")
 	request.Header.Set("Sec-Fetch-Mode", "cors")

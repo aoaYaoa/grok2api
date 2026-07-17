@@ -1,0 +1,24 @@
+services:
+  warp2:
+    image: caomingjun/warp:latest
+    environment:
+      WARP_SLEEP: "2"
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  warp3:
+    image: caomingjun/warp:latest
+    environment:
+      WARP_SLEEP: "2"
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  warp4:
+    image: caomingjun/warp:latest
+    environment:
+      WARP_SLEEP: "2"
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped

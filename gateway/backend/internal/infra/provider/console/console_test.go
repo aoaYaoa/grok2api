@@ -145,6 +145,9 @@ func TestAdapterForwardsConsoleHeadersAndNormalizedBody(t *testing.T) {
 		if request.Header.Get("Authorization") != "Bearer anonymous" || request.Header.Get("x-cluster") != "https://us-east-1.api.x.ai" {
 			t.Errorf("headers = %#v", request.Header)
 		}
+		if request.Header.Get("Accept") != "*/*" || request.Header.Get("Priority") != "u=1, i" {
+			t.Errorf("browser headers = %#v", request.Header)
+		}
 		cookie := request.Header.Get("Cookie")
 		if !strings.Contains(cookie, "sso=test-sso") || !strings.Contains(cookie, "sso-rw=test-sso") {
 			t.Errorf("cookie = %q", cookie)

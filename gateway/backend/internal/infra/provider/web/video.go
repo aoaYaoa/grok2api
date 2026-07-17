@@ -64,7 +64,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", request.Credential.ID))
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
@@ -345,7 +345,7 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 	var lastErr error
 	lastStage := provider.MediaPostProcessingDownload
 	for attempt := 0; attempt < mediaOutputAttempts; attempt++ {
-		localURL, stage, retryable, attemptErr := a.archiveVideoAttempt(downloadCtx, credential.ID, token, parsed.String(), result.ContentType)
+		localURL, stage, retryable, attemptErr := a.archiveVideoAttempt(downloadCtx, credential, token, parsed.String(), result.ContentType)
 		if attemptErr == nil {
 			result.URL = localURL
 			if result.ContentType == "" {
@@ -391,8 +391,8 @@ func (a *Adapter) archiveVideoPoster(ctx context.Context, credential account.Cre
 	return result
 }
 
-func (a *Adapter) archiveVideoAttempt(ctx context.Context, accountID uint64, token, rawURL, fallbackContentType string) (string, provider.MediaPostProcessingStage, bool, error) {
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWebAsset, fmt.Sprintf("%d", accountID))
+func (a *Adapter) archiveVideoAttempt(ctx context.Context, credential account.Credential, token, rawURL, fallbackContentType string) (string, provider.MediaPostProcessingStage, bool, error) {
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWebAsset, credential)
 	if err != nil {
 		return "", provider.MediaPostProcessingDownload, true, err
 	}

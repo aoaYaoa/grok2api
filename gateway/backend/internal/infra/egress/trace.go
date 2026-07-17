@@ -2,6 +2,8 @@ package egress
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -24,6 +26,29 @@ type Trace struct {
 }
 
 type traceContextKey struct{}
+type accountContextKey struct{}
+
+func WithAccount(ctx context.Context, provider string, accountID uint64) context.Context {
+	if ctx == nil || strings.TrimSpace(provider) == "" || accountID == 0 {
+		return ctx
+	}
+	return WithAccountIdentity(ctx, strings.TrimSpace(provider)+"_"+fmt.Sprintf("%d", accountID))
+}
+
+func WithAccountIdentity(ctx context.Context, identity string) context.Context {
+	if ctx == nil || strings.TrimSpace(identity) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, accountContextKey{}, strings.TrimSpace(identity))
+}
+
+func AccountFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(accountContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
 
 // WithTrace 为一次网关请求创建或复用并发安全的出口选择轨迹。
 func WithTrace(ctx context.Context) (context.Context, *Trace) {

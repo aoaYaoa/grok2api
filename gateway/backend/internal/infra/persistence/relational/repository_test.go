@@ -65,6 +65,25 @@ func TestAccountRepositoryAppliesRoutingDefaults(t *testing.T) {
 	}
 }
 
+func TestAccountRepositoryPersistsAndPreservesCloudflareCookie(t *testing.T) {
+	repository := NewAccountRepository(openTestDatabase(t))
+	ctx := context.Background()
+	created, wasCreated, err := repository.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web-cookie", SourceKey: "web-cookie",
+		EncryptedAccessToken: testEncryptedToken, EncryptedCloudflareCookie: "encrypted-cookie", AuthStatus: account.AuthStatusActive,
+	})
+	if err != nil || !wasCreated || created.EncryptedCloudflareCookie != "encrypted-cookie" {
+		t.Fatalf("created=%#v wasCreated=%v err=%v", created, wasCreated, err)
+	}
+	updated, wasCreated, err := repository.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web-cookie-updated", SourceKey: "web-cookie",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive,
+	})
+	if err != nil || wasCreated || updated.EncryptedCloudflareCookie != "encrypted-cookie" {
+		t.Fatalf("updated=%#v wasCreated=%v err=%v", updated, wasCreated, err)
+	}
+}
+
 func TestAccountRepositoryUpsertsImportChunkInOneBatch(t *testing.T) {
 	ctx := context.Background()
 	repo := NewAccountRepository(openTestDatabase(t))

@@ -10,7 +10,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -147,7 +146,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, strconv.FormatUint(credential.ID, 10))
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}
@@ -219,7 +218,7 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, strconv.FormatUint(credential.ID, 10))
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, credential)
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}

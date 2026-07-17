@@ -21,7 +21,7 @@ func (a *Adapter) CreateVoiceToken(ctx context.Context, request provider.VoiceTo
 	if err != nil {
 		return provider.VoiceTokenResult{}, err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", request.Credential.ID))
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
 		return provider.VoiceTokenResult{}, err
 	}
