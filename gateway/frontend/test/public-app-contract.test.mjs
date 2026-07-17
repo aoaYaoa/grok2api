@@ -58,7 +58,7 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.match(nsfw, /type="number"/);
   assert.match(video, /onExtend=/);
   assert.match(video, /scrollIntoView/);
-  assert.match(video, /source_task_id: active\.taskID/);
+  assert.match(video, /source_task_id: extensionSource\.taskID/);
   assert.match(video, /extendLength/);
   assert.match(video, /disabled=\{!prompt\.trim\(\) && !references\.length\}/);
   assert.match(videoAPI, /matchAll/);
@@ -124,6 +124,33 @@ test("video cache dialog does not merge the whole cache into session history", a
   assert.match(openCache, /setCachedVideos/);
   assert.doesNotMatch(openCache, /setVideos/);
   assert.match(video, /<VideoGrid videos=\{cachedVideos\}/);
+});
+
+test("video extension workspaces keep stable media frames and separate result state", async () => {
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+  const result = await readFile(path.join(root, "src/public/components/video-extension-result.tsx"), "utf8").catch(() => "");
+
+  for (const source of [video, nsfw]) {
+    assert.match(source, /const \[extensionResult, setExtensionResult\]/);
+    assert.match(source, /aspect-video w-full min-w-0 overflow-hidden/);
+    assert.match(source, /<VideoExtensionResult/);
+    assert.match(source, /originalPostID: extensionRootPostID/);
+    assert.match(source, /onAnimationEnd=\{finishCacheDialogClose\}/);
+  }
+
+  assert.match(result, /延长结果/);
+  assert.match(result, /延长生成中/);
+  assert.match(result, /以此结果继续延长/);
+  assert.match(result, /min-h-24/);
+  assert.match(result, /disabled=\{!result\.postID\}/);
+  assert.match(video, /const extensionSource = active/);
+  assert.match(video, /const extensionRootPostID = extensionSource\.originalPostID \|\| extensionSource\.postID/);
+  assert.match(video, /generate\([^;]+extensionRootPostID\)/s);
+  assert.match(video, /setExtensionResult\(null\);\s+await generate/s);
+  assert.match(nsfw, /if \(extension\) setExtensionResult\(null\);\s+try/s);
+  assert.doesNotMatch(video, /setActive\(completedExtension\)/);
+  assert.doesNotMatch(nsfw, /setActiveVideo\(completedExtension\)/);
 });
 
 test("video cards lazy-load visible media and keep selected rings inside cards", async () => {

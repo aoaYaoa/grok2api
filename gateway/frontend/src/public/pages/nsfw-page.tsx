@@ -1,5 +1,5 @@
 import { ImagePlus, Library, Play, Scissors, Sparkles, Square, Trash2, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { useRef, useState, type AnimationEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { ImageGrid } from "@/public/components/image-grid";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
+import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
@@ -42,6 +43,7 @@ export function NsfwPage() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
   const [activeVideo, setActiveVideo] = useState<VideoItem | null>(null);
+  const [extensionResult, setExtensionResult] = useState<VideoItem | null>(null);
   const [cacheOpen, setCacheOpen] = useState(false);
   const [localImage, setLocalImage] = useState<UploadAsset | null>(null);
   const [imageStarting, setImageStarting] = useState(false);
@@ -63,6 +65,7 @@ export function NsfwPage() {
   const videoStartLock = useRef(false);
   const activeImageStreams = useRef(0);
   const extensionPanel = useRef<HTMLElement | null>(null);
+  const pendingExtensionScroll = useRef(false);
   const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
   async function stopCandidates() {
@@ -171,22 +174,28 @@ export function NsfwPage() {
     }
   }
 
-  function watchVideo(taskID: string, label: string, prompt: string) {
+  function watchVideo(taskID: string, label: string, prompt: string, isExtension = false, extensionRootPostID = "") {
     const controller = new AbortController();
     let failureReason = "";
+    const initialItem: VideoItem = { id: taskID, taskID, url: "", posterURL: "", prompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now(), originalPostID: extensionRootPostID };
     videoControllers.current.set(taskID, controller);
-    setVideos((items) => [{ id: taskID, taskID, url: "", posterURL: "", prompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
+    setVideos((items) => [initialItem, ...items]);
+    if (isExtension) setExtensionResult(initialItem);
     void streamVideo(key, taskID, (update) => {
       if (update.error) {
         failureReason = update.error;
         setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? null : item);
         return;
       }
-      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" : "running" }));
+      const applyUpdate = (item: VideoItem) => ({ ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" as const : "running" as const });
+      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : applyUpdate(item)));
+      if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? applyUpdate(item) : item);
     }, controller.signal).catch((error) => {
       if (!controller.signal.aborted) {
         failureReason = error instanceof Error ? error.message : "视频连接失败";
         setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? null : item);
       }
     }).finally(() => {
       finishVideoTask(taskID, failureReason);
@@ -209,6 +218,7 @@ export function NsfwPage() {
     const startController = new AbortController();
     videoStartController.current = startController;
     const prompt = extension ? extendPrompt.trim() : videoPrompt.trim();
+    if (extension) setExtensionResult(null);
     try {
       const result = await startVideo(key, {
         prompt,
@@ -231,9 +241,11 @@ export function NsfwPage() {
       videoTasks.current = ids;
       beginVideoGroup(ids);
       setVideoStarting(false);
-      ids.forEach((id, index) => watchVideo(id, extension ? "延长视频" : `NSFW 视频 ${index + 1}`, prompt));
+      const extensionRootPostID = extension?.originalPostID || extension?.postID || "";
+      ids.forEach((id, index) => watchVideo(id, extension ? "延长视频" : `NSFW 视频 ${index + 1}`, prompt, Boolean(extension), extensionRootPostID));
     } catch (error) {
       if (!isAbortError(error)) toast.error(error instanceof Error ? error.message : "视频任务创建失败");
+      if (extension) setExtensionResult(null);
       videoStartLock.current = false;
       setVideoRunning(false);
     } finally {
@@ -252,6 +264,7 @@ export function NsfwPage() {
     videoStartLock.current = false;
     setVideoStarting(false);
     setVideoRunning(false);
+    setExtensionResult((item) => item?.status === "completed" ? item : null);
     await stopVideos(key, tasks).catch(() => undefined);
   }
 
@@ -265,10 +278,27 @@ export function NsfwPage() {
     }
   }
 
-  function selectVideo(item: VideoItem, scroll = false) {
+  function scrollToExtensionPanel() {
+    requestAnimationFrame(() => extensionPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function selectVideo(item: VideoItem, scroll = false, afterCacheClose = false) {
     setActiveVideo(item);
+    setExtensionResult(null);
     setExtendTime(0);
-    if (scroll) requestAnimationFrame(() => extensionPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    setDuration(0);
+    if (!scroll) return;
+    if (afterCacheClose) {
+      pendingExtensionScroll.current = true;
+      return;
+    }
+    scrollToExtensionPanel();
+  }
+
+  function finishCacheDialogClose(event: AnimationEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget || event.currentTarget.dataset.state !== "closed" || !pendingExtensionScroll.current) return;
+    pendingExtensionScroll.current = false;
+    scrollToExtensionPanel();
   }
 
   function updateExtendTime(value: number) {
@@ -279,7 +309,7 @@ export function NsfwPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">NSFW 工作台</h1><p className="mt-1 text-sm text-muted-foreground">候选图、图生视频与时间轴延长集中处理</p></div>
-        <div className="workspace-actions flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); }}><Trash2 className="size-4" />清空视频</Button></div>
+        <div className="workspace-actions flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); setExtensionResult(null); }}><Trash2 className="size-4" />清空视频</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -316,19 +346,20 @@ export function NsfwPage() {
 
           <section ref={extensionPanel} className="workspace-panel scroll-mt-20 p-4">
             <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><Scissors className="size-4 text-info" />视频时间轴延长</h2>
-            {activeVideo?.url ? <>
-              <VideoPlayer url={activeVideo.url} posterURL={activeVideo.posterURL} label={activeVideo.displayName} className="aspect-video w-full rounded-md" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
+            <div className="aspect-video w-full min-w-0 overflow-hidden rounded-md bg-muted">
+              {activeVideo?.url ? <VideoPlayer url={activeVideo.url} posterURL={activeVideo.posterURL} label={activeVideo.displayName} className="size-full" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} /> : <div className="workspace-empty grid size-full place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}
+            </div>
               <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3">
-                <label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-3 w-full" /></label>
-                <label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label>
+                <label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} disabled={!activeVideo?.url} className="mt-3 w-full" /></label>
+                <label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} disabled={!activeVideo?.url} className="mt-1 font-mono" /></label>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
-              <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
-              <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
+              <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength} disabled={!activeVideo?.url}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
+              <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} disabled={!activeVideo?.url} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
               <PromptEnhanceButton value={extendPrompt} onEnhanced={setExtendPrompt} disabled={videoStarting || videoRunning} />
-              <Button className="mt-3 w-full" onClick={() => void generateVideos(activeVideo)} disabled={videoStarting || videoRunning || !activeVideo.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
-              {!activeVideo.postID && <p className="mt-2 text-xs text-warning">当前结果缺少 postId，无法延长</p>}
-            </> : <div className="workspace-empty grid min-h-48 place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}
+              <Button className="mt-3 w-full" onClick={() => activeVideo && void generateVideos(activeVideo)} disabled={videoStarting || videoRunning || !activeVideo?.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
+              {activeVideo?.url && !activeVideo.postID && <p className="mt-2 text-xs text-warning">当前结果缺少 postId，无法延长</p>}
+              <VideoExtensionResult result={extensionResult} onContinue={(item) => selectVideo(item, true)} />
           </section>
         </aside>
 
@@ -337,7 +368,7 @@ export function NsfwPage() {
           <div><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">视频结果</h2><span className="text-xs text-muted-foreground">{videos.length} 个</span></div><VideoGrid videos={videos} activeID={activeVideo?.id} onActivate={(item) => selectVideo(item)} onExtend={(item) => selectVideo(item, true)} /></div>
         </main>
       </div>
-      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true); }} /></div></DialogContent></Dialog>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }

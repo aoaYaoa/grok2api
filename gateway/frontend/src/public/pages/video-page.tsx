@@ -1,5 +1,5 @@
 import { ImagePlus, Library, Play, Plus, RotateCcw, Scissors, Square, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type AnimationEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
+import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
 import { resolveParentPost } from "@/public/features/image/image-api";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
@@ -32,6 +33,7 @@ export function VideoPage() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
   const [active, setActive] = useState<VideoItem | null>(null);
+  const [extensionResult, setExtensionResult] = useState<VideoItem | null>(null);
   const [starting, setStarting] = useState(false);
   const [running, setRunning] = useState(false);
   const [cacheOpen, setCacheOpen] = useState(false);
@@ -46,6 +48,7 @@ export function VideoPage() {
   const startLock = useRef(false);
   const startController = useRef<AbortController | null>(null);
   const extensionPanel = useRef<HTMLElement | null>(null);
+  const pendingExtensionScroll = useRef(false);
   const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
   const appendReferenceFiles = useCallback(async (files: FileList | File[]) => {
@@ -80,22 +83,28 @@ export function VideoPage() {
     }
   }
 
-  function watch(taskID: string, label: string, taskPrompt: string) {
+  function watch(taskID: string, label: string, taskPrompt: string, isExtension = false, extensionRootPostID = "") {
     const controller = new AbortController();
     let failureReason = "";
+    const initialItem: VideoItem = { id: taskID, taskID, url: "", posterURL: "", prompt: taskPrompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now(), originalPostID: extensionRootPostID };
     controllers.current.set(taskID, controller);
-    setVideos((items) => [{ id: taskID, taskID, url: "", posterURL: "", prompt: taskPrompt, progress: 0, status: "running", postID: "", displayName: label, createdAt: Date.now() }, ...items]);
+    setVideos((items) => [initialItem, ...items]);
+    if (isExtension) setExtensionResult(initialItem);
     void streamVideo(key, taskID, (update) => {
       if (update.error) {
         failureReason = update.error;
         setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? null : item);
         return;
       }
-      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : { ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" : "running" }));
+      const applyUpdate = (item: VideoItem) => ({ ...item, progress: update.progress ?? item.progress, url: update.url || item.url, posterURL: update.posterURL || item.posterURL, postID: videoPostID(update.url || item.url), status: update.url || update.done ? "completed" as const : "running" as const });
+      setVideos((items) => items.map((item) => item.taskID !== taskID ? item : applyUpdate(item)));
+      if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? applyUpdate(item) : item);
     }, controller.signal).catch((error) => {
       if (!controller.signal.aborted) {
         failureReason = error instanceof Error ? error.message : "视频连接失败";
         setVideos((items) => items.filter((item) => item.taskID !== taskID));
+        if (isExtension) setExtensionResult((item) => item?.taskID === taskID ? null : item);
       }
     }).finally(() => {
       finishVideoTask(taskID, failureReason);
@@ -107,7 +116,7 @@ export function VideoPage() {
     });
   }
 
-  async function generate(bodyOverride?: Record<string, unknown>) {
+  async function generate(bodyOverride?: Record<string, unknown>, extensionRootPostID = "") {
     if (startLock.current) return;
     if (!prompt.trim() && !references.length && !bodyOverride) return toast.error("请输入提示词或添加参考图");
     startLock.current = true;
@@ -123,9 +132,11 @@ export function VideoPage() {
       taskIDs.current = ids;
       beginVideoGroup(ids);
       setStarting(false);
-      ids.forEach((id, index) => watch(id, bodyOverride ? "延长视频" : `视频 ${videos.length + index + 1}`, taskPrompt));
+      const isExtension = Boolean(bodyOverride?.is_video_extension);
+      ids.forEach((id, index) => watch(id, isExtension ? "延长视频" : `视频 ${videos.length + index + 1}`, taskPrompt, isExtension, extensionRootPostID));
     } catch (error) {
       if (!isAbortError(error)) toast.error(error instanceof Error ? error.message : "创建视频失败");
+      if (bodyOverride?.is_video_extension) setExtensionResult(null);
       startLock.current = false;
       setRunning(false);
     } finally {
@@ -144,6 +155,7 @@ export function VideoPage() {
     startLock.current = false;
     setStarting(false);
     setRunning(false);
+    setExtensionResult((item) => item?.status === "completed" ? item : null);
     await stopVideos(key, tasks).catch(() => undefined);
   }
 
@@ -173,13 +185,33 @@ export function VideoPage() {
 
   async function extend() {
     if (!active?.postID) return toast.error("当前视频没有可用 postId，请从缓存中选择");
-    await generate({ prompt: extendPrompt.trim(), concurrent: 1, video_length: Number(extendLength), is_video_extension: true, source_task_id: active.taskID, extend_post_id: active.postID, video_extension_start_time: extendTime, original_post_id: active.originalPostID || active.postID, file_attachment_id: active.originalPostID || active.postID, stitch_with_extend: true });
+    const extensionSource = active;
+    const extensionRootPostID = extensionSource.originalPostID || extensionSource.postID;
+    setExtensionResult(null);
+    await generate({ prompt: extendPrompt.trim(), concurrent: 1, video_length: Number(extendLength), is_video_extension: true, source_task_id: extensionSource.taskID, extend_post_id: extensionSource.postID, video_extension_start_time: extendTime, original_post_id: extensionRootPostID, file_attachment_id: extensionRootPostID, stitch_with_extend: true }, extensionRootPostID);
   }
 
-  function activate(item: VideoItem, scroll = false) {
+  function scrollToExtensionPanel() {
+    requestAnimationFrame(() => extensionPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function activate(item: VideoItem, scroll = false, afterCacheClose = false) {
     setActive(item);
+    setExtensionResult(null);
     setExtendTime(0);
-    if (scroll) requestAnimationFrame(() => extensionPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    setDuration(0);
+    if (!scroll) return;
+    if (afterCacheClose) {
+      pendingExtensionScroll.current = true;
+      return;
+    }
+    scrollToExtensionPanel();
+  }
+
+  function finishCacheDialogClose(event: AnimationEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget || event.currentTarget.dataset.state !== "closed" || !pendingExtensionScroll.current) return;
+    pendingExtensionScroll.current = false;
+    scrollToExtensionPanel();
   }
 
   function updateExtendTime(value: number) {
@@ -190,7 +222,7 @@ export function VideoPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">Video 视频工作台</h1><p className="mt-1 text-sm text-muted-foreground">{starting ? "正在创建任务" : running ? "任务运行中" : `${videos.length} 个视频`}</p></div>
-        <div className="workspace-actions flex gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setVideos([]); setActive(null); }}><RotateCcw className="size-4" />清空</Button></div>
+        <div className="workspace-actions flex gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setVideos([]); setActive(null); setExtensionResult(null); }}><RotateCcw className="size-4" />清空</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -216,16 +248,17 @@ export function VideoPage() {
 
           <section ref={extensionPanel} className="workspace-panel scroll-mt-20 p-4">
           <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><Scissors className="size-4 text-info" />当前视频与延长</h2>
-          {active?.url ? <>
-            <VideoPlayer url={active.url} posterURL={active.posterURL} label={active.displayName} className="aspect-video w-full rounded-md" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} />
-            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3"><label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-3 w-full" /></label><label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} className="mt-1 font-mono" /></label></div>
+          <div className="aspect-video w-full min-w-0 overflow-hidden rounded-md bg-muted">
+            {active?.url ? <VideoPlayer url={active.url} posterURL={active.posterURL} label={active.displayName} className="size-full" onLoadedMetadata={(event) => { const nextDuration = event.currentTarget.duration || 0; setDuration(nextDuration); setExtendTime((value) => Math.min(value, nextDuration)); }} /> : <div className="workspace-empty grid size-full place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}
+          </div>
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] items-end gap-3"><label className="text-xs">时间轴<input type="range" min="0" max={Math.max(duration, 0.001)} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} disabled={!active?.url} className="mt-3 w-full" /></label><label className="text-xs">起点（秒）<Input type="number" min="0" max={duration || undefined} step="0.001" value={extendTime} onChange={(event) => updateExtendTime(Number(event.target.value))} disabled={!active?.url} className="mt-1 font-mono" /></label></div>
             <p className="mt-1 text-xs text-muted-foreground">当前 {extendTime.toFixed(3)}s / {duration.toFixed(3)}s</p>
-            <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
-            <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
+            <label className="mt-3 block"><span className="workspace-field-label">延长时长</span><Select value={extendLength} onValueChange={setExtendLength} disabled={!active?.url}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["6", "10", "15"].map((value) => <SelectItem key={value} value={value}>{value} 秒</SelectItem>)}</SelectContent></Select></label>
+            <Textarea value={extendPrompt} onChange={(event) => setExtendPrompt(event.target.value)} disabled={!active?.url} className="mt-3 min-h-24" placeholder="留空使用 spicy，或描述接下来的画面" />
             <PromptEnhanceButton value={extendPrompt} onEnhanced={setExtendPrompt} disabled={starting || running} />
-            <Button className="mt-3 w-full" onClick={() => void extend()} disabled={starting || running || !active.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
-            {!active.postID && <p className="mt-2 text-xs text-warning">从缓存选择带 postId 的视频后可延长</p>}
-          </> : <div className="workspace-empty grid min-h-64 place-items-center p-4 text-center text-sm text-muted-foreground">在视频记录中点击剪刀按钮进入延长区</div>}
+            <Button className="mt-3 w-full" onClick={() => void extend()} disabled={starting || running || !active?.postID}><Scissors className="size-4" />从 {extendTime.toFixed(3)}s 延长</Button>
+            {active?.url && !active.postID && <p className="mt-2 text-xs text-warning">从缓存选择带 postId 的视频后可延长</p>}
+            <VideoExtensionResult result={extensionResult} onContinue={(item) => activate(item, true)} />
           </section>
         </aside>
 
@@ -235,7 +268,7 @@ export function VideoPage() {
       </div>
 
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><DialogHeader><DialogTitle>重命名视频</DialogTitle></DialogHeader><Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button onClick={() => void saveRename()}>保存</Button></DialogContent></Dialog>
-      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={active?.id} onActivate={(item) => { setCacheOpen(false); activate(item, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true); }} /></div></DialogContent></Dialog>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={active?.id} onActivate={(item) => { setCacheOpen(false); activate(item, true, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }
