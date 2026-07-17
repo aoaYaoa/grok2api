@@ -62,6 +62,7 @@ type videoTask struct {
 
 type videoStartRequest struct {
 	Prompt           string          `json:"prompt"`
+	Preset           string          `json:"preset"`
 	AspectRatio      string          `json:"aspect_ratio"`
 	VideoLength      int             `json:"video_length"`
 	Resolution       string          `json:"resolution_name"`
@@ -291,6 +292,16 @@ func (h *Handler) videoStart(c *gin.Context) {
 		return
 	}
 	request.Prompt = strings.TrimSpace(request.Prompt)
+	request.Preset = strings.ToLower(strings.TrimSpace(request.Preset))
+	if request.Preset == "" {
+		request.Preset = "normal"
+	}
+	switch request.Preset {
+	case "normal", "fun", "spicy", "custom":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "preset must be normal, fun, spicy, or custom"})
+		return
+	}
 	request.ExtendPostID = strings.TrimSpace(request.ExtendPostID)
 	request.OriginalPostID = strings.TrimSpace(request.OriginalPostID)
 	request.FileAttachmentID = strings.TrimSpace(request.FileAttachmentID)
@@ -354,7 +365,7 @@ func (h *Handler) videoStart(c *gin.Context) {
 		}
 		job, err := h.videoGateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
 			RequestID: taskID, ClientKey: clientKey, PublicModel: "grok-imagine-video",
-			Prompt: request.Prompt, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
+			Prompt: request.Prompt, Preset: request.Preset, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
 			Resolution: request.Resolution, ReferenceURLs: references,
 			IsExtension: request.IsVideoExtension, ExtendPostID: request.ExtendPostID,
 			SourceTaskID:       request.SourceTaskID,

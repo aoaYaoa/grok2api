@@ -32,9 +32,21 @@ type mediaJobRetrySafeError interface {
 	MediaJobRetrySafe() bool
 }
 
+type accountHealthNeutralError interface {
+	error
+	AccountHealthNeutral() bool
+}
+
 func IsMediaJobRetrySafe(err error) bool {
 	var retrySafe mediaJobRetrySafeError
 	return errors.As(err, &retrySafe) && retrySafe.MediaJobRetrySafe()
+}
+
+// IsAccountHealthNeutral reports request-specific rejections that must not
+// reduce the selected account's health or trigger an account switch.
+func IsAccountHealthNeutral(err error) bool {
+	var neutral accountHealthNeutralError
+	return errors.As(err, &neutral) && neutral.AccountHealthNeutral()
 }
 
 // ErrorHTTPStatus 从 Provider 错误链中提取上游 HTTP 状态。
@@ -232,6 +244,7 @@ type ImageEditRequest struct {
 type VideoRequest struct {
 	Credential         account.Credential
 	Prompt             string
+	Preset             string
 	Duration           int
 	AspectRatio        string
 	Resolution         string

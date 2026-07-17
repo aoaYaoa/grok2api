@@ -33,6 +33,7 @@ type VideoInput struct {
 	ClientKey          clientkey.Key
 	PublicModel        string
 	Prompt             string
+	Preset             string
 	Duration           int
 	AspectRatio        string
 	Resolution         string
@@ -492,7 +493,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	lastProgress := job.Progress
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
-		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
+		Credential: lease.Credential, Prompt: job.Prompt, Preset: metadata.Preset, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
 		ReferenceURLs: metadata.ImageURLs, IsExtension: metadata.IsExtension, ExtendPostID: metadata.ExtendPostID,
 		ExtensionStartTime: metadata.ExtensionStartTime, OriginalPostID: metadata.OriginalPostID,
 		FileAttachmentID: metadata.FileAttachmentID, StitchWithExtend: metadata.StitchWithExtend,
@@ -536,7 +537,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
 		failureHandled := false
-		if errors.Is(err, provider.ErrUnauthorized) {
+		if provider.IsAccountHealthNeutral(err) {
+			failureHandled = true
+		} else if errors.Is(err, provider.ErrUnauthorized) {
 			if lease.Credential.AuthType == account.AuthTypeSSO {
 				_ = s.accounts.MarkReauthRequired(failureCtx, lease.Credential.ID, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
 			}
@@ -704,6 +707,7 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 
 type videoInputMetadata struct {
 	ImageURLs           []string `json:"image_urls"`
+	Preset              string   `json:"preset,omitempty"`
 	DisplayName         string   `json:"display_name,omitempty"`
 	IsExtension         bool     `json:"is_extension,omitempty"`
 	SourceTaskID        string   `json:"source_task_id,omitempty"`
@@ -722,7 +726,7 @@ func encodeVideoInput(input VideoInput) string {
 }
 
 func videoMetadataFromInput(input VideoInput) videoInputMetadata {
-	return videoInputMetadata{ImageURLs: input.ReferenceURLs, IsExtension: input.IsExtension, SourceTaskID: input.SourceTaskID, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend}
+	return videoInputMetadata{ImageURLs: input.ReferenceURLs, Preset: input.Preset, IsExtension: input.IsExtension, SourceTaskID: input.SourceTaskID, ExtendPostID: input.ExtendPostID, ExtensionStartTime: input.ExtensionStartTime, OriginalPostID: input.OriginalPostID, FileAttachmentID: input.FileAttachmentID, StitchWithExtend: input.StitchWithExtend}
 }
 
 func (m *videoInputMetadata) markAccountAttempt(accountID uint64) {
@@ -878,6 +882,9 @@ func publicVideoFailureMessage(err error) string {
 	}
 	if errors.Is(err, provider.ErrUnauthorized) {
 		return "上游认证失败，请检查账号状态"
+	}
+	if provider.IsAccountHealthNeutral(err) {
+		return "内容未通过上游审核，请调整提示词或素材后重试"
 	}
 	if status, ok := provider.ErrorHTTPStatus(err); ok {
 		switch status {

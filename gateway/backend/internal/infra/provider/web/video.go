@@ -37,6 +37,23 @@ type videoMissingURLError struct {
 }
 
 var errVideoRecoveryTimeout = errors.New("视频结果恢复超过等待时限")
+var errVideoModerated = errors.New("视频生成触发审核")
+
+const videoModerationAttempts = 5
+
+type videoModerationError struct {
+	attempts int
+}
+
+func (e *videoModerationError) Error() string {
+	return fmt.Sprintf("视频内容未通过上游审核（已尝试 %d 次）", e.attempts)
+}
+
+func (e *videoModerationError) Unwrap() error { return errVideoModerated }
+
+func (e *videoModerationError) HTTPStatusCode() int { return http.StatusBadRequest }
+
+func (e *videoModerationError) AccountHealthNeutral() bool { return true }
 
 type videoRecoveryPolicy struct {
 	MaxWait      time.Duration
@@ -73,7 +90,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
 	}
 	parentID := ""
-	references := make([]string, 0, len(request.ReferenceURLs))
+	references := make([]uploadedFile, 0, len(request.ReferenceURLs))
 	for _, rawReference := range request.ReferenceURLs {
 		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
 		if referenceErr != nil {
@@ -82,7 +99,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		references = append(references, reference)
 	}
 	if len(references) > 0 {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0], "")
+		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0].URI, "")
 	} else {
 		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt)
 	}
@@ -98,29 +115,25 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
-	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
+	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	lastProgress := 0
-	result, postID, parseErr := parseVideoStream(response, func(value int) {
-		lastProgress = max(lastProgress, value)
-		if request.Progress != nil {
-			request.Progress(value)
-		}
-	})
-	_ = response.Body.Close()
-	if parseErr != nil {
-		return provider.VideoResult{}, parseErr
-	}
-	if result.URL == "" && lastProgress >= 100 && postID != "" {
-		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postID)
+	if result.URL == "" && lastProgress >= 100 && len(postIDs) > 0 {
+		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postIDs)
 		if err != nil {
-			return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
+			if errors.Is(err, provider.ErrUnauthorized) {
+				return provider.VideoResult{}, err
+			}
+			return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postIDs[0], progress: lastProgress}
 		}
 	}
 	if result.URL == "" {
+		postID := ""
+		if len(postIDs) > 0 {
+			postID = postIDs[0]
+		}
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
@@ -158,43 +171,84 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 		"toolOverrides": map[string]any{"videoGen": true}, "enableSideBySide": true,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
-	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	lastProgress := 0
-	result, postID, parseErr := parseVideoStream(response, func(value int) {
-		lastProgress = max(lastProgress, value)
-		if request.Progress != nil {
-			request.Progress(value)
-		}
-	})
-	_ = response.Body.Close()
-	if parseErr != nil {
-		return provider.VideoResult{}, parseErr
-	}
-	if result.URL == "" && lastProgress >= 100 && postID != "" {
-		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postID)
+	if result.URL == "" && lastProgress >= 100 && len(postIDs) > 0 {
+		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postIDs)
 		if err != nil {
-			return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
+			if errors.Is(err, provider.ErrUnauthorized) {
+				return provider.VideoResult{}, err
+			}
+			return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postIDs[0], progress: lastProgress}
 		}
 	}
 	if result.URL == "" {
+		postID := ""
+		if len(postIDs) > 0 {
+			postID = postIDs[0]
+		}
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }
 
-func (a *Adapter) recoverVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token, postID string) (provider.VideoResult, error) {
-	a.log().Warn("video_result_recovery_started", "post_id", postID, "max_wait", defaultVideoRecoveryPolicy.MaxWait)
+func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, error) {
+	for attempt := 1; attempt <= videoModerationAttempts; attempt++ {
+		response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+		if err != nil {
+			return provider.VideoResult{}, nil, 0, err
+		}
+		lastProgress := 0
+		result, postIDs, parseErr := parseVideoStreamCandidates(response, func(value int) {
+			lastProgress = max(lastProgress, value)
+			if progress != nil {
+				progress(value)
+			}
+		})
+		_ = response.Body.Close()
+		if !errors.Is(parseErr, errVideoModerated) {
+			return result, postIDs, lastProgress, parseErr
+		}
+		a.log().Warn("video_generation_moderated", "attempt", attempt, "max_attempts", videoModerationAttempts, "post_ids", postIDs)
+		if attempt == videoModerationAttempts {
+			return provider.VideoResult{}, postIDs, lastProgress, &videoModerationError{attempts: attempt}
+		}
+		timer := time.NewTimer(1200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return provider.VideoResult{}, postIDs, lastProgress, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return provider.VideoResult{}, nil, 0, &videoModerationError{attempts: videoModerationAttempts}
+}
+
+func (a *Adapter) recoverVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token string, postIDs []string) (provider.VideoResult, error) {
+	a.log().Warn("video_result_recovery_started", "post_ids", postIDs, "max_wait", defaultVideoRecoveryPolicy.MaxWait)
 	result, err := pollVideoPostResult(ctx, defaultVideoRecoveryPolicy, func(lookupCtx context.Context) (provider.VideoResult, error) {
-		return a.lookupVideoPost(lookupCtx, cfg, lease, token, postID)
+		var lastErr error
+		for _, postID := range postIDs {
+			result, lookupErr := a.lookupVideoPost(lookupCtx, cfg, lease, token, postID)
+			if lookupErr == nil && result.URL != "" {
+				return result, nil
+			}
+			if lookupErr != nil {
+				lastErr = lookupErr
+				if errors.Is(lookupErr, provider.ErrUnauthorized) {
+					return provider.VideoResult{}, lookupErr
+				}
+			}
+		}
+		return provider.VideoResult{}, lastErr
 	})
 	if err != nil {
-		a.log().Warn("video_result_recovery_failed", "post_id", postID, "error", err)
+		a.log().Warn("video_result_recovery_failed", "post_ids", postIDs, "error", err)
 		return provider.VideoResult{}, err
 	}
-	a.log().Info("video_result_recovered", "post_id", postID, "url", result.URL)
+	a.log().Info("video_result_recovered", "post_ids", postIDs, "url", result.URL)
 	return result, nil
 }
 
@@ -457,10 +511,10 @@ func trustedVideoAssetURL(value *url.URL, baseURL string) bool {
 	return err == nil && strings.EqualFold(base.Scheme, "http") && strings.EqualFold(value.Hostname(), base.Hostname()) && value.Port() == base.Port()
 }
 
-func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {
+func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (uploadedFile, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "", fmt.Errorf("视频参考图片 URL 不能为空")
+		return uploadedFile{}, fmt.Errorf("视频参考图片 URL 不能为空")
 	}
 	var image provider.ImageInput
 	var err error
@@ -470,16 +524,16 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 		image, err = a.loadChatImage(ctx, lease, value, 20<<20)
 	}
 	if err != nil {
-		return "", err
+		return uploadedFile{}, err
 	}
 	uploaded, err := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
 	if err != nil {
-		return "", err
+		return uploadedFile{}, err
 	}
-	if uploaded.URI == "" {
-		return "", fmt.Errorf("上传视频参考图片后未返回 fileUri")
+	if uploaded.ID == "" || uploaded.URI == "" {
+		return uploadedFile{}, fmt.Errorf("上传视频参考图片后未返回文件标识或 fileUri")
 	}
-	return uploaded.URI, nil
+	return uploaded, nil
 }
 
 func (a *Adapter) loadStoredVideoReference(ctx context.Context, assetID string, maxBytes int64) (provider.ImageInput, error) {
@@ -507,15 +561,46 @@ func (a *Adapter) loadStoredVideoReference(ctx context.Context, assetID string, 
 }
 
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {
+	result, postIDs, err := parseVideoStreamCandidates(response, progress)
+	postID := ""
+	if len(postIDs) > 0 {
+		postID = postIDs[0]
+	}
+	return result, postID, err
+}
+
+func parseVideoStreamCandidates(response *http.Response, progress func(int)) (provider.VideoResult, []string, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 		if response.StatusCode == http.StatusUnauthorized {
-			return provider.VideoResult{}, "", provider.ErrUnauthorized
+			return provider.VideoResult{}, nil, provider.ErrUnauthorized
 		}
-		return provider.VideoResult{}, "", &videoUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		return provider.VideoResult{}, nil, &videoUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
 	}
 	var result provider.VideoResult
-	var postID string
+	var videoIDs []string
+	var assetIDs []string
+	var videoPostIDs []string
+	pendingTerminalProgress := 0
+	addCandidate := func(values *[]string, value any) {
+		postID, _ := value.(string)
+		postID = strings.TrimSpace(postID)
+		if postID == "" || containsString(*values, postID) {
+			return
+		}
+		*values = append(*values, postID)
+	}
+	orderedCandidates := func() []string {
+		candidates := make([]string, 0, len(videoIDs)+len(assetIDs)+len(videoPostIDs))
+		for _, values := range [][]string{videoIDs, assetIDs, videoPostIDs} {
+			for _, candidate := range values {
+				if !containsString(candidates, candidate) {
+					candidates = append(candidates, candidate)
+				}
+			}
+		}
+		return candidates
+	}
 	handle := func(root map[string]any) (bool, error) {
 		if errorValue, ok := root["error"].(map[string]any); ok {
 			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
@@ -524,17 +609,12 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		if stream == nil {
 			return false, nil
 		}
-		if value, ok := numberAsInt(stream["progress"]); ok && progress != nil {
-			progress(value)
-		}
-		if value, _ := stream["videoPostId"].(string); value != "" {
-			postID = value
-		} else if value, _ := stream["videoId"].(string); value != "" {
-			postID = value
-		}
+		addCandidate(&videoIDs, stream["videoId"])
+		addCandidate(&assetIDs, stream["assetId"])
+		addCandidate(&videoPostIDs, stream["videoPostId"])
 		moderated, _ := stream["moderated"].(bool)
 		if moderated {
-			return false, nil
+			return true, errVideoModerated
 		}
 		if value, _ := stream["thumbnailImageUrl"].(string); value != "" {
 			result.PosterURL = absoluteVideoAssetURL(value)
@@ -542,6 +622,18 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		if value, _ := stream["videoUrl"].(string); value != "" {
 			result.URL = absoluteVideoAssetURL(value)
 			result.ContentType = "video/mp4"
+		}
+		if value, ok := numberAsInt(stream["progress"]); ok {
+			if value >= 100 && result.URL == "" {
+				pendingTerminalProgress = max(pendingTerminalProgress, value)
+			} else if progress != nil {
+				progress(value)
+				if value >= pendingTerminalProgress {
+					pendingTerminalProgress = 0
+				}
+			}
+		}
+		if result.URL != "" {
 			return true, nil
 		}
 		return false, nil
@@ -557,9 +649,12 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		err = consumeVideoJSON(reader, handle)
 	}
 	if err != nil {
-		return provider.VideoResult{}, "", err
+		return provider.VideoResult{}, orderedCandidates(), err
 	}
-	return result, postID, nil
+	if pendingTerminalProgress > 0 && progress != nil {
+		progress(pendingTerminalProgress)
+	}
+	return result, orderedCandidates(), nil
 }
 
 func absoluteVideoAssetURL(value string) string {
@@ -638,15 +733,62 @@ func videoSegments(seconds int) []int {
 	return []int{seconds}
 }
 
-func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string) map[string]any {
-	config := map[string]any{"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution}
-	if len(references) > 0 {
-		config["isVideoEdit"] = false
-		config["isReferenceToVideo"] = true
-		config["imageReferences"] = references
+func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []uploadedFile, preset string) map[string]any {
+	config := map[string]any{
+		"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution,
 	}
-	return map[string]any{
-		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
+	attachments := make([]string, 0, len(references))
+	imageURLs := make([]string, 0, len(references))
+	for _, reference := range references {
+		if reference.ID != "" {
+			attachments = append(attachments, reference.ID)
+		}
+		if reference.URI != "" {
+			imageURLs = append(imageURLs, reference.URI)
+		}
+	}
+	isSingleReference := len(imageURLs) == 1
+	if len(imageURLs) > 0 {
+		config["isVideoEdit"] = false
+	}
+	if len(imageURLs) > 1 {
+		config["isReferenceToVideo"] = true
+		config["imageReferences"] = imageURLs
+	}
+	prompt = strings.TrimSpace(prompt)
+	modeFlag := "--mode=" + videoMode(prompt, preset)
+	message := modeFlag
+	if isSingleReference {
+		message = strings.Join(imageURLs, " ") + "  " + modeFlag
+	}
+	if prompt != "" {
+		message = prompt + " " + modeFlag
+		if isSingleReference {
+			message = strings.Join(imageURLs, " ") + "  " + prompt + " " + modeFlag
+		}
+	}
+	payload := map[string]any{
+		"temporary": true, "modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
+	}
+	if isSingleReference && len(attachments) > 0 {
+		payload["fileAttachments"] = attachments
+	}
+	return payload
+}
+
+func videoMode(prompt, preset string) string {
+	if strings.TrimSpace(prompt) != "" {
+		return "custom"
+	}
+	switch strings.ToLower(strings.TrimSpace(preset)) {
+	case "fun":
+		return "extremely-crazy"
+	case "spicy":
+		return "extremely-spicy-or-crazy"
+	case "custom":
+		return "custom"
+	default:
+		return "normal"
 	}
 }

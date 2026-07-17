@@ -240,6 +240,7 @@ func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
 		"aspect_ratio":"16:9",
 		"video_length":6,
 		"resolution_name":"720p",
+		"preset":"spicy",
 		"concurrent":2,
 		"image_references":["data:image/png;base64,YWJj"]
 	}`
@@ -262,7 +263,7 @@ func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
 		t.Fatalf("response=%#v created=%d", startResponse, len(videoGateway.created))
 	}
 	for _, input := range videoGateway.created {
-		if input.PublicModel != "grok-imagine-video" || input.Prompt != "move" || input.Duration != 6 || input.AspectRatio != "16:9" || input.Resolution != "720p" || len(input.ReferenceURLs) != 1 {
+		if input.PublicModel != "grok-imagine-video" || input.Prompt != "move" || input.Duration != 6 || input.AspectRatio != "16:9" || input.Resolution != "720p" || input.Preset != "spicy" || len(input.ReferenceURLs) != 1 {
 			t.Fatalf("input=%#v", input)
 		}
 	}
