@@ -147,7 +147,7 @@ git status --short
 
 Expected: no whitespace errors and only the intended frontend, test, plan, and design files changed.
 
-- [ ] **Step 2: Commit and push**
+- [x] **Step 2: Commit and push**
 
 Create one commit:
 
@@ -157,10 +157,10 @@ git commit -m "fix: stabilize video extension workspace"
 git push origin HEAD:main
 ```
 
-- [ ] **Step 3: Deploy without touching xianyuandaxian**
+- [x] **Step 3: Deploy without touching xianyuandaxian**
 
 On netcup, fetch `origin/main`, check out the pushed commit in `/root/grok2api-go-release`, rebuild and force-recreate only `grok2api_go`, then verify the Go container is healthy. Preserve the existing data volume, domain, WARP, SQLite, and `runtimeStore.driver: memory`.
 
-- [ ] **Step 4: Verify production smoke paths**
+- [x] **Step 4: Verify production smoke paths**
 
 Check `https://grok.uonoe.com/video`, `/healthz`, and one existing cached video response. Confirm recent startup logs contain no errors and the production checkout is at the pushed commit.
