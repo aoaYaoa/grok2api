@@ -730,6 +730,34 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("image edit resolution = %q", adapter.EditResolution())
 	}
 
+	beforeForbidden, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptsBeforeForbidden := len(adapter.Attempts())
+	adapter.FailWithError(retrySafeImageStatusError{status: http.StatusForbidden})
+	if _, err := service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-forbidden", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	}); err == nil {
+		t.Fatal("expected image upload forbidden error")
+	}
+	adapter.FailWithError(nil)
+	afterForbidden, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterForbidden.FailureCount != beforeForbidden.FailureCount || afterForbidden.CooldownUntil != nil {
+		t.Fatalf("egress-scoped image 403 changed account health: before=%#v after=%#v", beforeForbidden, afterForbidden)
+	}
+	if attempts := adapter.Attempts(); len(attempts) != attemptsBeforeForbidden+1 {
+		t.Fatalf("image forbidden unexpectedly switched accounts: %#v", attempts)
+	}
+	logs, total, err = auditRepo.List(ctx, 0, 10)
+	if err != nil || total != 5 || logs[0].RequestID != "req-image-forbidden" || logs[0].StatusCode != http.StatusForbidden {
+		t.Fatalf("image forbidden audit logs=%#v total=%d err=%v", logs, total, err)
+	}
+
 	billingBeforeFailure, err := keyRepo.Get(ctx, key.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -759,7 +787,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("image failure switched accounts after generation started: %#v", attempts)
 	}
 	logs, total, err = auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 5 || len(logs) != 5 {
+	if err != nil || total != 6 || len(logs) != 6 {
 		t.Fatalf("failure audit logs=%#v total=%d err=%v", logs, total, err)
 	}
 	failureAudit := logs[0]
@@ -972,8 +1000,16 @@ type webImageStreamAdapter struct {
 	editResolution string
 	synced         chan string
 	failureEgress  *infraegress.Manager
+	failureErr     error
 	attempts       []uint64
 }
+
+type retrySafeImageStatusError struct{ status int }
+
+func (e retrySafeImageStatusError) Error() string            { return "image upstream status" }
+func (e retrySafeImageStatusError) HTTPStatusCode() int      { return e.status }
+func (retrySafeImageStatusError) MediaJobRetrySafe() bool    { return true }
+func (retrySafeImageStatusError) AccountHealthNeutral() bool { return true }
 
 type webChatQuotaAdapter struct {
 	synced chan string
@@ -1033,8 +1069,12 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 	a.mu.Lock()
 	a.streaming = request.Streaming
 	failureEgress := a.failureEgress
+	failureErr := a.failureErr
 	a.attempts = append(a.attempts, request.Credential.ID)
 	a.mu.Unlock()
+	if failureErr != nil {
+		return nil, failureErr
+	}
 	if failureEgress != nil {
 		lease, err := failureEgress.Acquire(ctx, egressdomain.ScopeWeb, "image-failure")
 		if err != nil {
@@ -1074,6 +1114,11 @@ func (a *webImageStreamAdapter) EditResolution() string {
 func (a *webImageStreamAdapter) FailWithEgress(manager *infraegress.Manager) {
 	a.mu.Lock()
 	a.failureEgress = manager
+	a.mu.Unlock()
+}
+func (a *webImageStreamAdapter) FailWithError(err error) {
+	a.mu.Lock()
+	a.failureErr = err
 	a.mu.Unlock()
 }
 func (a *webImageStreamAdapter) Attempts() []uint64 {

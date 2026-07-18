@@ -16,6 +16,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -493,7 +494,11 @@ func buildImagineEditPayload(response imageAPIResponse, request imagineEditReque
 
 func writeImagineEditError(c *gin.Context, stream bool, err error) {
 	if !stream {
-		c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
+		status := http.StatusBadGateway
+		if upstreamStatus, ok := provider.ErrorHTTPStatus(err); ok && upstreamStatus >= 400 && upstreamStatus <= 599 {
+			status = upstreamStatus
+		}
+		c.JSON(status, gin.H{"detail": err.Error()})
 		return
 	}
 	c.Header("Content-Type", "text/event-stream")

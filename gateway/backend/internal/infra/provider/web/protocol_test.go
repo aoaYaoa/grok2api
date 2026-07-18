@@ -74,6 +74,30 @@ func TestSummarizeUploadResponseHidesCloudflareChallengeHTML(t *testing.T) {
 	}
 }
 
+func TestSummarizeUploadResponseRedactsSensitiveUpstreamText(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{name: "obvious credentials", body: `{"error":{"message":"token=sso-secret-for-user@example.com","request_url":"https://grok.com/upload?signature=private"}}`, want: []string{"sso-secret", "user@example.com", "signature=private", "request_url"}},
+		{name: "opaque access key", body: `{"error":{"message":"sk-proj-AbCd123456"}}`, want: []string{"sk-proj-AbCd123456"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := summarizeUploadResponse([]byte(test.body))
+			for _, sensitive := range test.want {
+				if strings.Contains(message, sensitive) {
+					t.Fatalf("sensitive upstream detail leaked in %q", message)
+				}
+			}
+			if message == "" {
+				t.Fatal("redacted upload error must retain a public explanation")
+			}
+		})
+	}
+}
+
 func TestParseMediaPostResponsePreservesForbiddenWithoutRetryingWholeJob(t *testing.T) {
 	_, err := parseMediaPostResponse(http.StatusForbidden, []byte(`<!DOCTYPE html><title>Just a moment...</title>`))
 	status, ok := provider.ErrorHTTPStatus(err)
@@ -207,9 +231,34 @@ func TestRemoteChatImageHeadersNeverLeakCredentials(t *testing.T) {
 func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 	dataURI := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	var uploadUserAgent string
+	legacyUploadCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
+		case "/http/upload-file-v2/direct":
+			uploadUserAgent = request.Header.Get("User-Agent")
+			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") {
+				t.Errorf("upload cookie = %q", request.Header.Get("Cookie"))
+			}
+			if err := request.ParseMultipartForm(2 << 20); err != nil {
+				t.Errorf("multipart: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			file, header, err := request.FormFile("file")
+			if err != nil {
+				t.Errorf("file part: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			content, _ := io.ReadAll(file)
+			if header.Filename != "image.png" || header.Header.Get("Content-Type") != "image/png" || len(content) == 0 || request.FormValue("file_source") != "" {
+				t.Errorf("upload filename=%q content-type=%q bytes=%d source=%q", header.Filename, header.Header.Get("Content-Type"), len(content), request.FormValue("file_source"))
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"uploadId":"upload_1","fileMetadata":{"fileMetadataId":"file_meta_1","fileUri":"users/test/file_meta_1/content"}}`)
 		case "/rest/app-chat/upload-file":
+			legacyUploadCalled = true
 			uploadUserAgent = request.Header.Get("User-Agent")
 			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") {
 				t.Errorf("upload cookie = %q", request.Header.Get("Cookie"))
@@ -275,6 +324,81 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(result, []byte(`"content":"seen"`)) {
 		t.Fatalf("status=%d body=%s err=%v", response.StatusCode, result, err)
 	}
+	if legacyUploadCalled {
+		t.Fatal("Chat V2 上传成功后不应调用旧上传接口")
+	}
+}
+
+func TestImageUploadFallsBackWhenV2EndpointIsUnsupported(t *testing.T) {
+	v2Called := false
+	legacyCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/http/upload-file-v2/direct":
+			v2Called = true
+			writer.WriteHeader(http.StatusNotFound)
+		case "/rest/app-chat/upload-file":
+			legacyCalled = true
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"fileMetadataId":"legacy_1","fileUri":"users/test/legacy_1/content"}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	adapter, lease := newUploadTestAdapter(t, server.URL)
+	defer lease.Release()
+	uploaded, directAvailable, err := adapter.uploadFileWithFallback(context.Background(), adapter.config(), lease, "test-sso", provider.ImageInput{
+		Filename: "reference.png", MIMEType: "image/png", Data: []byte("png"),
+	}, server.URL+"/imagine", imagineSelfUploadSource, true)
+	if err != nil || uploaded.ID != "legacy_1" || directAvailable || !v2Called || !legacyCalled {
+		t.Fatalf("uploaded=%#v direct=%v v2=%v legacy=%v err=%v", uploaded, directAvailable, v2Called, legacyCalled, err)
+	}
+}
+
+func TestImageUploadDoesNotHideV2ForbiddenBehindLegacyFallback(t *testing.T) {
+	v2Called := false
+	legacyCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/http/upload-file-v2/direct":
+			v2Called = true
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(writer, `<!DOCTYPE html><title>Just a moment...</title>`)
+		case "/rest/app-chat/upload-file":
+			legacyCalled = true
+			writer.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(writer, `{"fileMetadataId":"legacy_1"}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	adapter, lease := newUploadTestAdapter(t, server.URL)
+	defer lease.Release()
+	_, _, err := adapter.uploadFileWithFallback(context.Background(), adapter.config(), lease, "test-sso", provider.ImageInput{
+		Filename: "reference.png", MIMEType: "image/png", Data: []byte("png"),
+	}, server.URL+"/imagine", imagineSelfUploadSource, true)
+	status, classified := provider.ErrorHTTPStatus(err)
+	if !v2Called || legacyCalled || !classified || status != http.StatusForbidden {
+		t.Fatalf("v2=%v legacy=%v status=%d classified=%v err=%v", v2Called, legacyCalled, status, classified, err)
+	}
+}
+
+func newUploadTestAdapter(t *testing.T, baseURL string) (*Adapter, *infraegress.Lease) {
+	t.Helper()
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	lease, err := manager.AcquireCredential(context.Background(), egressdomain.ScopeWeb, account.Credential{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewAdapter(Config{BaseURL: baseURL}, manager, cipher, nil, nil), lease
 }
 
 type egressRepositoryStub struct{}

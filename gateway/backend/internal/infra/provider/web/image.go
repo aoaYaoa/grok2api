@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strings"
@@ -25,12 +28,20 @@ import (
 )
 
 const (
-	maxGeneratedImages   = 10
-	mediaOutputAttempts  = 3
-	imageDownloadTimeout = 60 * time.Second
+	maxGeneratedImages            = 10
+	mediaOutputAttempts           = 3
+	imageDownloadTimeout          = 60 * time.Second
+	imagineSelfUploadSource       = "IMAGINE_SELF_UPLOAD_FILE_SOURCE"
+	directFileUploadResponseLimit = 2 << 20
 )
 
 var errLiteImageReady = errors.New("Lite 图片已完成")
+
+type directFileUploadUnsupportedError struct{ statusCode int }
+
+func (e *directFileUploadUnsupportedError) Error() string {
+	return fmt.Sprintf("Grok Web V2 文件上传接口不可用: HTTP %d", e.statusCode)
+}
 
 type imagineModelConfig struct {
 	Pro             bool
@@ -637,8 +648,10 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	}
 	refs := make([]string, 0, len(images))
 	parentID := ""
+	directUploadAvailable := true
 	for _, image := range images {
-		uploaded, uploadErr := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
+		uploaded, directAvailable, uploadErr := a.uploadFileWithFallback(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, directUploadAvailable)
+		directUploadAvailable = directAvailable
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
@@ -860,7 +873,117 @@ func appendCapturedImageURL(results *[]string, value string) {
 	}
 }
 
-func (a *Adapter) uploadImage(ctx context.Context, cfg Config, lease *egress.Lease, token string, image provider.ImageInput, referer string) (uploadedFile, error) {
+func (a *Adapter) uploadFileWithFallback(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource string, directAvailable bool) (uploadedFile, bool, error) {
+	if directAvailable {
+		uploaded, err := a.uploadFileV2Direct(ctx, cfg, lease, token, file, referer, fileSource)
+		var unsupported *directFileUploadUnsupportedError
+		if !errors.As(err, &unsupported) {
+			return uploaded, true, err
+		}
+		a.log().Warn("web_file_upload_v2_unsupported", "status", unsupported.statusCode)
+		directAvailable = false
+	}
+	uploaded, err := a.uploadFileLegacy(ctx, cfg, lease, token, file, referer)
+	return uploaded, directAvailable, err
+}
+
+func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource string) (uploadedFile, error) {
+	body, contentType, err := buildDirectFileUploadBody(file, fileSource)
+	if err != nil {
+		return uploadedFile{}, err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, cfg.BaseURL+"/http/upload-file-v2/direct", bytes.NewReader(body))
+	if err != nil {
+		return uploadedFile{}, err
+	}
+	request.Header = buildHeaders(token, lease, contentType)
+	request.Header.Del("x-xai-request-id")
+	applyAppHeaders(request.Header, cfg.BaseURL, referer)
+	response, err := lease.Do(request)
+	if err != nil {
+		return uploadedFile{}, err
+	}
+	defer response.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, directFileUploadResponseLimit+1))
+	if readErr != nil {
+		return uploadedFile{}, fmt.Errorf("读取图片上传响应失败: %w", readErr)
+	}
+	if len(responseBody) > directFileUploadResponseLimit {
+		return uploadedFile{}, fmt.Errorf("V2 上传文件响应超过安全上限")
+	}
+	if directFileUploadFallbackStatus(response.StatusCode) {
+		return uploadedFile{}, &directFileUploadUnsupportedError{statusCode: response.StatusCode}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusForbidden {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		}
+		return uploadedFile{}, &imageUploadError{status: response.StatusCode, detail: summarizeUploadResponse(responseBody)}
+	}
+	return decodeDirectFileUploadResponse(bytes.NewReader(responseBody))
+}
+
+func buildDirectFileUploadBody(file provider.ImageInput, fileSource string) ([]byte, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	disposition := mime.FormatMediaType("form-data", map[string]string{"name": "file", "filename": file.Filename})
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", disposition)
+	header.Set("Content-Type", file.MIMEType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := part.Write(file.Data); err != nil {
+		return nil, "", err
+	}
+	if fileSource != "" {
+		if err := writer.WriteField("file_source", fileSource); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func decodeDirectFileUploadResponse(source io.Reader) (uploadedFile, error) {
+	var value struct {
+		FileMetadata struct {
+			ID      string `json:"fileMetadataId"`
+			FileID  string `json:"fileId"`
+			FileURI string `json:"fileUri"`
+		} `json:"fileMetadata"`
+	}
+	if err := json.NewDecoder(source).Decode(&value); err != nil {
+		return uploadedFile{}, fmt.Errorf("V2 上传文件响应无效: %w", err)
+	}
+	if value.FileMetadata.ID == "" {
+		value.FileMetadata.ID = value.FileMetadata.FileID
+	}
+	fileURI := ""
+	if value.FileMetadata.FileURI != "" {
+		fileURI = absoluteAssetURL(value.FileMetadata.FileURI)
+	}
+	if value.FileMetadata.ID == "" && fileURI == "" {
+		return uploadedFile{}, fmt.Errorf("V2 上传文件成功但上游未返回完整文件标识")
+	}
+	return uploadedFile{ID: value.FileMetadata.ID, URI: fileURI}, nil
+}
+
+func directFileUploadFallbackStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *Adapter) uploadFileLegacy(ctx context.Context, cfg Config, lease *egress.Lease, token string, image provider.ImageInput, referer string) (uploadedFile, error) {
 	payload := map[string]any{"fileName": image.Filename, "fileMimeType": image.MIMEType, "content": base64.StdEncoding.EncodeToString(image.Data)}
 	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/upload-file", payload, time.Minute, referer)
 	if err != nil {
@@ -912,6 +1035,8 @@ func (e *imageUploadError) HTTPStatusCode() int { return e.status }
 
 func (e *imageUploadError) MediaJobRetrySafe() bool { return true }
 
+func (e *imageUploadError) AccountHealthNeutral() bool { return e.status == http.StatusForbidden }
+
 func summarizeUploadResponse(body []byte) string {
 	value := strings.Join(strings.Fields(string(body)), " ")
 	if value == "" {
@@ -921,11 +1046,62 @@ func summarizeUploadResponse(body []byte) string {
 	if strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<html") || strings.Contains(lower, "just a moment") || strings.Contains(lower, "challenge-platform") {
 		return "Cloudflare 安全验证未通过"
 	}
-	runes := []rune(value)
-	if len(runes) > 1024 {
-		return string(runes[:1024]) + "..."
+	switch {
+	case strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many requests"):
+		return "上游请求频率受限"
+	case strings.Contains(lower, "quota") || strings.Contains(lower, "usage-exhausted") || strings.Contains(lower, "spending-limit"):
+		return "上游账号额度不足"
+	case strings.Contains(lower, "unauthorized") || strings.Contains(lower, "authentication") || strings.Contains(lower, "invalid token"):
+		return "上游账号认证失败"
+	case strings.Contains(lower, "moderated") || strings.Contains(lower, "moderation") || strings.Contains(lower, "unsafe"):
+		return "内容未通过上游安全检查"
+	default:
+		if detail := safeUploadResponseDetail(body); detail != "" {
+			return detail
+		}
+		return "上游返回了错误响应"
 	}
-	return value
+}
+
+func safeUploadResponseDetail(body []byte) string {
+	var payload any
+	if json.Unmarshal(body, &payload) != nil {
+		payload = strings.TrimSpace(string(body))
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(uploadResponseMessage(payload)), " "))
+	switch normalized {
+	case "filename is required":
+		return "fileName is required"
+	case "filemimetype is required":
+		return "fileMimeType is required"
+	case "content is required":
+		return "content is required"
+	case "file is required":
+		return "file is required"
+	case "file_source is required":
+		return "file_source is required"
+	default:
+		return ""
+	}
+}
+
+func uploadResponseMessage(value any) string {
+	switch current := value.(type) {
+	case string:
+		return strings.TrimSpace(current)
+	case map[string]any:
+		if nested, ok := current["error"].(map[string]any); ok {
+			if message, ok := nested["message"].(string); ok {
+				return strings.TrimSpace(message)
+			}
+		}
+		for _, key := range []string{"message", "error"} {
+			if message, ok := current[key].(string); ok {
+				return strings.TrimSpace(message)
+			}
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress.Lease, token, mediaType, mediaURL, prompt string) (string, error) {

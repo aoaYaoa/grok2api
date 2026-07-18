@@ -26,8 +26,23 @@ type fakeLegacyImageCache struct {
 	listError error
 }
 
+type legacyImageStatusError struct{ status int }
+
+func (e legacyImageStatusError) Error() string       { return "upstream image rejected" }
+func (e legacyImageStatusError) HTTPStatusCode() int { return e.status }
+
 func (f *fakeLegacyImageCache) ListImages() ([]LegacyCachedImage, error) {
 	return f.items, f.listError
+}
+
+func TestWriteImagineEditErrorPreservesProviderStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	contextValue, _ := gin.CreateTestContext(recorder)
+	writeImagineEditError(contextValue, false, legacyImageStatusError{status: http.StatusForbidden})
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestImagineCacheListUsesPublicAuthentication(t *testing.T) {

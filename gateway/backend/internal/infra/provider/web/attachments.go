@@ -50,6 +50,7 @@ func (a *Adapter) prepareChatAttachments(ctx context.Context, cfg Config, lease 
 	attachments := make([]string, 0, len(inputs))
 	seen := make(map[string]string, len(inputs))
 	total := int64(0)
+	directUploadAvailable := true
 	for _, input := range inputs {
 		input = strings.TrimSpace(input)
 		if seen[input] != "" {
@@ -63,7 +64,8 @@ func (a *Adapter) prepareChatAttachments(ctx context.Context, cfg Config, lease 
 		if total > maxChatImageTotalBytes {
 			return nil, fmt.Errorf("%w: 对话图片总大小不能超过 64 MiB", errInvalidChatImage)
 		}
-		uploaded, err := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/")
+		uploaded, directAvailable, err := a.uploadFileWithFallback(ctx, cfg, lease, token, image, cfg.BaseURL+"/", "", directUploadAvailable)
+		directUploadAvailable = directAvailable
 		if err != nil {
 			return nil, err
 		}

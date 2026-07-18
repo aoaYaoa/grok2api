@@ -526,7 +526,7 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	if err != nil {
 		return uploadedFile{}, err
 	}
-	uploaded, err := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
+	uploaded, err := a.uploadFileLegacy(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
 	if err != nil {
 		return uploadedFile{}, err
 	}

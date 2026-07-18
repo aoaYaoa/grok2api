@@ -185,7 +185,12 @@ func (s *Service) executeImage(
 		response, err = execute(ctx, route.Provider, credential, route.UpstreamModel)
 		if err != nil {
 			s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
-			if !provider.IsMediaPostProcessingError(err) {
+			failureStatus := http.StatusBadGateway
+			if status, ok := provider.ErrorHTTPStatus(err); ok && status >= 400 && status <= 599 {
+				failureStatus = status
+			}
+			accountNeutral := provider.IsAccountHealthNeutral(err) || (failureStatus == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider))
+			if !provider.IsMediaPostProcessingError(err) && !accountNeutral {
 				s.selector.MarkFailure(ctx, credential, 0, 0)
 			}
 			lease.Release()
@@ -193,7 +198,7 @@ func (s *Service) executeImage(
 			if provider.IsMediaPostProcessingError(err) {
 				errorCode = "media_postprocessing_failed"
 			}
-			writeFailureAudit(http.StatusBadGateway, errorCode, &credential)
+			writeFailureAudit(failureStatus, errorCode, &credential)
 			return nil, err
 		}
 		if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden && attempt == 0 && attempt+1 < attempts {
