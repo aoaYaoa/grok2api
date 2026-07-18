@@ -31,7 +31,7 @@ type legacyImageStatusError struct{ status int }
 func (e legacyImageStatusError) Error() string       { return "upstream image rejected" }
 func (e legacyImageStatusError) HTTPStatusCode() int { return e.status }
 
-func (f *fakeLegacyImageCache) ListImages() ([]LegacyCachedImage, error) {
+func (f *fakeLegacyImageCache) ListImages(context.Context) ([]LegacyCachedImage, error) {
 	return f.items, f.listError
 }
 

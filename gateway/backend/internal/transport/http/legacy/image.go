@@ -34,7 +34,7 @@ type LegacyCachedImage struct {
 }
 
 type LegacyImageCache interface {
-	ListImages() ([]LegacyCachedImage, error)
+	ListImages(context.Context) ([]LegacyCachedImage, error)
 }
 
 type imageTask struct {
@@ -106,7 +106,7 @@ func (h *Handler) imagineCacheList(c *gin.Context) {
 
 	items := []LegacyCachedImage{}
 	if h.imageCache != nil {
-		values, err := h.imageCache.ListImages()
+		values, err := h.imageCache.ListImages(c.Request.Context())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to list images"})
 			return

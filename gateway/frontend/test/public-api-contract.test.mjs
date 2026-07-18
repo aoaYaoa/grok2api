@@ -4,6 +4,7 @@ import test from "node:test";
 const contracts = await import("../src/public/api/contracts.mjs").catch(() => null);
 const stream = await import("../src/public/api/sse-parser.mjs").catch(() => null);
 const publicErrors = await import("../src/public/api/public-error.mjs").catch(() => null);
+const imageCacheURL = await import("../src/public/features/image/cache-url.ts").catch(() => null);
 
 test("public API contract preserves every active workspace endpoint", () => {
   assert.ok(contracts, "missing public API contract module");
@@ -57,5 +58,21 @@ test("public errors hide database details and upstream challenge HTML", () => {
   assert.equal(
     publicErrors.sanitizePublicError("上传图片失败，上游返回 403: <!DOCTYPE html><title>Just a moment...</title>"),
     "上游安全验证暂时未通过，请稍后重试",
+  );
+});
+
+test("cached image paths become absolute URLs before reuse", () => {
+  assert.ok(imageCacheURL, "missing image cache URL normalizer");
+  assert.equal(
+    imageCacheURL.absoluteImageCacheURL("/v1/files/image/cached.jpg", "https://grok.uonoe.com"),
+    "https://grok.uonoe.com/v1/files/image/cached.jpg",
+  );
+  assert.equal(
+    imageCacheURL.absoluteImageCacheURL("https://cdn.example/image.png", "https://grok.uonoe.com"),
+    "https://cdn.example/image.png",
+  );
+  assert.equal(
+    imageCacheURL.absoluteImageCacheURL("/v1/files/image/cached.jpg", "http://localhost:18001"),
+    "http://localhost:18001/v1/files/image/cached.jpg",
   );
 });

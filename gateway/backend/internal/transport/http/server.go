@@ -203,7 +203,7 @@ func New(deps Dependencies) *gin.Engine {
 		AllowNSFW:           deps.LegacyAllowNSFW,
 		Accounts:            deps.Accounts,
 		Settings:            deps.Settings,
-		ImageCache:          newLegacyImageCacheAdapter(cacheHandler),
+		ImageCache:          newLegacyImageCacheAdapter(cacheHandler, deps.Media),
 		VideoCache:          newLegacyVideoCacheAdapter(cacheHandler),
 		VideoReferenceStore: deps.Media,
 	}, deps.ClientKeys, deps.Gateway).Register(router, inferenceHandler.RegisterLegacyPublic, func(admin *gin.RouterGroup) {

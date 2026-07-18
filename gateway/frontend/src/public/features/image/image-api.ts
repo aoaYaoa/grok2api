@@ -1,5 +1,6 @@
 import { publicEndpoints, publicFetch, publicSSE, publicSSERequest } from "@/public/api/client";
 import { imageSource } from "@/public/lib/media";
+import { absoluteImageCacheURL } from "./cache-url";
 
 export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
 export type CachedImage = GeneratedImage & { name: string; sizeBytes: number };
@@ -36,7 +37,7 @@ export async function resolveParentPost(key: string, value: string) { return pub
 
 export function cachedImage(payload: Record<string, unknown>): CachedImage {
   const name = String(payload.name || "缓存图片");
-  const url = String(payload.view_url || payload.url || "");
+  const url = absoluteImageCacheURL(payload.view_url || payload.url, window.location.origin);
   const parentPostID = name.match(/[0-9a-fA-F]{8}-[0-9a-fA-F-]{24,28}/)?.[0] || "";
   return {
     id: name || crypto.randomUUID(), name, url, sourceURL: url, parentPostID,
