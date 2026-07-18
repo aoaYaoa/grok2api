@@ -387,6 +387,25 @@ func TestImageUploadDoesNotHideV2ForbiddenBehindLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestDecodeDirectFileUploadResponseSupportsAlternateMetadataShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "top-level camel case", body: `{"fileMetadataId":"metadata-1","fileUri":"users/test/reference/content"}`},
+		{name: "nested snake case", body: `{"file_metadata":{"id":"metadata-1","file_uri":"users/test/reference/content"}}`},
+		{name: "nested data pair", body: `{"data":{"id":"metadata-1","uri":"users/test/reference/content"}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			uploaded, err := decodeDirectFileUploadResponse(strings.NewReader(test.body))
+			if err != nil || uploaded.ID != "metadata-1" || uploaded.URI != "https://assets.grok.com/users/test/reference/content" {
+				t.Fatalf("uploaded=%#v err=%v", uploaded, err)
+			}
+		})
+	}
+}
+
 func newUploadTestAdapter(t *testing.T, baseURL string) (*Adapter, *infraegress.Lease) {
 	t.Helper()
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))

@@ -951,27 +951,84 @@ func buildDirectFileUploadBody(file provider.ImageInput, fileSource string) ([]b
 }
 
 func decodeDirectFileUploadResponse(source io.Reader) (uploadedFile, error) {
-	var value struct {
-		FileMetadata struct {
-			ID      string `json:"fileMetadataId"`
-			FileID  string `json:"fileId"`
-			FileURI string `json:"fileUri"`
-		} `json:"fileMetadata"`
-	}
+	var value any
 	if err := json.NewDecoder(source).Decode(&value); err != nil {
 		return uploadedFile{}, fmt.Errorf("V2 上传文件响应无效: %w", err)
 	}
-	if value.FileMetadata.ID == "" {
-		value.FileMetadata.ID = value.FileMetadata.FileID
-	}
+	fileID, rawURI := directFileUploadMetadata(value, false)
 	fileURI := ""
-	if value.FileMetadata.FileURI != "" {
-		fileURI = absoluteAssetURL(value.FileMetadata.FileURI)
+	if rawURI != "" {
+		fileURI = absoluteAssetURL(rawURI)
 	}
-	if value.FileMetadata.ID == "" && fileURI == "" {
+	if fileID == "" && fileURI == "" {
 		return uploadedFile{}, fmt.Errorf("V2 上传文件成功但上游未返回完整文件标识")
 	}
-	return uploadedFile{ID: value.FileMetadata.ID, URI: fileURI}, nil
+	return uploadedFile{ID: fileID, URI: fileURI}, nil
+}
+
+func directFileUploadMetadata(value any, metadataContext bool) (string, string) {
+	switch current := value.(type) {
+	case map[string]any:
+		fileID := normalizedStringField(current, "filemetadataid", "fileid")
+		fileURI := normalizedStringField(current, "fileuri")
+		genericID := normalizedStringField(current, "id")
+		genericURI := normalizedStringField(current, "uri", "url")
+		if metadataContext || genericID != "" && genericURI != "" {
+			if fileID == "" {
+				fileID = genericID
+			}
+			if fileURI == "" {
+				fileURI = genericURI
+			}
+		}
+		if fileID != "" && fileURI != "" {
+			return fileID, fileURI
+		}
+		keys := make([]string, 0, len(current))
+		for key := range current {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			normalized := normalizeUploadFieldName(key)
+			childID, childURI := directFileUploadMetadata(current[key], metadataContext || normalized == "filemetadata" || normalized == "file")
+			if fileID == "" {
+				fileID = childID
+			}
+			if fileURI == "" {
+				fileURI = childURI
+			}
+			if fileID != "" && fileURI != "" {
+				return fileID, fileURI
+			}
+		}
+		return fileID, fileURI
+	case []any:
+		for _, item := range current {
+			if fileID, fileURI := directFileUploadMetadata(item, metadataContext); fileID != "" || fileURI != "" {
+				return fileID, fileURI
+			}
+		}
+	}
+	return "", ""
+}
+
+func normalizedStringField(value map[string]any, names ...string) string {
+	for key, raw := range value {
+		normalized := normalizeUploadFieldName(key)
+		for _, name := range names {
+			if normalized == name {
+				if text, ok := raw.(string); ok {
+					return strings.TrimSpace(text)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeUploadFieldName(value string) string {
+	return strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(strings.TrimSpace(value)))
 }
 
 func directFileUploadFallbackStatus(statusCode int) bool {
