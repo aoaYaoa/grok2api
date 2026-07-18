@@ -554,7 +554,7 @@ func convertAnthropicWebSearchTool(tool map[string]json.RawMessage, index int) (
 			}
 			converted[key] = value
 		default:
-			return nil, fmt.Errorf("Grok Build 0.2.99 不支持 Anthropic web search 字段 tools[%d].%s", index, key)
+			return nil, fmt.Errorf("Grok Build 0.2.102 不支持 Anthropic web search 字段 tools[%d].%s", index, key)
 		}
 	}
 	return converted, nil

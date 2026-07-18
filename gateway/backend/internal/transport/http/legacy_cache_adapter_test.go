@@ -27,3 +27,24 @@ func TestLegacyVideoCacheAdapterRenamesByMigratedFilename(t *testing.T) {
 		t.Fatalf("item=%#v", item)
 	}
 }
+
+func TestLegacyImageCacheAdapterListsCachedImages(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "cached-reference.jpg"
+	if err := os.WriteFile(filepath.Join(root, "image", name), []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &legacyImageCacheAdapter{handler: handler}
+	items, err := adapter.ListImages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != name || items[0].ViewURL != "/v1/files/image/"+name {
+		t.Fatalf("items=%#v", items)
+	}
+}

@@ -2,6 +2,7 @@ import { publicEndpoints, publicFetch, publicSSE, publicSSERequest } from "@/pub
 import { imageSource } from "@/public/lib/media";
 
 export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
+export type CachedImage = GeneratedImage & { name: string; sizeBytes: number };
 export type ImageEvent = Record<string, unknown>;
 
 export async function startImage(key: string, body: { prompt: string; aspect_ratio: string; nsfw: boolean; pro: boolean }, signal?: AbortSignal) { return publicFetch<{ task_id: string }>(key, publicEndpoints.imagineStart, { method: "POST", body: JSON.stringify(body), signal }); }
@@ -32,3 +33,26 @@ export function imageFromEdit(payload: Record<string, unknown>, prompt: string):
 }
 
 export async function resolveParentPost(key: string, value: string) { return publicFetch<Record<string, unknown>>(key, `${publicEndpoints.parentPost}?parent_post_id=${encodeURIComponent(value)}`); }
+
+export function cachedImage(payload: Record<string, unknown>): CachedImage {
+  const name = String(payload.name || "缓存图片");
+  const url = String(payload.view_url || payload.url || "");
+  const parentPostID = name.match(/[0-9a-fA-F]{8}-[0-9a-fA-F-]{24,28}/)?.[0] || "";
+  return {
+    id: name || crypto.randomUUID(), name, url, sourceURL: url, parentPostID,
+    prompt: name, sizeBytes: Number(payload.size_bytes || 0), createdAt: Number(payload.mtime_ms || Date.now()),
+  };
+}
+
+export async function listCachedImages(key: string) {
+  const items: Array<Record<string, unknown>> = [];
+  let page = 1;
+  let total: number;
+  do {
+    const payload = await publicFetch<{ items: Array<Record<string, unknown>>; total: number }>(key, `${publicEndpoints.imageCache}?page=${page}&page_size=200`);
+    items.push(...(payload.items || []));
+    total = Number(payload.total || 0);
+    page += 1;
+  } while (items.length < total && page <= 50);
+  return { items, total };
+}

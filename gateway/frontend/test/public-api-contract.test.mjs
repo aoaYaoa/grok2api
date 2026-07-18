@@ -19,6 +19,7 @@ test("public API contract preserves every active workspace endpoint", () => {
     imagineEdit: "/v1/public/imagine/edit",
     workbenchEdit: "/v1/public/imagine/workbench/edit",
     parentPost: "/v1/public/imagine/parent-post",
+    imageCache: "/v1/public/imagine/cache/list",
     videoStart: "/v1/public/video/start",
     videoStop: "/v1/public/video/stop",
     videoSSE: "/v1/public/video/sse",

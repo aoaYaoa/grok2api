@@ -1,31 +1,162 @@
-import { ClipboardPaste, Download, ImagePlus, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
+import { ClipboardPaste, Download, ImagePlus, Library, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
-import { editImage, imageFromEdit, resolveParentPost, type GeneratedImage } from "@/public/features/image/image-api";
+import { cachedImage, editImage, imageFromEdit, listCachedImages, resolveParentPost, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { downloadURL, extractParentPostID, filesToAssets, imageSource, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
 
 type Reference = UploadAsset & { parentPostID?: string };
+
 export function WorkbenchPage() {
-  const { key } = usePublicAuth(); const [references, setReferences] = useState<Reference[]>([]); const [parentInput, setParentInput] = useState(""); const [prompt, setPrompt] = useState(""); const [history, setHistory] = useState<GeneratedImage[]>([]); const [current, setCurrent] = useState<GeneratedImage | null>(null); const [progress, setProgress] = useState(0); const [status, setStatus] = useState("未开始"); const [running, setRunning] = useState(false);
-  const appendReferenceFiles = useCallback(async (files: FileList | File[]) => { try { const items = await filesToAssets(files, Math.max(0, 8 - references.length)); setReferences((value) => [...value, ...items].slice(0, 8)); } catch (error) { toast.error(error instanceof Error ? error.message : "读取参考图失败"); } }, [references.length]);
-  useEffect(() => { const paste = (event: ClipboardEvent) => { const files = Array.from(event.clipboardData?.files || []).filter(isImageUploadFile); if (files.length) void appendReferenceFiles(files); }; window.addEventListener("paste", paste); return () => window.removeEventListener("paste", paste); }, [appendReferenceFiles]);
-  async function addParent() { const id = extractParentPostID(parentInput); if (!id) return toast.error("未识别到 parentPostId"); try { const payload = await resolveParentPost(key, id); const url = imageSource(payload); if (!url) throw new Error("未找到图片地址"); setReferences((items) => [...items, { id: crypto.randomUUID(), name: id, mime: "image/jpeg", data: url, parentPostID: id }].slice(0, 8)); setParentInput(""); } catch (error) { toast.error(error instanceof Error ? error.message : "加载 parentPostId 失败"); } }
-  async function submit() { if (!prompt.trim() || !references.length || running) return; setRunning(true); setStatus("编辑中"); setProgress(2); try { const payload = await editImage(key, { workbench: true, prompt: prompt.trim(), image_references: references.map((item) => item.data), reference_items: references.map((item) => ({ image_url: item.data, source_image_url: item.data, parent_post_id: item.parentPostID || "" })) }, (value, message) => { setProgress(value); setStatus(message); }); const image = imageFromEdit(payload, prompt.trim()); if (!image) throw new Error("编辑结果为空"); setCurrent(image); setHistory((items) => [image, ...items]); setReferences([{ id: image.id, name: image.parentPostID || "编辑结果", mime: "image/jpeg", data: image.sourceURL, parentPostID: image.parentPostID }]); setProgress(100); setStatus("编辑完成"); toast.success("编辑完成"); } catch (error) { setStatus("编辑失败"); toast.error(error instanceof Error ? error.message : "编辑失败"); } finally { setRunning(false); } }
-  function reset() { setReferences([]); setCurrent(null); setPrompt(""); setProgress(0); setStatus("未开始"); }
+  const { key } = usePublicAuth();
+  const [references, setReferences] = useState<Reference[]>([]);
+  const [parentInput, setParentInput] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [history, setHistory] = useState<GeneratedImage[]>([]);
+  const [current, setCurrent] = useState<GeneratedImage | null>(null);
+  const [cachedImages, setCachedImages] = useState<CachedImage[]>([]);
+  const [cacheOpen, setCacheOpen] = useState(false);
+  const [cacheLoading, setCacheLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [status, setStatus] = useState("未开始");
+  const [running, setRunning] = useState(false);
+
+  const appendReferenceFiles = useCallback(async (files: FileList | File[]) => {
+    try {
+      const items = await filesToAssets(files, Math.max(0, 8 - references.length));
+      setReferences((value) => [...value, ...items].slice(0, 8));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取参考图失败");
+    }
+  }, [references.length]);
+
+  useEffect(() => {
+    const paste = (event: ClipboardEvent) => {
+      const files = Array.from(event.clipboardData?.files || []).filter(isImageUploadFile);
+      if (files.length) void appendReferenceFiles(files);
+    };
+    window.addEventListener("paste", paste);
+    return () => window.removeEventListener("paste", paste);
+  }, [appendReferenceFiles]);
+
+  function addReference(reference: Reference) {
+    if (references.some((item) => item.data === reference.data)) {
+      toast.info("这张图片已经在参考图中");
+      return false;
+    }
+    if (references.length >= 8) {
+      toast.error("最多添加 8 张参考图");
+      return false;
+    }
+    setReferences((items) => [...items, reference]);
+    return true;
+  }
+
+  async function addParent() {
+    const id = extractParentPostID(parentInput);
+    if (!id) return toast.error("未识别到 parentPostId");
+    try {
+      const payload = await resolveParentPost(key, id);
+      const url = imageSource(payload);
+      if (!url) throw new Error("未找到图片地址");
+      addReference({ id: crypto.randomUUID(), name: id, mime: "image/jpeg", data: url, parentPostID: id });
+      setParentInput("");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载 parentPostId 失败");
+    }
+  }
+
+  async function openCache() {
+    setCacheOpen(true);
+    setCacheLoading(true);
+    try {
+      const payload = await listCachedImages(key);
+      setCachedImages((payload.items || []).map(cachedImage).filter((item) => Boolean(item.url)));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取图片缓存失败");
+    } finally {
+      setCacheLoading(false);
+    }
+  }
+
+  function addCachedReference(image: CachedImage) {
+    if (addReference({ id: image.id, name: image.name, mime: "image/jpeg", data: image.sourceURL, parentPostID: image.parentPostID })) setCacheOpen(false);
+  }
+
+  function addCurrentReference() {
+    if (!current) return;
+    addReference({ id: current.id, name: current.parentPostID || "编辑结果", mime: "image/jpeg", data: current.sourceURL, parentPostID: current.parentPostID });
+  }
+
+  async function submit() {
+    if (!prompt.trim() || !references.length || running) return;
+    setRunning(true);
+    setStatus("编辑中");
+    setProgress(2);
+    try {
+      const payload = await editImage(key, {
+        workbench: true,
+        prompt: prompt.trim(),
+        image_references: references.map((item) => item.data),
+        reference_items: references.map((item) => ({
+          image_url: item.data,
+          source_image_url: item.data,
+          parent_post_id: item.parentPostID || "",
+        })),
+      }, (value, message) => {
+        setProgress(value);
+        setStatus(message);
+      });
+      const image = imageFromEdit(payload, prompt.trim());
+      if (!image) throw new Error("编辑结果为空");
+      setCurrent(image);
+      setHistory((items) => [image, ...items]);
+      setProgress(100);
+      setStatus("编辑完成");
+      toast.success("编辑完成，原参考图已保留");
+    } catch (error) {
+      setStatus("编辑失败");
+      toast.error(error instanceof Error ? error.message : "编辑失败");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function reset() {
+    setReferences([]);
+    setCurrent(null);
+    setPrompt("");
+    setProgress(0);
+    setStatus("未开始");
+  }
+
   return <section className="workspace-page">
-    <div className="workspace-heading"><div><h1 className="text-xl font-semibold">图片编辑工作台</h1><p className="mt-1 text-sm text-muted-foreground">{status}</p></div><div className="workspace-actions flex gap-2"><Button variant="outline" onClick={reset}><RotateCcw className="size-4" />重置链路</Button><Button variant="outline" onClick={() => setHistory([])}><Trash2 className="size-4" />清空历史</Button></div></div>
+    <div className="workspace-heading">
+      <div><h1 className="text-xl font-semibold">图片编辑工作台</h1><p className="mt-1 text-sm text-muted-foreground">{status}</p></div>
+      <div className="workspace-actions flex gap-2">
+        <Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存图片</Button>
+        <Button variant="outline" onClick={reset}><RotateCcw className="size-4" />重置链路</Button>
+        <Button variant="outline" onClick={() => setHistory([])}><Trash2 className="size-4" />清空历史</Button>
+      </div>
+    </div>
 
     <div className="workspace-split">
       <aside className="workspace-controls">
         <div className="workspace-panel p-4">
           <div className="workspace-control-group">
-            <div className="mb-3 flex flex-wrap items-center gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} /></label><span className="text-xs text-muted-foreground">{references.length}/8</span></div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent">
+                <ImagePlus className="size-4" />添加参考图
+                <input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} />
+              </label>
+              <span className="text-xs text-muted-foreground">{references.length}/8</span>
+            </div>
             <div className="flex gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId 或 URL" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="使用 parentPostId"><ClipboardPaste className="size-4" /></Button></div>
             <p className="mt-2 text-xs text-muted-foreground">支持拖入、粘贴和最多 8 张参考图</p>
             {references.length > 0 && <div className="mt-3 grid grid-cols-3 gap-2">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border bg-background"><img src={item.data} alt={item.name} className="size-full object-cover" /><button onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} className="absolute right-1 top-1 grid size-8 place-items-center rounded-md bg-background/90 shadow-sm" aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div>}
@@ -42,11 +173,23 @@ export function WorkbenchPage() {
 
       <main className="workspace-results">
         <section>
-          <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">当前结果</h2>{current && <Button variant="outline" size="sm" onClick={() => downloadURL(current.url, `workbench-${Date.now()}.jpg`)}><Download className="size-4" />下载</Button>}</div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold">当前结果</h2>
+            {current && <div className="flex gap-2"><Button variant="outline" size="sm" onClick={addCurrentReference}><ImagePlus className="size-4" />加入参考图</Button><Button variant="outline" size="sm" onClick={() => downloadURL(current.url, `workbench-${Date.now()}.jpg`)}><Download className="size-4" />下载</Button></div>}
+          </div>
           <div className="workspace-panel-muted grid min-h-96 place-items-center p-3">{current ? <button onClick={() => downloadURL(current.url, `workbench-${Date.now()}.jpg`)}><img src={current.url} alt={current.prompt} className="max-h-[62dvh] object-contain" /></button> : <p className="text-sm text-muted-foreground">编辑结果会显示在这里</p>}</div>
         </section>
         <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">编辑历史</h2><span className="text-xs text-muted-foreground">{history.length} 条</span></div>{history.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">{history.map((item) => <button key={`${item.id}-${item.createdAt}`} className="aspect-square overflow-hidden rounded-md border bg-card" onClick={() => setCurrent(item)}><img src={item.url} alt={item.prompt} className="size-full object-cover" loading="lazy" /></button>)}</div> : <div className="workspace-empty grid min-h-28 place-items-center text-sm text-muted-foreground">暂无历史</div>}</section>
       </main>
     </div>
+
+    <Dialog open={cacheOpen} onOpenChange={setCacheOpen}>
+      <DialogContent className="max-w-5xl">
+        <DialogHeader><DialogTitle>缓存图片</DialogTitle></DialogHeader>
+        <div className="max-h-[70dvh] overflow-auto">
+          {cacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{cachedImages.map((image) => <article key={`${image.id}-${image.createdAt}`} className="overflow-hidden rounded-md border bg-card shadow-sm"><button className="relative block aspect-square w-full overflow-hidden bg-muted" onClick={() => addCachedReference(image)} aria-label={`添加缓存图片 ${image.name}`}><img src={image.url} alt={image.name} className="size-full object-cover" loading="lazy" /><span className="absolute right-2 top-2 grid size-8 place-items-center rounded-md bg-background/85"><Plus className="size-4" /></span></button><div className="flex h-11 items-center justify-between gap-2 px-2"><span className="min-w-0 truncate text-xs text-muted-foreground">{image.name}</span><Button size="icon" variant="ghost" className="size-8 shrink-0" onClick={() => downloadURL(image.url, image.name)} aria-label={`下载 ${image.name}`}><Download className="size-4" /></Button></div></article>)}</div> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}
+        </div>
+      </DialogContent>
+    </Dialog>
   </section>;
 }

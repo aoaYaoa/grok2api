@@ -126,6 +126,35 @@ test("video cache dialog does not merge the whole cache into session history", a
   assert.match(video, /<VideoGrid videos=\{cachedVideos\}/);
 });
 
+test("image workbench preserves references and keeps cached images separate", async () => {
+  const workbench = await readFile(path.join(root, "src/public/pages/workbench-page.tsx"), "utf8");
+  const submit = workbench.slice(workbench.indexOf("async function submit"), workbench.indexOf("function reset"));
+  const openCache = workbench.slice(workbench.indexOf("async function openCache"), workbench.indexOf("async function submit"));
+
+  assert.doesNotMatch(submit, /setReferences\(\[\{/);
+  assert.match(workbench, /const \[cachedImages, setCachedImages\]/);
+  assert.match(openCache, /listCachedImages/);
+  assert.doesNotMatch(openCache, /setHistory/);
+  assert.match(workbench, /<Dialog open=\{cacheOpen\}/);
+  assert.match(workbench, /addCachedReference/);
+});
+
+test("image cache stays separate across Imagine and NSFW workspaces", async () => {
+  const imagine = await readFile(path.join(root, "src/public/pages/imagine-page.tsx"), "utf8");
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+
+  for (const source of [imagine, nsfw]) {
+    assert.match(source, /listCachedImages/);
+    assert.match(source, /cachedImage/);
+    assert.match(source, /缓存图片/);
+    assert.match(source, /<ImageGrid images=\{cachedImages\}/);
+  }
+  const imagineOpenCache = imagine.slice(imagine.indexOf("async function openImageCache"), imagine.indexOf("async function submitEdit"));
+  const nsfwOpenCache = nsfw.slice(nsfw.indexOf("async function openImageCache"), nsfw.indexOf("async function openCache"));
+  assert.doesNotMatch(imagineOpenCache, /setImages/);
+  assert.doesNotMatch(nsfwOpenCache, /setImages/);
+});
+
 test("video extension workspaces keep stable media frames and separate result state", async () => {
   const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
   const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");

@@ -12,7 +12,7 @@ import { ImageGrid } from "@/public/components/image-grid";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
 import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
-import { editImage, generatedImage, imageFromEdit, startImage, stopImages, streamImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { cachedImage, editImage, generatedImage, imageFromEdit, listCachedImages, startImage, stopImages, streamImage, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
 import { filesToAssets, isHEICFile, type UploadAsset } from "@/public/lib/media";
@@ -39,6 +39,9 @@ export function NsfwPage() {
   const [resolution, setResolution] = useState("480p");
   const [length, setLength] = useState("6");
   const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [cachedImages, setCachedImages] = useState<CachedImage[]>([]);
+  const [imageCacheOpen, setImageCacheOpen] = useState(false);
+  const [imageCacheLoading, setImageCacheLoading] = useState(false);
   const [selected, setSelected] = useState<GeneratedImage | null>(null);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
@@ -268,6 +271,19 @@ export function NsfwPage() {
     await stopVideos(key, tasks).catch(() => undefined);
   }
 
+  async function openImageCache() {
+    setImageCacheOpen(true);
+    setImageCacheLoading(true);
+    try {
+      const payload = await listCachedImages(key);
+      setCachedImages((payload.items || []).map(cachedImage).filter((item) => Boolean(item.url)));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取图片缓存失败");
+    } finally {
+      setImageCacheLoading(false);
+    }
+  }
+
   async function openCache() {
     setCacheOpen(true);
     try {
@@ -309,7 +325,7 @@ export function NsfwPage() {
     <section className="workspace-page">
       <div className="workspace-heading">
         <div><h1 className="text-xl font-semibold">NSFW 工作台</h1><p className="mt-1 text-sm text-muted-foreground">候选图、图生视频与时间轴延长集中处理</p></div>
-        <div className="workspace-actions flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); setExtensionResult(null); }}><Trash2 className="size-4" />清空视频</Button></div>
+        <div className="workspace-actions flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => void openImageCache()}><Library className="size-4" />缓存图片</Button><Button variant="outline" onClick={() => void openCache()}><Library className="size-4" />缓存视频</Button><Button variant="outline" onClick={() => { setImages([]); setSelected(null); setLocalImage(null); }}><Trash2 className="size-4" />清空图片</Button><Button variant="outline" onClick={() => { setVideos([]); setActiveVideo(null); setExtensionResult(null); }}><Trash2 className="size-4" />清空视频</Button></div>
       </div>
 
       <div className="workspace-split">
@@ -368,6 +384,7 @@ export function NsfwPage() {
           <div><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">视频结果</h2><span className="text-xs text-muted-foreground">{videos.length} 个</span></div><VideoGrid videos={videos} activeID={activeVideo?.id} onActivate={(item) => selectVideo(item)} onExtend={(item) => selectVideo(item, true)} /></div>
         </main>
       </div>
+      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto">{imageCacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <ImageGrid images={cachedImages} onOpen={(image) => { setImageCacheOpen(false); setSelected(image); setLocalImage(null); }} onEdit={(image) => { setImageCacheOpen(false); setSelected(image); setLocalImage(null); }} /> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}</div></DialogContent></Dialog>
       <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );

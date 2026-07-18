@@ -21,7 +21,7 @@ var nativeHostedToolChoiceTypes = map[string]string{
 	"local_shell":                   "shell",
 }
 
-// webSearchCompatibilityFields 是 Codex/OpenAI 新版声明中已知、但 0.2.99 上游会以
+// webSearchCompatibilityFields 是 Codex/OpenAI 新版声明中已知、但 0.2.102 上游会以
 // "Argument not supported" 拒绝的控制字段。Build 只能降级为其原生最小搜索工具。
 var webSearchCompatibilityFields = map[string]struct{}{
 	"external_web_access":  {},
@@ -35,7 +35,7 @@ var webSearchCompatibilityFields = map[string]struct{}{
 	"safe_search":          {},
 }
 
-// normalizeNativeTool 保留 0.2.99 已确认支持的工具，并拒绝只属于 Tool Search 的延迟字段。
+// normalizeNativeTool 保留 0.2.102 已确认支持的工具，并拒绝只属于 Tool Search 的延迟字段。
 func (c *responsesToolCompatibility) normalizeNativeTool(tool map[string]any, param string) ([]any, error) {
 	if _, exists := tool["defer_loading"]; exists {
 		return nil, &responsesRequestError{
@@ -46,7 +46,7 @@ func (c *responsesToolCompatibility) normalizeNativeTool(tool map[string]any, pa
 	return []any{cloneJSONValue(tool)}, nil
 }
 
-// normalizeWebSearchTool 将 Codex/OpenAI 新版搜索声明降级为 0.2.99 支持的最小 web_search。
+// normalizeWebSearchTool 将 Codex/OpenAI 新版搜索声明降级为 0.2.102 支持的最小 web_search。
 func (c *responsesToolCompatibility) normalizeWebSearchTool(tool map[string]any, kind, param string) ([]any, error) {
 	if external, exists := tool["external_web_access"]; exists {
 		enabled, ok := external.(bool)
@@ -54,7 +54,7 @@ func (c *responsesToolCompatibility) normalizeWebSearchTool(tool map[string]any,
 			return nil, &responsesRequestError{Message: "external_web_access 必须是布尔值", Param: param + ".external_web_access", Code: "invalid_parameter"}
 		}
 		if !enabled {
-			// 0.2.99 不能表达“只允许索引、禁止外网”。发送最小 web_search
+			// 0.2.102 不能表达“只允许索引、禁止外网”。发送最小 web_search
 			// 会扩大客户端授权，因此直接移除该搜索工具，形成安全的能力子集。
 			c.webSearchDisabled = true
 			c.changed = true
@@ -64,13 +64,13 @@ func (c *responsesToolCompatibility) normalizeWebSearchTool(tool map[string]any,
 	}
 	if filters, exists := tool["filters"]; exists && hasNonEmptyWebSearchConstraint(filters) {
 		return nil, &responsesRequestError{
-			Message: "Grok Build 0.2.99 无法保证 web_search filters 约束",
+			Message: "Grok Build 0.2.102 无法保证 web_search filters 约束",
 			Param:   param + ".filters", Code: "unsupported_parameter",
 		}
 	}
 	if domains, exists := tool["allowed_domains"]; exists && hasNonEmptyWebSearchConstraint(domains) {
 		return nil, &responsesRequestError{
-			Message: "Grok Build 0.2.99 无法保证 allowed_domains 约束",
+			Message: "Grok Build 0.2.102 无法保证 allowed_domains 约束",
 			Param:   param + ".allowed_domains", Code: "unsupported_parameter",
 		}
 	}
@@ -82,7 +82,7 @@ func (c *responsesToolCompatibility) normalizeWebSearchTool(tool map[string]any,
 		for _, value := range values {
 			if value != "text" {
 				return nil, &responsesRequestError{
-					Message: "Grok Build 0.2.99 只能兼容文本 Web Search",
+					Message: "Grok Build 0.2.102 只能兼容文本 Web Search",
 					Param:   param + ".search_content_types", Code: "unsupported_parameter",
 				}
 			}
@@ -94,7 +94,7 @@ func (c *responsesToolCompatibility) normalizeWebSearchTool(tool map[string]any,
 		}
 		if _, compatible := webSearchCompatibilityFields[key]; !compatible {
 			return nil, &responsesRequestError{
-				Message: "Grok Build 0.2.99 不支持该 web_search 字段",
+				Message: "Grok Build 0.2.102 不支持该 web_search 字段",
 				Param:   param + "." + key, Code: "unsupported_parameter",
 			}
 		}
@@ -162,7 +162,7 @@ func (c *responsesToolCompatibility) normalizeMCPTool(tool map[string]any, clien
 
 func unsupportedBuildToolError(kind, param string) error {
 	return &responsesRequestError{
-		Message: fmt.Sprintf("Grok Build 0.2.99 不支持 tools.type=%q", kind),
+		Message: fmt.Sprintf("Grok Build 0.2.102 不支持 tools.type=%q", kind),
 		Param:   param + ".type", Code: "unsupported_parameter",
 	}
 }

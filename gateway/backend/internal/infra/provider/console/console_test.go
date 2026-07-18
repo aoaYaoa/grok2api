@@ -136,6 +136,25 @@ func TestConsoleRetryAfterParsesCompoundDuration(t *testing.T) {
 	}
 }
 
+func TestApplyChromiumClientHintsMatchesConfiguredUserAgent(t *testing.T) {
+	header := make(http.Header)
+	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36")
+	if header.Get("Sec-Ch-Ua") != `"Google Chrome";v="146", "Chromium";v="146", "Not(A:Brand";v="24"` ||
+		header.Get("Sec-Ch-Ua-Mobile") != "?0" || header.Get("Sec-Ch-Ua-Platform") != `"macOS"` {
+		t.Fatalf("client hints = %#v", header)
+	}
+}
+
+func TestApplyChromiumClientHintsSkipsNonChromiumUserAgent(t *testing.T) {
+	header := make(http.Header)
+	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15")
+	for name := range header {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Sec-Ch-Ua") {
+			t.Fatalf("unexpected client hint %q", name)
+		}
+	}
+}
+
 func TestAdapterForwardsConsoleHeadersAndNormalizedBody(t *testing.T) {
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

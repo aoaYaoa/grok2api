@@ -21,6 +21,41 @@ type fakeImageGenerator struct {
 	editInputs []gateway.ImageEditInput
 }
 
+type fakeLegacyImageCache struct {
+	items     []LegacyCachedImage
+	listError error
+}
+
+func (f *fakeLegacyImageCache) ListImages() ([]LegacyCachedImage, error) {
+	return f.items, f.listError
+}
+
+func TestImagineCacheListUsesPublicAuthentication(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	imageCache := &fakeLegacyImageCache{items: []LegacyCachedImage{{
+		Name: "cached-image.jpg", ViewURL: "/v1/files/image/cached-image.jpg",
+		SizeBytes: 1234, ModifiedAtMS: 5678,
+	}}}
+	handler := NewHandler(Options{PublicEnabled: true, ImageCache: imageCache}, authenticator)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/imagine/cache/list?page=1&page_size=100", nil)
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	for _, expected := range []string{`"total":1`, `"name":"cached-image.jpg"`, `"view_url":"/v1/files/image/cached-image.jpg"`, `"size_bytes":1234`, `"mtime_ms":5678`} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("body missing %s: %s", expected, recorder.Body.String())
+		}
+	}
+}
+
 func TestImagineWebSocketStreamsExistingTask(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}

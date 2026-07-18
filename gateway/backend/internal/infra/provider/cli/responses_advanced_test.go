@@ -285,7 +285,7 @@ func TestResponsesBuild0299NativeAndUnsupportedToolMatrix(t *testing.T) {
 			body := []byte(`{"model":"public","input":"hello","tools":[{"type":"` + kind + `"}]}`)
 			_, _, err := normalizeResponsesRequest(body, "grok-4.5")
 			requestErr, ok := err.(*responsesRequestError)
-			if !ok || requestErr.Code != "unsupported_parameter" || requestErr.Param != "tools[0].type" || !strings.Contains(requestErr.Message, "0.2.99") {
+			if !ok || requestErr.Code != "unsupported_parameter" || requestErr.Param != "tools[0].type" || !strings.Contains(requestErr.Message, "0.2.102") {
 				t.Fatalf("error = %#v", err)
 			}
 		})

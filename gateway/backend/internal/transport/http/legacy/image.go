@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,17 @@ import (
 const maxLegacyImageResponseBytes = 64 << 20
 
 var parentPostIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
+
+type LegacyCachedImage struct {
+	Name         string
+	ViewURL      string
+	SizeBytes    int64
+	ModifiedAtMS int64
+}
+
+type LegacyImageCache interface {
+	ListImages() ([]LegacyCachedImage, error)
+}
 
 type imageTask struct {
 	id          string
@@ -82,6 +94,35 @@ func (h *Handler) registerImagine(public *gin.RouterGroup) {
 	public.POST("/imagine/edit", h.imagineEdit)
 	public.POST("/imagine/workbench/edit", h.imagineWorkbenchEdit)
 	public.GET("/imagine/parent-post", h.imagineParentPost)
+	public.GET("/imagine/cache/list", h.imagineCacheList)
+}
+
+func (h *Handler) imagineCacheList(c *gin.Context) {
+	pageValue, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "100"))
+	pageValue = max(pageValue, 1)
+	pageSize = min(max(pageSize, 1), 200)
+
+	items := []LegacyCachedImage{}
+	if h.imageCache != nil {
+		values, err := h.imageCache.ListImages()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to list images"})
+			return
+		}
+		items = values
+	}
+
+	total := len(items)
+	start, end := legacyPageRange(pageValue, pageSize, total)
+	result := make([]gin.H, 0, end-start)
+	for _, item := range items[start:end] {
+		result = append(result, gin.H{
+			"name": item.Name, "view_url": item.ViewURL,
+			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": result, "page": pageValue, "page_size": pageSize, "total": total})
 }
 
 var imageUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }, HandshakeTimeout: 15 * time.Second}

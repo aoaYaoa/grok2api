@@ -9,6 +9,32 @@ type legacyVideoCacheAdapter struct {
 	handler *cachehttp.Handler
 }
 
+type legacyImageCacheAdapter struct {
+	handler *cachehttp.Handler
+}
+
+func newLegacyImageCacheAdapter(handler *cachehttp.Handler) legacyhttp.LegacyImageCache {
+	if handler == nil {
+		return nil
+	}
+	return &legacyImageCacheAdapter{handler: handler}
+}
+
+func (a *legacyImageCacheAdapter) ListImages() ([]legacyhttp.LegacyCachedImage, error) {
+	items, err := a.handler.ListAllItems("image")
+	if err != nil {
+		return nil, err
+	}
+	result := make([]legacyhttp.LegacyCachedImage, 0, len(items))
+	for _, item := range items {
+		result = append(result, legacyhttp.LegacyCachedImage{
+			Name: item.Name, ViewURL: item.ViewURL,
+			SizeBytes: item.SizeBytes, ModifiedAtMS: item.ModifiedAtMS,
+		})
+	}
+	return result, nil
+}
+
 func newLegacyVideoCacheAdapter(handler *cachehttp.Handler) legacyhttp.LegacyVideoCache {
 	if handler == nil {
 		return nil
