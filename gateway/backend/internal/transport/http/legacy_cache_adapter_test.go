@@ -84,6 +84,30 @@ func TestLegacyImageCacheAdapterListsCachedImages(t *testing.T) {
 	}
 }
 
+func TestLegacyImageCacheAdapterExcludesVideoPosters(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regularName := "generated-image.jpg"
+	posterName := "users-test-generated-123e4567-e89b-12d3-a456-426614174000-preview_image.jpg"
+	for _, name := range []string{regularName, posterName} {
+		if err := os.WriteFile(filepath.Join(root, "image", name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	adapter := &legacyImageCacheAdapter{handler: handler}
+	items, err := adapter.ListImages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != regularName {
+		t.Fatalf("items=%#v", items)
+	}
+}
+
 func TestLegacyVideoCacheAdapterSetsDeletionIdentity(t *testing.T) {
 	root := t.TempDir()
 	handler, err := cachehttp.NewHandler(root)

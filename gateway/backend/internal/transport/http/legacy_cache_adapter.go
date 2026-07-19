@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -42,6 +43,9 @@ func (a *legacyImageCacheAdapter) ListImages(ctx context.Context) ([]legacyhttp.
 		}
 		result = make([]legacyhttp.LegacyCachedImage, 0, len(items))
 		for _, item := range items {
+			if isLegacyVideoPosterName(item.Name) {
+				continue
+			}
 			result = append(result, legacyhttp.LegacyCachedImage{
 				Source: "legacy", CacheKey: item.Name,
 				Name: item.Name, ViewURL: item.ViewURL,
@@ -81,6 +85,15 @@ func (a *legacyImageCacheAdapter) ListImages(ctx context.Context) ([]legacyhttp.
 	result = deduplicateLegacyImages(result)
 	sort.SliceStable(result, func(i, j int) bool { return result[i].ModifiedAtMS > result[j].ModifiedAtMS })
 	return result, nil
+}
+
+func isLegacyVideoPosterName(name string) bool {
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if !strings.Contains(stem, "-generated-") {
+		return false
+	}
+	return strings.HasSuffix(stem, "-preview_image") || strings.HasSuffix(stem, "-thumbnail_image")
 }
 
 func (a *legacyImageCacheAdapter) DeleteImages(ctx context.Context, targets []legacyhttp.CacheDeleteTarget) (legacyhttp.CacheDeleteResult, error) {
