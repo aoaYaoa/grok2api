@@ -309,30 +309,6 @@ func TestImagineEditAndWorkbenchMapToGoMultiImageEditor(t *testing.T) {
 	}
 }
 
-func TestImagineParentPostReturnsDeterministicFallback(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
-	handler := NewHandler(Options{PublicEnabled: true}, authenticator, &fakeImageGenerator{})
-	router := gin.New()
-	handler.Register(router, nil, nil)
-
-	request := httptest.NewRequest(http.MethodGet, "/v1/public/imagine/parent-post?parent_post_id=123e4567-e89b-12d3-a456-426614174000", nil)
-	request.Header.Set("Authorization", "Bearer g2-direct-key")
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"source_image_url":"https://imagine-public.x.ai/imagine-public/images/123e4567-e89b-12d3-a456-426614174000.jpg"`) {
-		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-
-	invalid := httptest.NewRequest(http.MethodGet, "/v1/public/imagine/parent-post?parent_post_id=../../secret", nil)
-	invalid.Header.Set("Authorization", "Bearer g2-direct-key")
-	invalidRecorder := httptest.NewRecorder()
-	router.ServeHTTP(invalidRecorder, invalid)
-	if invalidRecorder.Code != http.StatusBadRequest {
-		t.Fatalf("invalid status=%d body=%s", invalidRecorder.Code, invalidRecorder.Body.String())
-	}
-}
-
 func jsonStringField(t *testing.T, body []byte, key string) string {
 	t.Helper()
 	marker := `"` + key + `":"`

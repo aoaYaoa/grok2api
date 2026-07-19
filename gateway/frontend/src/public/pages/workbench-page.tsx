@@ -1,28 +1,29 @@
-import { ClipboardPaste, Download, ImagePlus, Library, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
+import { Download, ImagePlus, Library, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
-import { cachedImage, editImage, imageFromEdit, listCachedImages, resolveParentPost, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
-import { downloadURL, extractParentPostID, filesToAssets, imageSource, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
+import { ImageGrid } from "@/public/components/image-grid";
+import { cachedImage, deleteCachedImages, editImage, imageFromEdit, listCachedImages, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
+import { downloadURL, filesToAssets, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
 
 type Reference = UploadAsset & { parentPostID?: string };
 
 export function WorkbenchPage() {
   const { key } = usePublicAuth();
   const [references, setReferences] = useState<Reference[]>([]);
-  const [parentInput, setParentInput] = useState("");
   const [prompt, setPrompt] = useState("");
   const [history, setHistory] = useState<GeneratedImage[]>([]);
   const [current, setCurrent] = useState<GeneratedImage | null>(null);
   const [cachedImages, setCachedImages] = useState<CachedImage[]>([]);
   const [cacheOpen, setCacheOpen] = useState(false);
   const [cacheLoading, setCacheLoading] = useState(false);
+  const [cacheSelected, setCacheSelected] = useState(new Set<string>());
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("未开始");
   const [running, setRunning] = useState(false);
@@ -58,22 +59,9 @@ export function WorkbenchPage() {
     return true;
   }
 
-  async function addParent() {
-    const id = extractParentPostID(parentInput);
-    if (!id) return toast.error("未识别到 parentPostId");
-    try {
-      const payload = await resolveParentPost(key, id);
-      const url = imageSource(payload);
-      if (!url) throw new Error("未找到图片地址");
-      addReference({ id: crypto.randomUUID(), name: id, mime: "image/jpeg", data: url, parentPostID: id });
-      setParentInput("");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载 parentPostId 失败");
-    }
-  }
-
   async function openCache() {
     setCacheOpen(true);
+    setCacheSelected(new Set());
     setCacheLoading(true);
     try {
       const payload = await listCachedImages(key);
@@ -85,8 +73,27 @@ export function WorkbenchPage() {
     }
   }
 
-  function addCachedReference(image: CachedImage) {
-    if (addReference({ id: image.id, name: image.name, mime: "image/jpeg", data: image.sourceURL, parentPostID: image.parentPostID })) setCacheOpen(false);
+  function addCachedReferences() {
+    const selected = cachedImages.filter((image) => cacheSelected.has(image.id));
+    let added = 0;
+    for (const image of selected) {
+      if (addReference({ id: image.id, name: image.name, mime: "image/jpeg", data: image.sourceURL, parentPostID: image.parentPostID })) added++;
+    }
+    if (added) setCacheOpen(false);
+  }
+
+  async function removeCachedImages() {
+    const selected = cachedImages.filter((image) => cacheSelected.has(image.id));
+    if (!selected.length || !window.confirm(`永久删除所选 ${selected.length} 张缓存图片？`)) return;
+    try {
+      const result = await deleteCachedImages(key, selected.map(({ source, cacheKey }) => ({ source, cacheKey })));
+      const deleted = new Set(result.deleted_keys);
+      setCachedImages((items) => items.filter((item) => !deleted.has(item.cacheKey)));
+      setCacheSelected((current) => new Set([...current].filter((id) => !selected.some((item) => item.id === id && deleted.has(item.cacheKey)))));
+      toast.success(`已删除 ${result.deleted} 张，跳过 ${result.skipped} 张`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除缓存图片失败");
+    }
   }
 
   function addCurrentReference() {
@@ -157,7 +164,6 @@ export function WorkbenchPage() {
               </label>
               <span className="text-xs text-muted-foreground">{references.length}/8</span>
             </div>
-            <div className="flex gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId 或 URL" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="使用 parentPostId"><ClipboardPaste className="size-4" /></Button></div>
             <p className="mt-2 text-xs text-muted-foreground">支持拖入、粘贴和最多 8 张参考图</p>
             {references.length > 0 && <div className="mt-3 grid grid-cols-3 gap-2">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border bg-background"><img src={item.data} alt={item.name} className="size-full object-cover" /><button onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} className="absolute right-1 top-1 grid size-8 place-items-center rounded-md bg-background/90 shadow-sm" aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div>}
           </div>
@@ -187,7 +193,8 @@ export function WorkbenchPage() {
       <DialogContent className="max-w-5xl">
         <DialogHeader><DialogTitle>缓存图片</DialogTitle></DialogHeader>
         <div className="max-h-[70dvh] overflow-auto">
-          {cacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{cachedImages.map((image) => <article key={`${image.id}-${image.createdAt}`} className="overflow-hidden rounded-md border bg-card shadow-sm"><button className="relative block aspect-square w-full overflow-hidden bg-muted" onClick={() => addCachedReference(image)} aria-label={`添加缓存图片 ${image.name}`}><img src={image.url} alt={image.name} className="size-full object-cover" loading="lazy" /><span className="absolute right-2 top-2 grid size-8 place-items-center rounded-md bg-background/85"><Plus className="size-4" /></span></button><div className="flex h-11 items-center justify-between gap-2 px-2"><span className="min-w-0 truncate text-xs text-muted-foreground">{image.name}</span><Button size="icon" variant="ghost" className="size-8 shrink-0" onClick={() => downloadURL(image.url, image.name)} aria-label={`下载 ${image.name}`}><Download className="size-4" /></Button></div></article>)}</div> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}
+          <div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {cacheSelected.size} 张</span><div className="flex gap-2"><Button variant="outline" disabled={!cacheSelected.size} onClick={() => void removeCachedImages()}><Trash2 className="size-4" />删除所选</Button><Button disabled={!cacheSelected.size || references.length >= 8} onClick={addCachedReferences}><ImagePlus className="size-4" />添加所选</Button></div></div>
+          {cacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <ImageGrid images={cachedImages} selected={cacheSelected} onSelect={(id) => setCacheSelected((current) => toggleCacheSelection(current, id))} onOpen={(image) => setCacheSelected((current) => toggleCacheSelection(current, image.id))} /> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}
         </div>
       </DialogContent>
     </Dialog>

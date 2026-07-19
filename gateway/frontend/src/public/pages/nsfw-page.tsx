@@ -12,9 +12,10 @@ import { ImageGrid } from "@/public/components/image-grid";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
 import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
-import { cachedImage, editImage, generatedImage, imageFromEdit, listCachedImages, startImage, stopImages, streamImage, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { cachedImage, cachedReferenceSource, deleteCachedImages, editImage, generatedImage, imageFromEdit, listCachedImages, startImage, stopImages, streamImage, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
-import { cachedVideo, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
+import { cachedVideo, deleteCachedVideos, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
 import { filesToAssets, isHEICFile, type UploadAsset } from "@/public/lib/media";
 
 const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"]);
@@ -42,12 +43,14 @@ export function NsfwPage() {
   const [cachedImages, setCachedImages] = useState<CachedImage[]>([]);
   const [imageCacheOpen, setImageCacheOpen] = useState(false);
   const [imageCacheLoading, setImageCacheLoading] = useState(false);
+  const [imageCacheSelected, setImageCacheSelected] = useState(new Set<string>());
   const [selected, setSelected] = useState<GeneratedImage | null>(null);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
   const [activeVideo, setActiveVideo] = useState<VideoItem | null>(null);
   const [extensionResult, setExtensionResult] = useState<VideoItem | null>(null);
   const [cacheOpen, setCacheOpen] = useState(false);
+  const [cacheSelected, setCacheSelected] = useState(new Set<string>());
   const [localImage, setLocalImage] = useState<UploadAsset | null>(null);
   const [imageStarting, setImageStarting] = useState(false);
   const [imageRunning, setImageRunning] = useState(false);
@@ -273,6 +276,7 @@ export function NsfwPage() {
 
   async function openImageCache() {
     setImageCacheOpen(true);
+    setImageCacheSelected(new Set());
     setImageCacheLoading(true);
     try {
       const payload = await listCachedImages(key);
@@ -286,12 +290,46 @@ export function NsfwPage() {
 
   async function openCache() {
     setCacheOpen(true);
+    setCacheSelected(new Set());
     try {
       const payload = await listCachedVideos(key);
       setCachedVideos((payload.items || []).map(cachedVideo));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取缓存失败");
     }
+  }
+
+  function chooseCachedImage(image: GeneratedImage) {
+    const cached = cachedImages.find((item) => item.id === image.id);
+    if (!cached) return;
+    setSelected({ ...cached, sourceURL: cachedReferenceSource(cached) });
+    setLocalImage(null);
+    setImageCacheOpen(false);
+  }
+
+  async function removeCachedImages() {
+    const items = cachedImages.filter((item) => imageCacheSelected.has(item.id));
+    if (!items.length || !window.confirm(`永久删除所选 ${items.length} 张缓存图片？`)) return;
+    try {
+      const result = await deleteCachedImages(key, items.map(({ source, cacheKey }) => ({ source, cacheKey })));
+      const deleted = new Set(result.deleted_keys);
+      setCachedImages((current) => current.filter((item) => !deleted.has(item.cacheKey)));
+      setImageCacheSelected(new Set());
+      toast.success(`已删除 ${result.deleted} 张`);
+    } catch (error) { toast.error(error instanceof Error ? error.message : "删除图片缓存失败"); }
+  }
+
+  async function removeCachedVideos() {
+    const items = cachedVideos.filter((item) => cacheSelected.has(item.id) && item.source && item.cacheKey);
+    if (!items.length || !window.confirm(`永久删除所选 ${items.length} 个缓存视频？`)) return;
+    try {
+      const result = await deleteCachedVideos(key, items.map((item) => ({ source: item.source!, cacheKey: item.cacheKey! })));
+      const deleted = new Set(result.deleted_keys);
+      setCachedVideos((current) => current.filter((item) => !deleted.has(item.cacheKey || "")));
+      setCacheSelected(new Set());
+      if (activeVideo && deleted.has(activeVideo.cacheKey || "")) setActiveVideo(null);
+      toast.success(`已删除 ${result.deleted} 个`);
+    } catch (error) { toast.error(error instanceof Error ? error.message : "删除视频缓存失败"); }
   }
 
   function scrollToExtensionPanel() {
@@ -384,8 +422,8 @@ export function NsfwPage() {
           <div><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">视频结果</h2><span className="text-xs text-muted-foreground">{videos.length} 个</span></div><VideoGrid videos={videos} activeID={activeVideo?.id} onActivate={(item) => selectVideo(item)} onExtend={(item) => selectVideo(item, true)} /></div>
         </main>
       </div>
-      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto">{imageCacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <ImageGrid images={cachedImages} onOpen={(image) => { setImageCacheOpen(false); setSelected(image); setLocalImage(null); }} onEdit={(image) => { setImageCacheOpen(false); setSelected(image); setLocalImage(null); }} /> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}</div></DialogContent></Dialog>
-      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} /></div></DialogContent></Dialog>
+      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">点击图片用于视频，或多选删除</span><Button variant="outline" disabled={!imageCacheSelected.size} onClick={() => void removeCachedImages()}><Trash2 className="size-4" />删除所选</Button></div>{imageCacheLoading ? <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">正在读取缓存...</div> : cachedImages.length ? <ImageGrid images={cachedImages} selected={imageCacheSelected} onSelect={(id) => setImageCacheSelected((current) => toggleCacheSelection(current, id))} onOpen={chooseCachedImage} onEdit={chooseCachedImage} /> : <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">暂无缓存图片</div>}</div></DialogContent></Dialog>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {cacheSelected.size} 个</span><Button variant="outline" disabled={!cacheSelected.size} onClick={() => void removeCachedVideos()}><Trash2 className="size-4" />删除所选</Button></div><VideoGrid videos={cachedVideos} activeID={activeVideo?.id} selected={cacheSelected} onSelect={(id) => setCacheSelected((current) => toggleCacheSelection(current, id))} onActivate={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} onExtend={(item) => { setCacheOpen(false); selectVideo(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }

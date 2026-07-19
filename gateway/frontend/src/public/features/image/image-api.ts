@@ -3,7 +3,10 @@ import { imageSource } from "@/public/lib/media";
 import { absoluteImageCacheURL } from "./cache-url";
 
 export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
-export type CachedImage = GeneratedImage & { name: string; sizeBytes: number };
+export type CacheSource = "legacy" | "mediaAsset" | "mediaJob";
+export type CacheIdentity = { source: CacheSource; cacheKey: string };
+export type CacheDeleteResult = { deleted: number; skipped: number; failed: number; deleted_keys: string[] };
+export type CachedImage = GeneratedImage & CacheIdentity & { name: string; sizeBytes: number };
 export type ImageEvent = Record<string, unknown>;
 
 export async function startImage(key: string, body: { prompt: string; aspect_ratio: string; nsfw: boolean; pro: boolean }, signal?: AbortSignal) { return publicFetch<{ task_id: string }>(key, publicEndpoints.imagineStart, { method: "POST", body: JSON.stringify(body), signal }); }
@@ -33,16 +36,30 @@ export function imageFromEdit(payload: Record<string, unknown>, prompt: string):
   return { id, url, prompt, parentPostID: id, sourceURL: String(payload.current_source_image_url || url), elapsedMS: Number(payload.elapsed_ms || 0) || undefined, createdAt: Date.now() };
 }
 
-export async function resolveParentPost(key: string, value: string) { return publicFetch<Record<string, unknown>>(key, `${publicEndpoints.parentPost}?parent_post_id=${encodeURIComponent(value)}`); }
-
 export function cachedImage(payload: Record<string, unknown>): CachedImage {
   const name = String(payload.name || "缓存图片");
   const url = absoluteImageCacheURL(payload.view_url || payload.url, window.location.origin);
   const parentPostID = name.match(/[0-9a-fA-F]{8}-[0-9a-fA-F-]{24,28}/)?.[0] || "";
+  const source = (String(payload.source || "legacy") === "mediaAsset" ? "mediaAsset" : "legacy") as "legacy" | "mediaAsset";
+  const cacheKey = String(payload.cache_key || name);
   return {
-    id: name || crypto.randomUUID(), name, url, sourceURL: url, parentPostID,
+    id: `${source}:${cacheKey}` || crypto.randomUUID(), name, url, source, cacheKey, sourceURL: url, parentPostID,
     prompt: name, sizeBytes: Number(payload.size_bytes || 0), createdAt: Number(payload.mtime_ms || Date.now()),
   };
+}
+
+export async function deleteCachedImages(key: string, items: CacheIdentity[]) {
+  return publicFetch<CacheDeleteResult>(key, publicEndpoints.imageCacheDelete, { method: "POST", body: JSON.stringify({ items }) });
+}
+
+export function cachedReferenceSource(image: CachedImage) {
+  try {
+    const parsed = new URL(image.sourceURL, window.location.origin);
+    if (parsed.origin === window.location.origin && parsed.pathname.includes("/v1/media/images/")) return parsed.pathname + parsed.search;
+  } catch {
+    // Keep the already validated display URL.
+  }
+  return image.sourceURL;
 }
 
 export async function listCachedImages(key: string) {

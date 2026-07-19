@@ -1,4 +1,4 @@
-import { Download, ExternalLink, Pencil, PlayCircle, Scissors } from "lucide-react";
+import { Check, Download, ExternalLink, Pencil, PlayCircle, Scissors, Square } from "lucide-react";
 import type { ReactEventHandler } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -13,9 +13,11 @@ type VideoGridProps = {
   onActivate: (item: VideoItem) => void;
   onRename?: (item: VideoItem) => void;
   onExtend?: (item: VideoItem) => void;
+  selected?: Set<string>;
+  onSelect?: (id: string) => void;
 };
 
-export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: VideoGridProps) {
+export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend, selected, onSelect }: VideoGridProps) {
   if (!videos.length) return <div className="workspace-empty grid min-h-44 place-items-center text-sm text-muted-foreground">生成视频与缓存视频会显示在这里</div>;
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -26,6 +28,7 @@ export function VideoGrid({ videos, activeID, onActivate, onRename, onExtend }: 
               ? <LazyVideoPreview url={item.url} posterURL={item.posterURL} label={item.displayName} />
               : <button className="grid size-full place-items-center px-4 text-center text-sm text-muted-foreground" onClick={() => onActivate(item)}><span className="line-clamp-4 break-words">{item.error || `进度 ${item.progress}%`}</span></button>}
             <span className="pointer-events-none absolute left-2 top-2 flex items-center gap-1 rounded bg-background/90 px-2 py-1 text-xs"><PlayCircle className="size-3" />{item.status === "failed" ? "失败" : item.status === "completed" ? "完成" : `${item.progress}%`}</span>
+            {onSelect && <Button variant="secondary" size="icon" className="absolute right-2 top-2 size-8 shadow-sm" onClick={() => onSelect(item.id)} aria-label="选择缓存视频">{selected?.has(item.id) ? <Check className="size-4" /> : <Square className="size-4" />}</Button>}
           </div>
           <div className="flex h-12 items-center gap-1.5 px-3">
             <span className="min-w-0 flex-1 truncate text-sm">{item.displayName}</span>

@@ -100,7 +100,6 @@ func (h *Handler) registerImagine(public *gin.RouterGroup) {
 	public.GET("/imagine/ws", h.imagineWS)
 	public.POST("/imagine/edit", h.imagineEdit)
 	public.POST("/imagine/workbench/edit", h.imagineWorkbenchEdit)
-	public.GET("/imagine/parent-post", h.imagineParentPost)
 	public.GET("/imagine/cache/list", h.imagineCacheList)
 	public.POST("/imagine/cache/delete", h.imagineCacheDelete)
 }
@@ -365,19 +364,6 @@ func (h *Handler) imagineSSE(c *gin.Context) {
 			})
 		}
 	}
-}
-
-func (h *Handler) imagineParentPost(c *gin.Context) {
-	parentPostID := strings.TrimSpace(c.Query("parent_post_id"))
-	if !parentPostIDPattern.MatchString(parentPostID) {
-		c.JSON(http.StatusBadRequest, gin.H{"detail": "parent_post_id format is invalid"})
-		return
-	}
-	sourceURL := imaginePublicImageURL(parentPostID)
-	c.JSON(http.StatusOK, gin.H{
-		"parent_post_id": parentPostID, "media_url": "", "thumbnail_image_url": "",
-		"source_image_url": sourceURL, "mime_type": "image/jpeg", "original_post_id": "", "original_ref_type": "",
-	})
 }
 
 func (h *Handler) imagineEdit(c *gin.Context) {

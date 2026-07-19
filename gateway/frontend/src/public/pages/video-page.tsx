@@ -1,4 +1,4 @@
-import { ImagePlus, Library, Play, Plus, RotateCcw, Scissors, Square, X } from "lucide-react";
+import { ImagePlus, Library, Play, RotateCcw, Scissors, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type AnimationEvent } from "react";
 import { toast } from "sonner";
 
@@ -9,12 +9,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { usePublicAuth } from "@/public/auth/public-auth";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
+import { ImageGrid } from "@/public/components/image-grid";
 import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
-import { resolveParentPost } from "@/public/features/image/image-api";
+import { cachedImage, cachedReferenceSource, deleteCachedImages, listCachedImages, type CachedImage } from "@/public/features/image/image-api";
+import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
-import { cachedVideo, listCachedVideos, renameVideo, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
-import { extractParentPostID, filesToAssets, imageSource, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
+import { cachedVideo, deleteCachedVideos, listCachedVideos, renameVideo, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
+import { filesToAssets, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -24,7 +26,6 @@ export function VideoPage() {
   const { key } = usePublicAuth();
   const [prompt, setPrompt] = useState("");
   const [references, setReferences] = useState<UploadAsset[]>([]);
-  const [parentInput, setParentInput] = useState("");
   const [ratio, setRatio] = useState("3:2");
   const [length, setLength] = useState("6");
   const [resolution, setResolution] = useState("480p");
@@ -32,11 +33,15 @@ export function VideoPage() {
   const [concurrent, setConcurrent] = useState("1");
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [cachedVideos, setCachedVideos] = useState<VideoItem[]>([]);
+  const [cachedImages, setCachedImages] = useState<CachedImage[]>([]);
   const [active, setActive] = useState<VideoItem | null>(null);
   const [extensionResult, setExtensionResult] = useState<VideoItem | null>(null);
   const [starting, setStarting] = useState(false);
   const [running, setRunning] = useState(false);
   const [cacheOpen, setCacheOpen] = useState(false);
+  const [imageCacheOpen, setImageCacheOpen] = useState(false);
+  const [cacheSelected, setCacheSelected] = useState(new Set<string>());
+  const [imageCacheSelected, setImageCacheSelected] = useState(new Set<string>());
   const [renameTarget, setRenameTarget] = useState<VideoItem | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [extendPrompt, setExtendPrompt] = useState("");
@@ -68,20 +73,6 @@ export function VideoPage() {
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
   }, [appendReferenceFiles]);
-
-  async function addParent() {
-    const id = extractParentPostID(parentInput);
-    if (!id) return toast.error("未识别到 parentPostId");
-    try {
-      const payload = await resolveParentPost(key, id);
-      const url = imageSource(payload);
-      if (!url) throw new Error("未找到图片地址");
-      setReferences((items) => [...items, { id, name: id, mime: "image/jpeg", data: url }].slice(0, 8));
-      setParentInput("");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载失败");
-    }
-  }
 
   function watch(taskID: string, label: string, taskPrompt: string, isExtension = false, extensionRootPostID = "") {
     const controller = new AbortController();
@@ -161,6 +152,7 @@ export function VideoPage() {
 
   async function openCache() {
     setCacheOpen(true);
+    setCacheSelected(new Set());
     try {
       const payload = await listCachedVideos(key);
       const values = (payload.items || []).map(cachedVideo);
@@ -168,6 +160,48 @@ export function VideoPage() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取缓存失败");
     }
+  }
+
+  async function openImageCache() {
+    setImageCacheOpen(true);
+    setImageCacheSelected(new Set());
+    try {
+      const payload = await listCachedImages(key);
+      setCachedImages((payload.items || []).map(cachedImage).filter((item) => Boolean(item.url)));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取图片缓存失败");
+    }
+  }
+
+  function addCachedReferences() {
+    const selected = cachedImages.filter((item) => imageCacheSelected.has(item.id));
+    setReferences((current) => [...current, ...selected.map((item) => ({ id: item.id, name: item.name, mime: "image/jpeg", data: cachedReferenceSource(item) }))].slice(0, 8));
+    setImageCacheOpen(false);
+  }
+
+  async function removeCachedImages() {
+    const items = cachedImages.filter((item) => imageCacheSelected.has(item.id));
+    if (!items.length || !window.confirm(`永久删除所选 ${items.length} 张缓存图片？`)) return;
+    try {
+      const result = await deleteCachedImages(key, items.map(({ source, cacheKey }) => ({ source, cacheKey })));
+      const deleted = new Set(result.deleted_keys);
+      setCachedImages((current) => current.filter((item) => !deleted.has(item.cacheKey)));
+      setImageCacheSelected(new Set());
+      toast.success(`已删除 ${result.deleted} 张`);
+    } catch (error) { toast.error(error instanceof Error ? error.message : "删除图片缓存失败"); }
+  }
+
+  async function removeCachedVideos() {
+    const items = cachedVideos.filter((item) => cacheSelected.has(item.id) && item.source && item.cacheKey);
+    if (!items.length || !window.confirm(`永久删除所选 ${items.length} 个缓存视频？`)) return;
+    try {
+      const result = await deleteCachedVideos(key, items.map((item) => ({ source: item.source!, cacheKey: item.cacheKey! })));
+      const deleted = new Set(result.deleted_keys);
+      setCachedVideos((current) => current.filter((item) => !deleted.has(item.cacheKey || "")));
+      setCacheSelected(new Set());
+      if (active && deleted.has(active.cacheKey || "")) setActive(null);
+      toast.success(`已删除 ${result.deleted} 个`);
+    } catch (error) { toast.error(error instanceof Error ? error.message : "删除视频缓存失败"); }
   }
 
   async function saveRename() {
@@ -229,7 +263,7 @@ export function VideoPage() {
         <aside className="workspace-controls">
           <div className="workspace-panel p-4">
             <div className="workspace-control-group">
-              <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} /></label><div className="flex min-w-0 flex-1 gap-2"><Input value={parentInput} onChange={(event) => setParentInput(event.target.value)} placeholder="parentPostId" /><Button variant="outline" size="icon" onClick={() => void addParent()} aria-label="添加 parentPostId"><Plus className="size-4" /></Button></div></div>
+              <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} /></label><Button variant="outline" onClick={() => void openImageCache()}><Library className="size-4" />从缓存选择</Button><span className="self-center text-xs text-muted-foreground">{references.length}/8</span></div>
             {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button data-slot="icon-button" className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
             </div>
             <div className="workspace-control-group">
@@ -268,7 +302,8 @@ export function VideoPage() {
       </div>
 
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><DialogHeader><DialogTitle>重命名视频</DialogTitle></DialogHeader><Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button onClick={() => void saveRename()}>保存</Button></DialogContent></Dialog>
-      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><VideoGrid videos={cachedVideos} activeID={active?.id} onActivate={(item) => { setCacheOpen(false); activate(item, true, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true, true); }} /></div></DialogContent></Dialog>
+      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>选择缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {imageCacheSelected.size} 张，最多添加至 8 张</span><div className="flex gap-2"><Button variant="outline" disabled={!imageCacheSelected.size} onClick={() => void removeCachedImages()}><Trash2 className="size-4" />删除所选</Button><Button disabled={!imageCacheSelected.size || references.length >= 8} onClick={addCachedReferences}><ImagePlus className="size-4" />添加所选</Button></div></div><ImageGrid images={cachedImages} selected={imageCacheSelected} onSelect={(id) => setImageCacheSelected((current) => toggleCacheSelection(current, id))} onOpen={(image) => setImageCacheSelected((current) => toggleCacheSelection(current, image.id))} /></div></DialogContent></Dialog>
+      <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {cacheSelected.size} 个</span><Button variant="outline" disabled={!cacheSelected.size} onClick={() => void removeCachedVideos()}><Trash2 className="size-4" />删除所选</Button></div><VideoGrid videos={cachedVideos} activeID={active?.id} selected={cacheSelected} onSelect={(id) => setCacheSelected((current) => toggleCacheSelection(current, id))} onActivate={(item) => { setCacheOpen(false); activate(item, true, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );
 }
