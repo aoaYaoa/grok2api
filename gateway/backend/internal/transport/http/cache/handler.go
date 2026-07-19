@@ -73,7 +73,7 @@ func NewHandler(root string) (*Handler, error) {
 	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
 		return nil, errors.New("legacy cache root must be a real directory")
 	}
-	mediaRoots := make(map[string]*os.Root, 2)
+	mediaRoots := make(map[string]*os.Root, 3)
 	for _, directory := range []string{"image", "video", "media-meta"} {
 		path := filepath.Join(absolute, directory)
 		info, statErr := os.Lstat(path)
@@ -89,13 +89,11 @@ func NewHandler(root string) (*Handler, error) {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return nil, fmt.Errorf("legacy cache directory %s must be a real directory", directory)
 		}
-		if directory != "media-meta" {
-			root, err := os.OpenRoot(path)
-			if err != nil {
-				return nil, fmt.Errorf("open legacy cache directory %s: %w", directory, err)
-			}
-			mediaRoots[directory] = root
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return nil, fmt.Errorf("open legacy cache directory %s: %w", directory, err)
 		}
+		mediaRoots[directory] = root
 	}
 	return &Handler{root: filepath.Clean(absolute), mediaRoots: mediaRoots}, nil
 }
@@ -319,7 +317,7 @@ func (h *Handler) stats(mediaType string) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	entries, err := os.ReadDir(filepath.Join(h.root, mediaType))
+	root, entries, err := h.rootEntries(mediaType)
 	if err != nil {
 		return Stats{}, err
 	}
@@ -328,7 +326,7 @@ func (h *Handler) stats(mediaType string) (Stats, error) {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile(mediaType, entry.Name()) {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := root.Lstat(entry.Name())
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
@@ -356,7 +354,7 @@ func (h *Handler) list(mediaType string, page, pageSize int) (ListResult, error)
 }
 
 func (h *Handler) collectItems(mediaType string) ([]Item, error) {
-	entries, err := os.ReadDir(filepath.Join(h.root, mediaType))
+	root, entries, err := h.rootEntries(mediaType)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +367,7 @@ func (h *Handler) collectItems(mediaType string) ([]Item, error) {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile(mediaType, entry.Name()) {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := root.Lstat(entry.Name())
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
@@ -427,16 +425,23 @@ func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() {
 		return false, errors.New("invalid cache file name")
 	}
+	if mediaType == "video" {
+		postID := extractPostID(name)
+		orphaned, err := h.videoMetadataWouldBeOrphan(postID, name)
+		if err != nil {
+			return false, err
+		}
+		if orphaned {
+			if err := h.removeVideoMetadata(postID); err != nil {
+				return false, err
+			}
+		}
+	}
 	if err := root.Remove(name); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
-	}
-	if mediaType == "video" {
-		if err := h.removeOrphanVideoMetadata(extractPostID(name)); err != nil {
-			return false, err
-		}
 	}
 	return true, nil
 }
@@ -452,24 +457,55 @@ func (h *Handler) delete(mediaType, name string) (bool, error) {
 	return h.DeleteItem(mediaType, name)
 }
 
-func (h *Handler) removeOrphanVideoMetadata(postID string) error {
+func (h *Handler) videoMetadataWouldBeOrphan(postID, deletingName string) (bool, error) {
 	if postID == "" {
-		return nil
+		return false, nil
 	}
-	entries, err := os.ReadDir(filepath.Join(h.root, "video"))
+	root, entries, err := h.rootEntries("video")
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, entry := range entries {
+		if entry.Name() == deletingName {
+			continue
+		}
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile("video", entry.Name()) {
 			continue
 		}
+		info, err := root.Lstat(entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
 		if extractPostID(entry.Name()) == postID {
-			return nil
+			return false, nil
 		}
 	}
-	metadataPath := filepath.Join(h.root, "media-meta", postID+".json")
-	if err := os.Remove(metadataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	return true, nil
+}
+
+func (h *Handler) removeVideoMetadata(postID string) error {
+	root := h.mediaRoots["media-meta"]
+	if root == nil {
+		return errors.New("cache operation failed")
+	}
+	name := postID + ".json"
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 && !info.Mode().IsRegular() {
+		return errors.New("invalid video metadata file")
+	}
+	if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -480,7 +516,7 @@ func (h *Handler) clear(mediaType string) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	entries, err := os.ReadDir(filepath.Join(h.root, mediaType))
+	root, entries, err := h.rootEntries(mediaType)
 	if err != nil {
 		return Stats{}, err
 	}
@@ -489,11 +525,11 @@ func (h *Handler) clear(mediaType string) (Stats, error) {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile(mediaType, entry.Name()) {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := root.Lstat(entry.Name())
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if err := os.Remove(filepath.Join(h.root, mediaType, entry.Name())); err != nil {
+		if err := root.Remove(entry.Name()); err != nil {
 			return removed, err
 		}
 		removed.Count++
@@ -558,7 +594,7 @@ func (h *Handler) renameVideo(postID, shareLink, name, displayName string) (Item
 
 func (h *Handler) videoMetadata() map[string]map[string]any {
 	result := map[string]map[string]any{}
-	entries, err := os.ReadDir(filepath.Join(h.root, "media-meta"))
+	root, entries, err := h.rootEntries("media-meta")
 	if err != nil {
 		return result
 	}
@@ -566,7 +602,11 @@ func (h *Handler) videoMetadata() map[string]map[string]any {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(h.root, "media-meta", entry.Name()))
+		info, err := root.Lstat(entry.Name())
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		raw, err := root.ReadFile(entry.Name())
 		if err != nil {
 			continue
 		}
@@ -580,6 +620,23 @@ func (h *Handler) videoMetadata() map[string]map[string]any {
 		}
 	}
 	return result
+}
+
+func (h *Handler) rootEntries(name string) (*os.Root, []os.DirEntry, error) {
+	root := h.mediaRoots[name]
+	if root == nil {
+		return nil, nil, errors.New("cache operation failed")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return nil, nil, err
+	}
+	return root, entries, nil
 }
 
 func (h *Handler) filePath(mediaType, name string) (string, error) {

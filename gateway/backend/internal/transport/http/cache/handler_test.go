@@ -270,6 +270,99 @@ func TestHandlerDeleteItemRejectsNormalizedPathThatTargetsAnotherFile(t *testing
 	}
 }
 
+func TestHandlerDeleteItemKeepsVideoWhenMetadataCleanupFails(t *testing.T) {
+	root := t.TempDir()
+	postID := "123e4567-e89b-12d3-a456-426614174000"
+	name := "generated-" + postID + "-output.mp4"
+	videoPath := filepath.Join(root, "video", name)
+	metadataPath := filepath.Join(root, "media-meta", postID+".json")
+	handler, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(videoPath, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(metadataPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataPath, "blocked"), []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if deleted, err := handler.DeleteItem("video", name); err == nil || deleted {
+		t.Fatalf("metadata cleanup failure was hidden: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(videoPath); err != nil {
+		t.Fatalf("video was removed before metadata cleanup succeeded: %v", err)
+	}
+	if err := os.RemoveAll(metadataPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(`{"media_type":"video","post_id":"`+postID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := handler.DeleteItem("video", name); err != nil || !deleted {
+		t.Fatalf("retry delete: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
+		t.Fatalf("video still exists after retry: %v", err)
+	}
+	if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
+		t.Fatalf("metadata still exists after retry: %v", err)
+	}
+}
+
+func TestHandlerDeleteItemUsesHeldRootsAfterDirectoriesAreReplaced(t *testing.T) {
+	root := t.TempDir()
+	postID := "123e4567-e89b-12d3-a456-426614174000"
+	name := "generated-" + postID + "-output.mp4"
+	handler, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "video", name), []byte("original video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "media-meta", postID+".json"), []byte("original metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	heldVideoDir := filepath.Join(root, "video-held")
+	heldMetadataDir := filepath.Join(root, "media-meta-held")
+	if err := os.Rename(filepath.Join(root, "video"), heldVideoDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "media-meta"), heldMetadataDir); err != nil {
+		t.Fatal(err)
+	}
+	externalVideoDir := t.TempDir()
+	externalMetadataDir := t.TempDir()
+	externalMetadataPath := filepath.Join(externalMetadataDir, postID+".json")
+	if err := os.WriteFile(externalMetadataPath, []byte("outside metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalVideoDir, filepath.Join(root, "video")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalMetadataDir, filepath.Join(root, "media-meta")); err != nil {
+		t.Fatal(err)
+	}
+
+	if deleted, err := handler.DeleteItem("video", name); err != nil || !deleted {
+		t.Fatalf("delete through held roots: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(filepath.Join(heldVideoDir, name)); !os.IsNotExist(err) {
+		t.Fatalf("original video still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(heldMetadataDir, postID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("original metadata still exists: %v", err)
+	}
+	if raw, err := os.ReadFile(externalMetadataPath); err != nil || string(raw) != "outside metadata" {
+		t.Fatalf("external metadata was changed: raw=%q err=%v", raw, err)
+	}
+}
+
 func performRequest(router http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
