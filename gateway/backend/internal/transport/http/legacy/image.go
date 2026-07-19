@@ -27,6 +27,8 @@ const maxLegacyImageResponseBytes = 64 << 20
 var parentPostIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
 type LegacyCachedImage struct {
+	Source       string `json:"source"`
+	CacheKey     string `json:"cache_key"`
 	Name         string
 	ViewURL      string
 	SizeBytes    int64
@@ -35,6 +37,10 @@ type LegacyCachedImage struct {
 
 type LegacyImageCache interface {
 	ListImages(context.Context) ([]LegacyCachedImage, error)
+}
+
+type LegacyImageCacheDeleter interface {
+	DeleteImages(context.Context, []LegacyCachedImage) error
 }
 
 type imageTask struct {

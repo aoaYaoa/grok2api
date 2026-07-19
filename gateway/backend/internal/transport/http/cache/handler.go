@@ -398,7 +398,7 @@ func (h *Handler) RenameVideo(postID, shareLink, name, displayName string) (Item
 	return h.renameVideo(postID, shareLink, name, displayName)
 }
 
-func (h *Handler) delete(mediaType, name string) (bool, error) {
+func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 	mediaType, err := normalizeType(mediaType)
 	if err != nil {
 		return false, err
@@ -407,13 +407,60 @@ func (h *Handler) delete(mediaType, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := os.Remove(path); err != nil {
+	root := h.mediaRoots[mediaType]
+	if root == nil {
+		return false, errors.New("cache operation failed")
+	}
+	name = filepath.Base(path)
+	entry, err := root.Lstat(name)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
 	}
+	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() {
+		return false, errors.New("invalid cache file name")
+	}
+	if err := root.Remove(name); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if mediaType == "video" {
+		if err := h.removeOrphanVideoMetadata(extractPostID(name)); err != nil {
+			return false, err
+		}
+	}
 	return true, nil
+}
+
+func (h *Handler) delete(mediaType, name string) (bool, error) {
+	return h.DeleteItem(mediaType, name)
+}
+
+func (h *Handler) removeOrphanVideoMetadata(postID string) error {
+	if postID == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(h.root, "video"))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile("video", entry.Name()) {
+			continue
+		}
+		if extractPostID(entry.Name()) == postID {
+			return nil
+		}
+	}
+	metadataPath := filepath.Join(h.root, "media-meta", postID+".json")
+	if err := os.Remove(metadataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (h *Handler) clear(mediaType string) (Stats, error) {

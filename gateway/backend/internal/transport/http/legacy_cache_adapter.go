@@ -42,6 +42,7 @@ func (a *legacyImageCacheAdapter) ListImages(ctx context.Context) ([]legacyhttp.
 		result = make([]legacyhttp.LegacyCachedImage, 0, len(items))
 		for _, item := range items {
 			result = append(result, legacyhttp.LegacyCachedImage{
+				Source: "legacy", CacheKey: item.Name,
 				Name: item.Name, ViewURL: item.ViewURL,
 				SizeBytes: item.SizeBytes, ModifiedAtMS: item.ModifiedAtMS,
 			})
@@ -77,6 +78,29 @@ func (a *legacyImageCacheAdapter) ListImages(ctx context.Context) ([]legacyhttp.
 	result = deduplicateLegacyImages(result)
 	sort.SliceStable(result, func(i, j int) bool { return result[i].ModifiedAtMS > result[j].ModifiedAtMS })
 	return result, nil
+}
+
+func (a *legacyImageCacheAdapter) DeleteImages(ctx context.Context, items []legacyhttp.LegacyCachedImage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.handler == nil && len(items) > 0 {
+		return errors.New("legacy image cache is unavailable")
+	}
+	for _, item := range items {
+		if item.Source != "legacy" {
+			return errors.New("unsupported image cache source")
+		}
+		if strings.TrimSpace(item.CacheKey) == "" {
+			return errors.New("legacy image cache key is empty")
+		}
+	}
+	for _, item := range items {
+		if _, err := a.handler.DeleteItem("image", item.CacheKey); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func mediaImageName(asset mediadomain.Asset) string {
@@ -118,12 +142,33 @@ func (a *legacyVideoCacheAdapter) ListVideos() ([]legacyhttp.LegacyCachedVideo, 
 	result := make([]legacyhttp.LegacyCachedVideo, 0, len(items))
 	for _, item := range items {
 		result = append(result, legacyhttp.LegacyCachedVideo{
+			Source: "legacy", CacheKey: item.Name,
 			Name: item.Name, ViewURL: item.ViewURL, PostID: item.PostID, ShareLink: item.ShareLink,
 			OriginalPostID: item.OriginalPostID, DisplayName: item.DisplayName,
 			SizeBytes: item.SizeBytes, ModifiedAtMS: item.ModifiedAtMS,
 		})
 	}
 	return result, nil
+}
+
+func (a *legacyVideoCacheAdapter) DeleteVideos(items []legacyhttp.LegacyCachedVideo) error {
+	if a.handler == nil && len(items) > 0 {
+		return errors.New("legacy video cache is unavailable")
+	}
+	for _, item := range items {
+		if item.Source != "legacy" {
+			return errors.New("unsupported video cache source")
+		}
+		if strings.TrimSpace(item.CacheKey) == "" {
+			return errors.New("legacy video cache key is empty")
+		}
+	}
+	for _, item := range items {
+		if _, err := a.handler.DeleteItem("video", item.CacheKey); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *legacyVideoCacheAdapter) RenameVideo(identifier, displayName string) (legacyhttp.LegacyCachedVideo, error) {

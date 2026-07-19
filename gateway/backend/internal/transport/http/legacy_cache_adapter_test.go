@@ -11,6 +11,7 @@ import (
 
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	cachehttp "github.com/chenyme/grok2api/backend/internal/transport/http/cache"
+	legacyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/legacy"
 )
 
 type fakeLegacyImageMediaLibrary struct {
@@ -72,8 +73,98 @@ func TestLegacyImageCacheAdapterListsCachedImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Name != name || items[0].ViewURL != "/v1/files/image/"+name {
+	if len(items) != 1 || items[0].Name != name || items[0].ViewURL != "/v1/files/image/"+name || items[0].Source != "legacy" || items[0].CacheKey != name {
 		t.Fatalf("items=%#v", items)
+	}
+}
+
+func TestLegacyVideoCacheAdapterSetsDeletionIdentity(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "generated-123e4567-e89b-12d3-a456-426614174000-output.mp4"
+	if err := os.WriteFile(filepath.Join(root, "video", name), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &legacyVideoCacheAdapter{handler: handler}
+	items, err := adapter.ListVideos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Source != "legacy" || items[0].CacheKey != name {
+		t.Fatalf("items=%#v", items)
+	}
+}
+
+func TestLegacyCacheAdaptersDeleteLegacyItems(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageName := "cached.jpg"
+	videoName := "generated-123e4567-e89b-12d3-a456-426614174000-output.mp4"
+	if err := os.WriteFile(filepath.Join(root, "image", imageName), []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "video", videoName), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	imageAdapter := &legacyImageCacheAdapter{handler: handler}
+	videoAdapter := &legacyVideoCacheAdapter{handler: handler}
+	if err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.LegacyCachedImage{{Source: "legacy", CacheKey: imageName}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := videoAdapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "legacy", CacheKey: videoName}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "image", imageName)); !os.IsNotExist(err) {
+		t.Fatalf("image was not deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "video", videoName)); !os.IsNotExist(err) {
+		t.Fatalf("video was not deleted: %v", err)
+	}
+}
+
+func TestLegacyCacheAdaptersRejectNonLegacyItems(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageName := "cached.jpg"
+	videoName := "generated-123e4567-e89b-12d3-a456-426614174000-output.mp4"
+	if err := os.WriteFile(filepath.Join(root, "image", imageName), []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "video", videoName), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	imageAdapter := &legacyImageCacheAdapter{handler: handler}
+	if err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.LegacyCachedImage{{Source: "mediaAsset", CacheKey: imageName}}); err == nil {
+		t.Fatal("non-legacy image item was accepted")
+	}
+	videoAdapter := &legacyVideoCacheAdapter{handler: handler}
+	if err := videoAdapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "mediaJob", CacheKey: videoName}}); err == nil {
+		t.Fatal("non-legacy video item was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, "image", imageName)); err != nil {
+		t.Fatalf("image was deleted after rejected request: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "video", videoName)); err != nil {
+		t.Fatalf("video was deleted after rejected request: %v", err)
+	}
+}
+
+func TestLegacyVideoCacheAdapterRejectsDeletionWithoutHandler(t *testing.T) {
+	adapter := &legacyVideoCacheAdapter{}
+	if err := adapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "legacy", CacheKey: "cached.mp4"}}); err == nil {
+		t.Fatal("video deletion without handler did not return an error")
 	}
 }
 

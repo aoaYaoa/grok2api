@@ -190,6 +190,67 @@ func TestEmptyStatsReportZeroMegabytes(t *testing.T) {
 	}
 }
 
+func TestHandlerDeleteItemCleansVideoMetadataOnlyAfterLastMatchingVideo(t *testing.T) {
+	root := t.TempDir()
+	postID := "123e4567-e89b-12d3-a456-426614174000"
+	firstVideo := "first-" + postID + ".mp4"
+	secondVideo := "second-" + postID + ".mp4"
+	metadataPath := filepath.Join(root, "media-meta", postID+".json")
+	handler, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "video", firstVideo), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "video", secondVideo), []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(`{"media_type":"video","post_id":"`+postID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if deleted, err := handler.DeleteItem("video", firstVideo); err != nil || !deleted {
+		t.Fatalf("first delete: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(metadataPath); err != nil {
+		t.Fatalf("metadata removed while another matching video remains: %v", err)
+	}
+	if deleted, err := handler.DeleteItem("video", secondVideo); err != nil || !deleted {
+		t.Fatalf("second delete: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
+		t.Fatalf("metadata still exists after last matching video: err=%v", err)
+	}
+
+	if _, err := handler.DeleteItem("video", "../"+postID+".mp4"); err == nil {
+		t.Fatal("traversal delete was accepted")
+	}
+}
+
+func TestHandlerDeleteItemRejectsSymlinkedFile(t *testing.T) {
+	root := t.TempDir()
+	handler, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "secret.mp4")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "video", "linked.mp4")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if deleted, err := handler.DeleteItem("video", "linked.mp4"); err == nil || deleted {
+		t.Fatalf("symlink delete accepted: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatalf("symlink target was removed: %v", err)
+	}
+}
+
 func performRequest(router http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {

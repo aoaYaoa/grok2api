@@ -34,6 +34,8 @@ type VideoGateway interface {
 }
 
 type LegacyCachedVideo struct {
+	Source         string `json:"source"`
+	CacheKey       string `json:"cache_key"`
 	Name           string
 	TaskID         string
 	ViewURL        string
@@ -49,6 +51,10 @@ type LegacyCachedVideo struct {
 type LegacyVideoCache interface {
 	ListVideos() ([]LegacyCachedVideo, error)
 	RenameVideo(identifier, displayName string) (LegacyCachedVideo, error)
+}
+
+type LegacyVideoCacheDeleter interface {
+	DeleteVideos([]LegacyCachedVideo) error
 }
 
 type VideoReferenceStore interface {
