@@ -153,6 +153,31 @@ func TestLegacyCacheAdaptersReportMissingAndFailedItems(t *testing.T) {
 	}
 }
 
+func TestLegacyVideoCacheAdapterReportsDeletedFileAndCleanupFailure(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := "123e4567-e89b-12d3-a456-426614174000"
+	name := "generated-" + postID + "-output.mp4"
+	if err := os.WriteFile(filepath.Join(root, "video", name), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "media-meta", postID+".json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &legacyVideoCacheAdapter{handler: handler}
+	result, err := adapter.DeleteVideos([]legacyhttp.CacheDeleteTarget{{Source: "legacy", CacheKey: name}})
+	if err != nil || result.Deleted != 1 || result.Failed != 1 || result.Skipped != 0 || len(result.DeletedKeys) != 1 || result.DeletedKeys[0] != name {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "video", name)); !os.IsNotExist(err) {
+		t.Fatalf("video still exists: %v", err)
+	}
+}
+
 func TestLegacyCacheAdaptersRejectNonLegacyItems(t *testing.T) {
 	root := t.TempDir()
 	handler, err := cachehttp.NewHandler(root)

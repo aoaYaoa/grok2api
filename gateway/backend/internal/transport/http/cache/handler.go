@@ -418,6 +418,11 @@ func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 	entry, err := root.Lstat(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if mediaType == "video" {
+				if cleanupErr := h.removeOrphanVideoMetadata(extractPostID(name)); cleanupErr != nil {
+					return false, cleanupErr
+				}
+			}
 			return false, nil
 		}
 		return false, err
@@ -425,23 +430,21 @@ func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() {
 		return false, errors.New("invalid cache file name")
 	}
-	if mediaType == "video" {
-		postID := extractPostID(name)
-		orphaned, err := h.videoMetadataWouldBeOrphan(postID, name)
-		if err != nil {
-			return false, err
-		}
-		if orphaned {
-			if err := h.removeVideoMetadata(postID); err != nil {
-				return false, err
-			}
-		}
-	}
 	if err := root.Remove(name); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if mediaType == "video" {
+				if cleanupErr := h.removeOrphanVideoMetadata(extractPostID(name)); cleanupErr != nil {
+					return false, cleanupErr
+				}
+			}
 			return false, nil
 		}
 		return false, err
+	}
+	if mediaType == "video" {
+		if err := h.removeOrphanVideoMetadata(extractPostID(name)); err != nil {
+			return true, err
+		}
 	}
 	return true, nil
 }
@@ -457,18 +460,15 @@ func (h *Handler) delete(mediaType, name string) (bool, error) {
 	return h.DeleteItem(mediaType, name)
 }
 
-func (h *Handler) videoMetadataWouldBeOrphan(postID, deletingName string) (bool, error) {
+func (h *Handler) removeOrphanVideoMetadata(postID string) error {
 	if postID == "" {
-		return false, nil
+		return nil
 	}
 	root, entries, err := h.rootEntries("video")
 	if err != nil {
-		return false, err
+		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == deletingName {
-			continue
-		}
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !allowedFile("video", entry.Name()) {
 			continue
 		}
@@ -477,16 +477,16 @@ func (h *Handler) videoMetadataWouldBeOrphan(postID, deletingName string) (bool,
 			continue
 		}
 		if err != nil {
-			return false, err
+			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			continue
 		}
 		if extractPostID(entry.Name()) == postID {
-			return false, nil
+			return nil
 		}
 	}
-	return true, nil
+	return h.removeVideoMetadata(postID)
 }
 
 func (h *Handler) removeVideoMetadata(postID string) error {

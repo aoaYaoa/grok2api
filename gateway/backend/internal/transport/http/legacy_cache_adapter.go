@@ -98,6 +98,10 @@ func (a *legacyImageCacheAdapter) DeleteImages(ctx context.Context, targets []le
 	}
 	for _, target := range targets {
 		deleted, err := a.handler.DeleteItem("image", target.CacheKey)
+		if deleted {
+			result.Deleted++
+			result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)
+		}
 		if err != nil {
 			result.Failed++
 			continue
@@ -106,8 +110,6 @@ func (a *legacyImageCacheAdapter) DeleteImages(ctx context.Context, targets []le
 			result.Skipped++
 			continue
 		}
-		result.Deleted++
-		result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)
 	}
 	return result, nil
 }
@@ -175,6 +177,10 @@ func (a *legacyVideoCacheAdapter) DeleteVideos(targets []legacyhttp.CacheDeleteT
 	}
 	for _, target := range targets {
 		deleted, err := a.handler.DeleteItem("video", target.CacheKey)
+		if deleted {
+			result.Deleted++
+			result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)
+		}
 		if err != nil {
 			result.Failed++
 			continue
@@ -183,8 +189,6 @@ func (a *legacyVideoCacheAdapter) DeleteVideos(targets []legacyhttp.CacheDeleteT
 			result.Skipped++
 			continue
 		}
-		result.Deleted++
-		result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)
 	}
 	return result, nil
 }

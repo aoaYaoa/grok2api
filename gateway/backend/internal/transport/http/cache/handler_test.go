@@ -270,7 +270,7 @@ func TestHandlerDeleteItemRejectsNormalizedPathThatTargetsAnotherFile(t *testing
 	}
 }
 
-func TestHandlerDeleteItemKeepsVideoWhenMetadataCleanupFails(t *testing.T) {
+func TestHandlerDeleteItemRetriesMetadataCleanupAfterVideoWasDeleted(t *testing.T) {
 	root := t.TempDir()
 	postID := "123e4567-e89b-12d3-a456-426614174000"
 	name := "generated-" + postID + "-output.mp4"
@@ -290,11 +290,11 @@ func TestHandlerDeleteItemKeepsVideoWhenMetadataCleanupFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if deleted, err := handler.DeleteItem("video", name); err == nil || deleted {
-		t.Fatalf("metadata cleanup failure was hidden: deleted=%v err=%v", deleted, err)
+	if deleted, err := handler.DeleteItem("video", name); err == nil || !deleted {
+		t.Fatalf("video deletion and metadata failure were not both reported: deleted=%v err=%v", deleted, err)
 	}
-	if _, err := os.Stat(videoPath); err != nil {
-		t.Fatalf("video was removed before metadata cleanup succeeded: %v", err)
+	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
+		t.Fatalf("video still exists after successful file deletion: %v", err)
 	}
 	if err := os.RemoveAll(metadataPath); err != nil {
 		t.Fatal(err)
@@ -302,11 +302,8 @@ func TestHandlerDeleteItemKeepsVideoWhenMetadataCleanupFails(t *testing.T) {
 	if err := os.WriteFile(metadataPath, []byte(`{"media_type":"video","post_id":"`+postID+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if deleted, err := handler.DeleteItem("video", name); err != nil || !deleted {
-		t.Fatalf("retry delete: deleted=%v err=%v", deleted, err)
-	}
-	if _, err := os.Stat(videoPath); !os.IsNotExist(err) {
-		t.Fatalf("video still exists after retry: %v", err)
+	if deleted, err := handler.DeleteItem("video", name); err != nil || deleted {
+		t.Fatalf("metadata-only retry: deleted=%v err=%v", deleted, err)
 	}
 	if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
 		t.Fatalf("metadata still exists after retry: %v", err)
