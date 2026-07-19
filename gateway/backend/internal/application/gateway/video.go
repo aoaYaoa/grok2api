@@ -154,6 +154,13 @@ func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (m
 	return job, nil
 }
 
+func (s *Service) DeleteVideo(ctx context.Context, id string, key clientkey.Key) (bool, error) {
+	if s.mediaJobs == nil {
+		return false, ErrResponseNotFound
+	}
+	return s.mediaJobs.DeleteOwnedTerminalMediaJob(ctx, strings.TrimSpace(id), key.ID)
+}
+
 func (s *Service) ListVideos(ctx context.Context, key clientkey.Key, page, pageSize int) ([]media.Job, int64, error) {
 	if s.mediaJobs == nil {
 		return nil, 0, ErrResponseNotFound

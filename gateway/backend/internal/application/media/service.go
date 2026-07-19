@@ -29,19 +29,21 @@ var (
 
 // Service 负责图片校验、文件落盘和元数据持久化的一致性收口。
 type Service struct {
-	assets        repository.MediaAssetRepository
-	jobs          repository.MediaJobRepository
-	objects       repository.MediaObjectStorage
-	cleanupLock   repository.DistributedLock
-	publicBaseURL string
-	configMu      sync.RWMutex
-	maxImageBytes int64
-	maxTotalBytes int64
-	cleanupAt     int
-	cleanupEvery  time.Duration
-	cleanupSignal chan struct{}
-	configChanged chan struct{}
-	totalBytes    atomic.Int64
+	assets          repository.MediaAssetRepository
+	jobs            repository.MediaJobRepository
+	objects         repository.MediaObjectStorage
+	cleanupLock     repository.DistributedLock
+	publicBaseURL   string
+	configMu        sync.RWMutex
+	maxImageBytes   int64
+	maxTotalBytes   int64
+	cleanupAt       int
+	cleanupEvery    time.Duration
+	cleanupSignal   chan struct{}
+	configChanged   chan struct{}
+	accountingMu    sync.Mutex
+	accountingReady bool
+	totalBytes      atomic.Int64
 }
 
 type Config struct {
@@ -113,11 +115,20 @@ func (s *Service) SaveImage(ctx context.Context, data []byte) (mediadomain.Asset
 		ID: id, Kind: "image", StorageKey: storageKey, MIMEType: mimeType,
 		SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), CreatedAt: createdAt,
 	}
-	if err := s.assets.CreateMediaAsset(ctx, asset); err != nil {
+	s.accountingMu.Lock()
+	if _, err := s.initializeTotalBytesLocked(ctx); err != nil {
+		s.accountingMu.Unlock()
 		_ = s.objects.Delete(context.WithoutCancel(ctx), storageKey)
 		return mediadomain.Asset{}, err
 	}
-	if s.totalBytes.Add(asset.SizeBytes) > cleanupThresholdBytes(cfg) {
+	if err := s.assets.CreateMediaAsset(ctx, asset); err != nil {
+		s.accountingMu.Unlock()
+		_ = s.objects.Delete(context.WithoutCancel(ctx), storageKey)
+		return mediadomain.Asset{}, err
+	}
+	total := s.totalBytes.Add(asset.SizeBytes)
+	s.accountingMu.Unlock()
+	if total > cleanupThresholdBytes(cfg) {
 		select {
 		case s.cleanupSignal <- struct{}{}:
 		default:
@@ -151,6 +162,72 @@ func (s *Service) OpenImage(ctx context.Context, id string) (mediadomain.Asset, 
 		return mediadomain.Asset{}, nil, err
 	}
 	return asset, body, nil
+}
+
+func (s *Service) DeleteImage(ctx context.Context, id string) (bool, error) {
+	asset, err := s.assets.GetMediaAsset(ctx, strings.TrimSpace(id))
+	if errors.Is(err, repository.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if asset.Kind != "image" {
+		return false, ErrAssetNotFound
+	}
+	s.accountingMu.Lock()
+	if _, err := s.initializeTotalBytesLocked(ctx); err != nil {
+		s.accountingMu.Unlock()
+		return false, err
+	}
+	deleted, err := s.assets.DeleteMediaAssetIfUnused(ctx, asset.ID)
+	if err != nil {
+		s.accountingMu.Unlock()
+		return false, err
+	}
+	if !deleted {
+		s.accountingMu.Unlock()
+		return false, nil
+	}
+	if err := s.objects.Delete(ctx, asset.StorageKey); err != nil && !errors.Is(err, os.ErrNotExist) {
+		restoreErr := s.assets.CreateMediaAsset(context.WithoutCancel(ctx), asset)
+		s.accountingMu.Unlock()
+		return false, mediaObjectDeleteError(err, restoreErr)
+	}
+	s.totalBytes.Add(-asset.SizeBytes)
+	s.accountingMu.Unlock()
+	return true, nil
+}
+
+func (s *Service) initializeTotalBytes(ctx context.Context) (int64, error) {
+	s.accountingMu.Lock()
+	defer s.accountingMu.Unlock()
+	return s.initializeTotalBytesLocked(ctx)
+}
+
+func (s *Service) initializeTotalBytesLocked(ctx context.Context) (int64, error) {
+	if s.accountingReady {
+		return s.totalBytes.Load(), nil
+	}
+	return s.refreshTotalBytesLocked(ctx)
+}
+
+func (s *Service) refreshTotalBytesLocked(ctx context.Context) (int64, error) {
+	total, err := s.assets.TotalMediaAssetBytes(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.totalBytes.Store(total)
+	s.accountingReady = true
+	return total, nil
+}
+
+func mediaObjectDeleteError(deleteErr, restoreErr error) error {
+	deleteErr = fmt.Errorf("删除媒体对象: %w", deleteErr)
+	if restoreErr == nil {
+		return deleteErr
+	}
+	return errors.Join(deleteErr, fmt.Errorf("恢复媒体元数据: %w", restoreErr))
 }
 
 // AdminListImages 分页返回图片资源列表。
@@ -222,8 +299,7 @@ func validMediaStatus(status string) bool {
 // RunCleanup 响应容量阈值并按周期清理最旧媒体资源。
 func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 	cfg := s.runtimeConfig()
-	if total, err := s.assets.TotalMediaAssetBytes(ctx); err == nil {
-		s.totalBytes.Store(total)
+	if total, err := s.initializeTotalBytes(ctx); err == nil {
 		if total > cleanupThresholdBytes(cfg) {
 			if _, cleanupErr := s.Cleanup(ctx); cleanupErr != nil && onError != nil {
 				onError(cleanupErr)
@@ -264,11 +340,12 @@ func (s *Service) Cleanup(ctx context.Context) (int, error) {
 		}
 		defer release()
 	}
-	total, err := s.assets.TotalMediaAssetBytes(ctx)
+	s.accountingMu.Lock()
+	defer s.accountingMu.Unlock()
+	total, err := s.refreshTotalBytesLocked(ctx)
 	if err != nil {
 		return 0, err
 	}
-	s.totalBytes.Store(total)
 	threshold := cleanupThresholdBytes(cfg)
 	if total <= threshold {
 		return 0, nil
@@ -286,20 +363,21 @@ func (s *Service) Cleanup(ctx context.Context) (int, error) {
 			if total <= threshold {
 				break
 			}
-			if err := s.objects.Delete(ctx, asset.StorageKey); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return deleted, fmt.Errorf("媒体对象缺失，已保留共享元数据: %s: %w", asset.StorageKey, err)
-				}
+			removed, err := s.assets.DeleteMediaAssetIfUnused(ctx, asset.ID)
+			if err != nil {
 				return deleted, err
 			}
-			if err := s.assets.DeleteMediaAsset(ctx, asset.ID); err != nil && !errors.Is(err, repository.ErrNotFound) {
-				return deleted, err
+			if !removed {
+				continue
 			}
-			total = max(0, total-asset.SizeBytes)
+			if err := s.objects.Delete(ctx, asset.StorageKey); err != nil && !errors.Is(err, os.ErrNotExist) {
+				restoreErr := s.assets.CreateMediaAsset(context.WithoutCancel(ctx), asset)
+				return deleted, mediaObjectDeleteError(err, restoreErr)
+			}
+			total = s.totalBytes.Add(-asset.SizeBytes)
 			deleted++
 		}
 	}
-	s.totalBytes.Store(total)
 	return deleted, nil
 }
 

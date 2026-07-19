@@ -15,6 +15,7 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
@@ -58,6 +59,20 @@ func TestPublicVideoFailureMessageHidesUpstreamHTML(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(message), "doctype") || strings.Contains(strings.ToLower(message), "html") {
 		t.Fatalf("raw HTML leaked: %q", message)
+	}
+}
+
+func TestDeleteVideoTrimsIDAndDelegatesOwnedTerminalDeletion(t *testing.T) {
+	repository := &videoDeleteRepository{}
+	service := &Service{mediaJobs: repository}
+	key := clientkey.Key{ID: 77}
+
+	deleted, err := service.DeleteVideo(context.Background(), "  video_delete_123  ", key)
+	if err != nil || !deleted {
+		t.Fatalf("delete = %v, %v", deleted, err)
+	}
+	if repository.id != "video_delete_123" || repository.clientKeyID != key.ID {
+		t.Fatalf("delegation = id %q, key %d", repository.id, repository.clientKeyID)
 	}
 }
 
@@ -453,6 +468,18 @@ func (r videoRepairRouteResolver) GetByProviderUpstream(context.Context, account
 
 type videoRepairRepository struct{ job media.Job }
 
+type videoDeleteRepository struct {
+	repository.MediaJobRepository
+	id          string
+	clientKeyID uint64
+}
+
+func (r *videoDeleteRepository) DeleteOwnedTerminalMediaJob(_ context.Context, id string, clientKeyID uint64) (bool, error) {
+	r.id = id
+	r.clientKeyID = clientKeyID
+	return true, nil
+}
+
 func (r *videoRepairRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
 func (r *videoRepairRepository) GetMediaJob(context.Context, string, uint64) (media.Job, error) {
 	return r.job, nil
@@ -463,6 +490,9 @@ func (r *videoRepairRepository) ListMediaJobsByClientKey(context.Context, uint64
 func (r *videoRepairRepository) UpdateMediaJob(_ context.Context, job media.Job) error {
 	r.job = job
 	return nil
+}
+func (*videoRepairRepository) DeleteOwnedTerminalMediaJob(context.Context, string, uint64) (bool, error) {
+	return false, nil
 }
 func (r *videoRepairRepository) ListMediaJobs(_ context.Context, query repository.MediaJobListQuery) ([]media.Job, int64, error) {
 	if query.Filter.Status == string(media.StatusCompleted) {
@@ -516,6 +546,14 @@ func (r *videoUsageRepository) ListMediaJobsByClientKey(context.Context, uint64,
 }
 
 func (r *videoUsageRepository) UpdateMediaJob(context.Context, media.Job) error { return nil }
+
+func (r *videoUsageRepository) DeleteOwnedTerminalMediaJob(_ context.Context, id string, clientKeyID uint64) (bool, error) {
+	if r.job.ID != id || r.job.ClientKeyID != clientKeyID || (r.job.Status != media.StatusCompleted && r.job.Status != media.StatusFailed) {
+		return false, nil
+	}
+	r.job = media.Job{}
+	return true, nil
+}
 
 func (r *videoUsageRepository) ListMediaJobs(context.Context, repository.MediaJobListQuery) ([]media.Job, int64, error) {
 	return nil, 0, nil

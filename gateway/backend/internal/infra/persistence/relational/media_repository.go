@@ -2,11 +2,18 @@ package relational
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type MediaJobRepository struct{ db *Database }
@@ -100,19 +107,95 @@ func (r *MediaAssetRepository) ListOldestMediaAssets(ctx context.Context, limit 
 	return values, nil
 }
 
-func (r *MediaAssetRepository) DeleteMediaAsset(ctx context.Context, id string) error {
-	result := r.db.db.WithContext(ctx).Where("id = ?", id).Delete(&mediaAssetModel{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+func (r *MediaAssetRepository) DeleteMediaAssetIfUnused(ctx context.Context, id string) (bool, error) {
+	deleted := false
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var asset mediaAssetModel
+		query := tx.Select("id").Where("id = ?", id)
+		if r.db.dialect == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&asset).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		result := tx.Where(
+			"id = ? AND NOT EXISTS (SELECT 1 FROM media_jobs WHERE media_jobs.status IN ? AND media_jobs.input_json LIKE '%' || media_assets.id || '%')",
+			id, []media.Status{media.StatusQueued, media.StatusInProgress},
+		).Delete(&mediaAssetModel{})
+		if result.Error != nil {
+			return result.Error
+		}
+		deleted = result.RowsAffected > 0
+		return nil
+	})
+	return deleted, mapError(err)
 }
 
 func (r *MediaJobRepository) CreateMediaJob(ctx context.Context, value media.Job) error {
-	return r.db.db.WithContext(ctx).Create(mediaJobFromDomain(value)).Error
+	assetIDs, err := internalMediaAssetIDs(value.InputJSON)
+	if err != nil {
+		return err
+	}
+	err = r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(assetIDs) > 0 {
+			var assets []mediaAssetModel
+			query := tx.Select("id").Where("id IN ?", assetIDs).Order("id ASC")
+			if r.db.dialect == "postgres" {
+				query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			if err := query.Find(&assets).Error; err != nil {
+				return err
+			}
+			if len(assets) != len(assetIDs) {
+				return repository.ErrNotFound
+			}
+		}
+		return tx.Create(mediaJobFromDomain(value)).Error
+	})
+	return mapError(err)
+}
+
+func internalMediaAssetIDs(inputJSON string) ([]string, error) {
+	var input struct {
+		ImageURLs []string `json:"image_urls"`
+	}
+	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+		return nil, fmt.Errorf("解析媒体任务输入: %w", err)
+	}
+	unique := make(map[string]struct{})
+	for _, value := range input.ImageURLs {
+		value = strings.TrimSpace(value)
+		if id, ok := media.ParseImageReference(value); ok {
+			unique[id] = struct{}{}
+			continue
+		}
+		parsed, err := url.Parse(value)
+		if err != nil {
+			continue
+		}
+		if parsed.Host != "" {
+			continue
+		}
+		const imageRoute = "/v1/media/images/"
+		routeIndex := strings.Index(parsed.Path, imageRoute)
+		if routeIndex < 0 {
+			continue
+		}
+		id := parsed.Path[routeIndex+len(imageRoute):]
+		if strings.Contains(id, "/") || media.ImageReference(id) == "" {
+			return nil, repository.ErrNotFound
+		}
+		unique[id] = struct{}{}
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 func (r *MediaJobRepository) GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error) {
@@ -160,6 +243,17 @@ func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job
 		return repository.ErrNotFound
 	}
 	return nil
+}
+
+func (r *MediaJobRepository) DeleteOwnedTerminalMediaJob(ctx context.Context, id string, clientKeyID uint64) (bool, error) {
+	result := r.db.db.WithContext(ctx).Where(
+		"id = ? AND client_key_id = ? AND status IN ? AND usage_recorded_at IS NOT NULL",
+		id, clientKeyID, []media.Status{media.StatusCompleted, media.StatusFailed},
+	).Delete(&mediaJobModel{})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // ListMediaJobs 通过固定搜索字段和排序白名单返回稳定分页结果。

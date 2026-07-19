@@ -44,6 +44,7 @@ type MediaJobRepository interface {
 	GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error)
 	ListMediaJobsByClientKey(ctx context.Context, clientKeyID uint64, offset, limit int) ([]media.Job, int64, error)
 	UpdateMediaJob(ctx context.Context, value media.Job) error
+	DeleteOwnedTerminalMediaJob(ctx context.Context, id string, clientKeyID uint64) (bool, error)
 	ListMediaJobs(ctx context.Context, query MediaJobListQuery) ([]media.Job, int64, error)
 	SummarizeMediaJobs(ctx context.Context) (MediaJobStats, error)
 	ListRecoverableMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
@@ -60,7 +61,7 @@ type MediaAssetRepository interface {
 	SummarizeMediaAssets(ctx context.Context) (MediaAssetStats, error)
 	TotalMediaAssetBytes(ctx context.Context) (int64, error)
 	ListOldestMediaAssets(ctx context.Context, limit int) ([]media.Asset, error)
-	DeleteMediaAsset(ctx context.Context, id string) error
+	DeleteMediaAssetIfUnused(ctx context.Context, id string) (bool, error)
 }
 
 // MediaObjectStorage 定义媒体二进制对象的存取边界。
