@@ -5,6 +5,7 @@ const contracts = await import("../src/public/api/contracts.mjs").catch(() => nu
 const stream = await import("../src/public/api/sse-parser.mjs").catch(() => null);
 const publicErrors = await import("../src/public/api/public-error.mjs").catch(() => null);
 const imageCacheURL = await import("../src/public/features/image/cache-url.ts").catch(() => null);
+const cacheSelection = await import("../src/public/features/cache/cache-selection.ts").catch(() => null);
 
 test("public API contract preserves every active workspace endpoint", () => {
   assert.ok(contracts, "missing public API contract module");
@@ -76,4 +77,23 @@ test("cached image paths become absolute URLs before reuse", () => {
     imageCacheURL.absoluteImageCacheURL("/v1/files/image/cached.jpg", "http://localhost:18001"),
     "http://localhost:18001/v1/files/image/cached.jpg",
   );
+});
+
+test("stored cache images use the internal media reference for video generation", () => {
+  assert.ok(imageCacheURL, "missing image cache URL helpers");
+  assert.equal(
+    imageCacheURL.cachedImageReference("mediaAsset", "img_123", "https://grok.uonoe.com/v1/media/images/img_123"),
+    "grok2api-media://image/img_123",
+  );
+  assert.equal(
+    imageCacheURL.cachedImageReference("legacy", "cached.jpg", "https://grok.uonoe.com/v1/files/image/cached.jpg"),
+    "https://grok.uonoe.com/v1/files/image/cached.jpg",
+  );
+});
+
+test("cache delete payload uses the backend cache_key contract", () => {
+  assert.ok(cacheSelection, "missing cache selection helpers");
+  assert.deepEqual(cacheSelection.cacheDeletePayload([{ source: "mediaAsset", cacheKey: "img_123" }]), {
+    items: [{ source: "mediaAsset", cache_key: "img_123" }],
+  });
 });

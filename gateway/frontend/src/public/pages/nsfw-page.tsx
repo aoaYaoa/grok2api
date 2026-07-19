@@ -315,7 +315,8 @@ export function NsfwPage() {
       const deleted = new Set(result.deleted_keys);
       setCachedImages((current) => current.filter((item) => !deleted.has(item.cacheKey)));
       setImageCacheSelected(new Set());
-      toast.success(`已删除 ${result.deleted} 张`);
+      const message = `已删除 ${result.deleted} 张，跳过 ${result.skipped} 张，失败 ${result.failed} 张`;
+      if (result.deleted === 0 && result.failed > 0) toast.error(message); else toast.success(message);
     } catch (error) { toast.error(error instanceof Error ? error.message : "删除图片缓存失败"); }
   }
 
@@ -328,7 +329,8 @@ export function NsfwPage() {
       setCachedVideos((current) => current.filter((item) => !deleted.has(item.cacheKey || "")));
       setCacheSelected(new Set());
       if (activeVideo && deleted.has(activeVideo.cacheKey || "")) setActiveVideo(null);
-      toast.success(`已删除 ${result.deleted} 个`);
+      const message = `已删除 ${result.deleted} 个，跳过 ${result.skipped} 个，失败 ${result.failed} 个`;
+      if (result.deleted === 0 && result.failed > 0) toast.error(message); else toast.success(message);
     } catch (error) { toast.error(error instanceof Error ? error.message : "删除视频缓存失败"); }
   }
 

@@ -13,3 +13,9 @@ export function removeDeletedSelection(current: Set<string>, deletedKeys: string
   deletedKeys.forEach((key) => next.delete(key));
   return next;
 }
+
+export function cacheDeletePayload(items: Array<{ source: string; cacheKey: string }>) {
+  return {
+    items: items.map(({ source, cacheKey }) => ({ source, cache_key: cacheKey })),
+  };
+}

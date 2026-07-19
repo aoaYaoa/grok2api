@@ -90,7 +90,8 @@ export function WorkbenchPage() {
       const deleted = new Set(result.deleted_keys);
       setCachedImages((items) => items.filter((item) => !deleted.has(item.cacheKey)));
       setCacheSelected((current) => new Set([...current].filter((id) => !selected.some((item) => item.id === id && deleted.has(item.cacheKey)))));
-      toast.success(`已删除 ${result.deleted} 张，跳过 ${result.skipped} 张`);
+      const message = `已删除 ${result.deleted} 张，跳过 ${result.skipped} 张，失败 ${result.failed} 张`;
+      if (result.deleted === 0 && result.failed > 0) toast.error(message); else toast.success(message);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除缓存图片失败");
     }

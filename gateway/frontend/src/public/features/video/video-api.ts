@@ -1,5 +1,6 @@
 import { publicEndpoints, publicFetch, publicSSE } from "@/public/api/client";
 import { sanitizePublicError } from "@/public/api/public-error.mjs";
+import { cacheDeletePayload } from "@/public/features/cache/cache-selection";
 import { videoURLFromText } from "@/public/lib/media";
 import type { CacheDeleteResult, CacheIdentity } from "@/public/features/image/image-api";
 
@@ -32,7 +33,7 @@ export function streamVideo(key: string, taskID: string, onUpdate: (update: { pr
   }, signal);
 }
 export async function listCachedVideos(key: string) { return publicFetch<{ items?: Array<Record<string, unknown>> }>(key, `${publicEndpoints.videoCache}?page=1&page_size=200`); }
-export async function deleteCachedVideos(key: string, items: CacheIdentity[]) { return publicFetch<CacheDeleteResult>(key, publicEndpoints.videoCacheDelete, { method: "POST", body: JSON.stringify({ items }) }); }
+export async function deleteCachedVideos(key: string, items: CacheIdentity[]) { return publicFetch<CacheDeleteResult>(key, publicEndpoints.videoCacheDelete, { method: "POST", body: JSON.stringify(cacheDeletePayload(items)) }); }
 export async function renameVideo(key: string, item: VideoItem, displayName: string) { return publicFetch(key, publicEndpoints.videoRename, { method: "POST", body: JSON.stringify({ post_id: item.postID, name: item.id, display_name: displayName }) }); }
 export function videoPostID(value: string) { const matches = Array.from(value.matchAll(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g), (match) => match[0]); return matches.at(-1) || ""; }
 export function cachedVideo(payload: Record<string, unknown>): VideoItem { const url = String(payload.view_url || payload.url || ""); const source = String(payload.source || "legacy") as CacheIdentity["source"]; const cacheKey = String(payload.cache_key || payload.name || payload.task_id || crypto.randomUUID()); const id = `${source}:${cacheKey}`; return { id, taskID: String(payload.task_id || id), url, posterURL: String(payload.poster_url || payload.posterURL || ""), prompt: "", progress: 100, status: "completed", postID: String(payload.post_id || videoPostID(url)), originalPostID: String(payload.original_post_id || ""), displayName: String(payload.display_name || payload.name || "视频"), createdAt: Number(payload.mtime_ms || Date.now()), source, cacheKey }; }

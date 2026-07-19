@@ -1,6 +1,7 @@
 import { publicEndpoints, publicFetch, publicSSE, publicSSERequest } from "@/public/api/client";
+import { cacheDeletePayload } from "@/public/features/cache/cache-selection";
 import { imageSource } from "@/public/lib/media";
-import { absoluteImageCacheURL } from "./cache-url";
+import { absoluteImageCacheURL, cachedImageReference } from "./cache-url";
 
 export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
 export type CacheSource = "legacy" | "mediaAsset" | "mediaJob";
@@ -49,17 +50,11 @@ export function cachedImage(payload: Record<string, unknown>): CachedImage {
 }
 
 export async function deleteCachedImages(key: string, items: CacheIdentity[]) {
-  return publicFetch<CacheDeleteResult>(key, publicEndpoints.imageCacheDelete, { method: "POST", body: JSON.stringify({ items }) });
+  return publicFetch<CacheDeleteResult>(key, publicEndpoints.imageCacheDelete, { method: "POST", body: JSON.stringify(cacheDeletePayload(items)) });
 }
 
 export function cachedReferenceSource(image: CachedImage) {
-  try {
-    const parsed = new URL(image.sourceURL, window.location.origin);
-    if (parsed.origin === window.location.origin && parsed.pathname.includes("/v1/media/images/")) return parsed.pathname + parsed.search;
-  } catch {
-    // Keep the already validated display URL.
-  }
-  return image.sourceURL;
+  return cachedImageReference(image.source, image.cacheKey, image.sourceURL);
 }
 
 export async function listCachedImages(key: string) {

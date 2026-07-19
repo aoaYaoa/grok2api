@@ -7,3 +7,8 @@ export function absoluteImageCacheURL(value: unknown, origin: string): string {
     return "";
   }
 }
+
+export function cachedImageReference(source: string, cacheKey: string, sourceURL: string): string {
+  if (source === "mediaAsset") return `grok2api-media://image/${cacheKey}`;
+  return sourceURL;
+}
