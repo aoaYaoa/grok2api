@@ -84,6 +84,20 @@ test("NSFW local references show a validated preview before task upload", async 
   assert.doesNotMatch(nsfw, /已加载本地参考图/);
 });
 
+test("cached video references keep browser preview URLs separate from backend media references", async () => {
+  const media = await readFile(path.join(root, "src/public/lib/media.ts"), "utf8");
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+  const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
+
+  assert.match(media, /requestData\?: string/);
+  assert.match(video, /data: item\.url, requestData: cachedReferenceSource\(item\)/);
+  assert.match(video, /references\.map\(\(item\) => item\.requestData \|\| item\.data\)/);
+  assert.match(video, /<img src=\{item\.data\}/);
+  assert.match(nsfw, /setSelected\(cached\)/);
+  assert.match(nsfw, /selected\?\.requestSourceURL \|\| selected\?\.sourceURL/);
+  assert.doesNotMatch(nsfw, /setSelected\(\{ \.\.\.cached, sourceURL: cachedReferenceSource\(cached\) \}\)/);
+});
+
 test("public media uploads convert HEIC references before preview and submission", async () => {
   const packageJSON = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const media = await readFile(path.join(root, "src/public/lib/media.ts"), "utf8");

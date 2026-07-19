@@ -3,7 +3,7 @@ import { cacheDeletePayload } from "@/public/features/cache/cache-selection";
 import { imageSource } from "@/public/lib/media";
 import { absoluteImageCacheURL, cachedImageReference } from "./cache-url";
 
-export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; elapsedMS?: number; createdAt: number };
+export type GeneratedImage = { id: string; url: string; prompt: string; parentPostID: string; sourceURL: string; requestSourceURL?: string; elapsedMS?: number; createdAt: number };
 export type CacheSource = "legacy" | "mediaAsset" | "mediaJob";
 export type CacheIdentity = { source: CacheSource; cacheKey: string };
 export type CacheDeleteResult = { deleted: number; skipped: number; failed: number; deleted_keys: string[] };
@@ -44,7 +44,8 @@ export function cachedImage(payload: Record<string, unknown>): CachedImage {
   const source = (String(payload.source || "legacy") === "mediaAsset" ? "mediaAsset" : "legacy") as "legacy" | "mediaAsset";
   const cacheKey = String(payload.cache_key || name);
   return {
-    id: `${source}:${cacheKey}` || crypto.randomUUID(), name, url, source, cacheKey, sourceURL: url, parentPostID,
+    id: `${source}:${cacheKey}` || crypto.randomUUID(), name, url, source, cacheKey, sourceURL: url,
+    requestSourceURL: cachedImageReference(source, cacheKey, url), parentPostID,
     prompt: name, sizeBytes: Number(payload.size_bytes || 0), createdAt: Number(payload.mtime_ms || Date.now()),
   };
 }
@@ -54,7 +55,7 @@ export async function deleteCachedImages(key: string, items: CacheIdentity[]) {
 }
 
 export function cachedReferenceSource(image: CachedImage) {
-  return cachedImageReference(image.source, image.cacheKey, image.sourceURL);
+  return image.requestSourceURL || cachedImageReference(image.source, image.cacheKey, image.sourceURL);
 }
 
 export async function listCachedImages(key: string) {

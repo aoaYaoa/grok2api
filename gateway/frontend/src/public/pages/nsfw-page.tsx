@@ -12,7 +12,7 @@ import { ImageGrid } from "@/public/components/image-grid";
 import { PromptEnhanceButton } from "@/public/components/prompt-enhance-button";
 import { VideoExtensionResult } from "@/public/components/video-extension-result";
 import { VideoGrid, VideoPlayer } from "@/public/components/video-grid";
-import { cachedImage, cachedReferenceSource, deleteCachedImages, editImage, generatedImage, imageFromEdit, listCachedImages, startImage, stopImages, streamImage, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
+import { cachedImage, deleteCachedImages, editImage, generatedImage, imageFromEdit, listCachedImages, startImage, stopImages, streamImage, type CachedImage, type GeneratedImage } from "@/public/features/image/image-api";
 import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, deleteCachedVideos, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
@@ -214,7 +214,7 @@ export function NsfwPage() {
   }
 
   async function generateVideos(extension?: VideoItem) {
-    const source = localImage?.data || selected?.sourceURL || selected?.url;
+    const source = localImage?.data || selected?.requestSourceURL || selected?.sourceURL || selected?.url;
     if (!source && !extension) return toast.error("请先选择候选图或上传本地参考图");
     if (extension && !extension.postID) return toast.error("当前视频缺少 postId");
     if (videoStartLock.current) return;
@@ -302,7 +302,7 @@ export function NsfwPage() {
   function chooseCachedImage(image: GeneratedImage) {
     const cached = cachedImages.find((item) => item.id === image.id);
     if (!cached) return;
-    setSelected({ ...cached, sourceURL: cachedReferenceSource(cached) });
+    setSelected(cached);
     setLocalImage(null);
     setImageCacheOpen(false);
   }

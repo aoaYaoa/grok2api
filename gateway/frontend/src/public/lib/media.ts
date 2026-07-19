@@ -1,4 +1,4 @@
-export type UploadAsset = { id: string; name: string; mime: string; data: string };
+export type UploadAsset = { id: string; name: string; mime: string; data: string; requestData?: string };
 
 const heicMIMETypes = new Set(["image/heic", "image/heif"]);
 const imageExtensions = /\.(?:avif|gif|heic|heif|jpe?g|png|webp)$/i;

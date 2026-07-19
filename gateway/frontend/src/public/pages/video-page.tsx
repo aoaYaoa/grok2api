@@ -117,7 +117,7 @@ export function VideoPage() {
     startController.current = controller;
     const taskPrompt = bodyOverride ? extendPrompt.trim() : prompt.trim();
     try {
-      const result = await startVideo(key, { prompt: taskPrompt, aspect_ratio: ratio, video_length: Number(length), resolution_name: resolution, preset, concurrent: Number(concurrent), image_references: references.map((item) => item.data), source_image_urls: references.map((item) => item.data), ...(bodyOverride || {}) }, controller.signal);
+      const result = await startVideo(key, { prompt: taskPrompt, aspect_ratio: ratio, video_length: Number(length), resolution_name: resolution, preset, concurrent: Number(concurrent), image_references: references.map((item) => item.requestData || item.data), source_image_urls: references.map((item) => item.requestData || item.data), ...(bodyOverride || {}) }, controller.signal);
       if (controller.signal.aborted) return;
       const ids = result.task_ids?.length ? result.task_ids : [result.task_id];
       taskIDs.current = ids;
@@ -175,7 +175,7 @@ export function VideoPage() {
 
   function addCachedReferences() {
     const selected = cachedImages.filter((item) => imageCacheSelected.has(item.id));
-    setReferences((current) => [...current, ...selected.map((item) => ({ id: item.id, name: item.name, mime: "image/jpeg", data: cachedReferenceSource(item) }))].slice(0, 8));
+    setReferences((current) => [...current, ...selected.map((item) => ({ id: item.id, name: item.name, mime: "image/jpeg", data: item.url, requestData: cachedReferenceSource(item) }))].slice(0, 8));
     setImageCacheOpen(false);
   }
 
