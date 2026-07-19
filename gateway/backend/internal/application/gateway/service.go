@@ -464,6 +464,11 @@ attemptLoop:
 				lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
 				break
 			}
+			if isSSOCredentialRejected(err, credential) {
+				s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
+				continue
+			}
 			lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 			failureFingerprints[lastFailure.Fingerprint]++
 			if failureFingerprints[lastFailure.Fingerprint] >= 2 {
@@ -475,8 +480,8 @@ attemptLoop:
 		if response.StatusCode == http.StatusUnauthorized {
 			response.Body.Close()
 			if credential.AuthType == accountdomain.AuthTypeSSO {
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
-				s.selector.MarkFailure(ctx, credential, http.StatusUnauthorized, 0)
+				s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+				s.selector.MarkQuotaStateChanged(credential.Provider)
 				lease.Release()
 				lastErr = fmt.Errorf("%s SSO 凭据已失效", credential.Provider)
 				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
@@ -512,7 +517,7 @@ attemptLoop:
 			}
 			if response.StatusCode == http.StatusUnauthorized {
 				body, _ := readRetryableBody(response.Body)
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build OAuth credential rejected after refresh")
+				_ = s.accounts.MarkReauthRequired(context.WithoutCancel(ctx), credential.ID, "Grok Build OAuth credential rejected after refresh")
 				s.selector.MarkQuotaStateChanged(credential.Provider)
 				lease.Release()
 				lastErr = fmt.Errorf("刷新后上游仍返回 401")
@@ -802,11 +807,19 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	}
 	response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: method, Path: path})
 	if err != nil {
+		if isSSOCredentialRejected(err, credential) {
+			s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+		}
 		lease.Release()
 		return nil, err
 	}
 	if response.StatusCode == http.StatusUnauthorized {
 		response.Body.Close()
+		if credential.AuthType == accountdomain.AuthTypeSSO {
+			s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+			lease.Release()
+			return nil, ErrResponseAccountUnavailable
+		}
 		if s.markPermanentlyUnrefreshableCredentialRejected(ctx, credential) {
 			lease.Release()
 			return nil, fmt.Errorf("%w: %w", ErrResponseAccountUnavailable, accountapp.ErrCredentialRefreshPermanent)
@@ -851,6 +864,29 @@ func (s *Service) markPermanentlyUnrefreshableCredentialRejected(ctx context.Con
 
 func (s *Service) markCredentialRejectedAfterPermanentRefresh(ctx context.Context, credential accountdomain.Credential) {
 	_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s OAuth access token rejected after permanent refresh failure", credential.Provider))
+	s.selector.MarkQuotaStateChanged(credential.Provider)
+}
+
+func isSSOCredentialRejected(err error, credential accountdomain.Credential) bool {
+	if credential.AuthType != accountdomain.AuthTypeSSO || err == nil {
+		return false
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return true
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	return ok && status == http.StatusUnauthorized
+}
+
+func (s *Service) markSSOCredentialRejected(ctx context.Context, credential accountdomain.Credential, reason string) {
+	if credential.AuthType != accountdomain.AuthTypeSSO {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer cancel()
+	if err := s.accounts.MarkReauthRequired(writeCtx, credential.ID, reason); err != nil {
+		s.logger.Error("account_reauth_required_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
+	}
 	s.selector.MarkQuotaStateChanged(credential.Provider)
 }
 

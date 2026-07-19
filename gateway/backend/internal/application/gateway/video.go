@@ -548,12 +548,14 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			failureHandled = true
 		} else if errors.Is(err, provider.ErrUnauthorized) {
 			if lease.Credential.AuthType == account.AuthTypeSSO {
-				_ = s.accounts.MarkReauthRequired(failureCtx, lease.Credential.ID, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
+				s.markSSOCredentialRejected(failureCtx, lease.Credential, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
 			}
-			s.selector.MarkFailure(failureCtx, lease.Credential, http.StatusUnauthorized, 0)
 			failureHandled = true
 		} else if status, ok := provider.ErrorHTTPStatus(err); ok {
 			switch {
+			case status == http.StatusUnauthorized && lease.Credential.AuthType == account.AuthTypeSSO:
+				s.markSSOCredentialRejected(failureCtx, lease.Credential, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
+				failureHandled = true
 			case status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider):
 				failureHandled = true
 			case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
