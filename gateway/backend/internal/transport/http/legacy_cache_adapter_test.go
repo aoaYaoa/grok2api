@@ -18,6 +18,12 @@ type fakeLegacyImageMediaLibrary struct {
 	assets   []mediadomain.Asset
 	listErr  error
 	listCall int
+	deleted  []string
+}
+
+func (f *fakeLegacyImageMediaLibrary) DeleteImage(_ context.Context, id string) (bool, error) {
+	f.deleted = append(f.deleted, id)
+	return true, nil
 }
 
 func (f *fakeLegacyImageMediaLibrary) AdminListImages(ctx context.Context, page, pageSize int, _ string) ([]mediadomain.Asset, int64, error) {
@@ -194,8 +200,9 @@ func TestLegacyCacheAdaptersRejectNonLegacyItems(t *testing.T) {
 	}
 
 	imageAdapter := &legacyImageCacheAdapter{handler: handler}
-	if _, err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{{Source: "mediaAsset", CacheKey: imageName}}); err == nil {
-		t.Fatal("non-legacy image item was accepted")
+	imageResult, err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{{Source: "mediaJob", CacheKey: imageName}})
+	if err != nil || imageResult.Failed != 1 || imageResult.Deleted != 0 {
+		t.Fatalf("unsupported image result=%#v err=%v", imageResult, err)
 	}
 	videoAdapter := &legacyVideoCacheAdapter{handler: handler}
 	if _, err := videoAdapter.DeleteVideos([]legacyhttp.CacheDeleteTarget{{Source: "mediaJob", CacheKey: videoName}}); err == nil {
@@ -244,11 +251,20 @@ func TestLegacyImageCacheAdapterMergesMediaLibraryImages(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("items=%#v", items)
 	}
-	if items[0].Name != "img_edited_result.png" || items[0].ViewURL != "https://grok.example/v1/media/images/img_edited_result" || items[0].ModifiedAtMS != mediaTime.UnixMilli() {
+	if items[0].Source != "mediaAsset" || items[0].CacheKey != "img_edited_result" || items[0].Name != "img_edited_result.png" || items[0].ViewURL != "https://grok.example/v1/media/images/img_edited_result" || items[0].ModifiedAtMS != mediaTime.UnixMilli() {
 		t.Fatalf("media item=%#v", items[0])
 	}
 	if items[1].Name != legacyName {
 		t.Fatalf("legacy item=%#v", items[1])
+	}
+}
+
+func TestLegacyImageCacheAdapterDeletesMediaAssets(t *testing.T) {
+	media := &fakeLegacyImageMediaLibrary{}
+	adapter := &legacyImageCacheAdapter{media: media}
+	result, err := adapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{{Source: "mediaAsset", CacheKey: "img_delete_me"}})
+	if err != nil || result.Deleted != 1 || len(media.deleted) != 1 || media.deleted[0] != "img_delete_me" {
+		t.Fatalf("result=%#v deleted=%#v err=%v", result, media.deleted, err)
 	}
 }
 

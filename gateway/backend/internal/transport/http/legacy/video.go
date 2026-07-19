@@ -31,6 +31,7 @@ type VideoGateway interface {
 	CancelVideo(context.Context, string, clientkeydomain.Key) (mediadomain.Job, error)
 	ListVideos(context.Context, clientkeydomain.Key, int, int) ([]mediadomain.Job, int64, error)
 	RenameVideo(context.Context, string, string, clientkeydomain.Key) (mediadomain.Job, error)
+	DeleteVideo(context.Context, string, clientkeydomain.Key) (bool, error)
 }
 
 type LegacyCachedVideo struct {
@@ -96,7 +97,71 @@ func (h *Handler) registerVideo(public *gin.RouterGroup) {
 	public.GET("/video/sse", h.videoSSE)
 	public.POST("/video/stop", h.videoStop)
 	public.GET("/video/cache/list", h.videoCacheList)
+	public.POST("/video/cache/delete", h.videoCacheDelete)
 	public.POST("/video/rename", h.videoRename)
+}
+
+func (h *Handler) videoCacheDelete(c *gin.Context) {
+	clientValue, exists := c.Get(middleware.ClientKey)
+	clientKey, valid := clientValue.(clientkeydomain.Key)
+	if !exists || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid public key"})
+		return
+	}
+	var request struct {
+		Items []CacheDeleteTarget `json:"items"`
+	}
+	if json.NewDecoder(c.Request.Body).Decode(&request) != nil || len(request.Items) == 0 || len(request.Items) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid cache delete request"})
+		return
+	}
+	result := CacheDeleteResult{DeletedKeys: make([]string, 0, len(request.Items))}
+	legacyTargets := make([]CacheDeleteTarget, 0, len(request.Items))
+	for _, target := range request.Items {
+		target.Source = strings.TrimSpace(target.Source)
+		target.CacheKey = strings.TrimSpace(target.CacheKey)
+		if target.CacheKey == "" {
+			result.Failed++
+			continue
+		}
+		switch target.Source {
+		case "legacy":
+			legacyTargets = append(legacyTargets, target)
+		case "mediaJob":
+			if h.videoGateway == nil {
+				result.Failed++
+				continue
+			}
+			deleted, err := h.videoGateway.DeleteVideo(c.Request.Context(), target.CacheKey, clientKey)
+			if err != nil {
+				result.Failed++
+			} else if deleted {
+				result.Deleted++
+				result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)
+			} else {
+				result.Skipped++
+			}
+		default:
+			result.Failed++
+		}
+	}
+	if len(legacyTargets) > 0 {
+		deleter, ok := h.videoCache.(LegacyVideoCacheDeleter)
+		if !ok {
+			result.Failed += len(legacyTargets)
+		} else {
+			legacyResult, err := deleter.DeleteVideos(legacyTargets)
+			if err != nil && legacyResult.Deleted+legacyResult.Skipped+legacyResult.Failed == 0 {
+				result.Failed += len(legacyTargets)
+			} else {
+				result.Deleted += legacyResult.Deleted
+				result.Skipped += legacyResult.Skipped
+				result.Failed += legacyResult.Failed
+				result.DeletedKeys = append(result.DeletedKeys, legacyResult.DeletedKeys...)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) videoCacheList(c *gin.Context) {
@@ -193,6 +258,7 @@ func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
 		}
 	}
 	return LegacyCachedVideo{
+		Source: "mediaJob", CacheKey: job.ID,
 		Name: name, TaskID: job.RequestID, ViewURL: job.UpstreamURL, PostID: lastVideoPostID(job.UpstreamURL),
 		PosterURL: videoJobPosterURL(job), DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
 	}, true

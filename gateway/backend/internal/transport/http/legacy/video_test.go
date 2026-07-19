@@ -19,14 +19,17 @@ import (
 )
 
 type fakeLegacyVideoGateway struct {
-	created     []gateway.VideoInput
-	createError error
-	polls       map[string]int
-	cancelled   []string
-	listed      []mediadomain.Job
-	renamedID   string
-	renamedTo   string
-	renameError error
+	created      []gateway.VideoInput
+	createError  error
+	polls        map[string]int
+	cancelled    []string
+	listed       []mediadomain.Job
+	renamedID    string
+	renamedTo    string
+	renameError  error
+	deletedID    string
+	deleteResult bool
+	deleteError  error
 }
 
 type fakeVideoReferenceStore struct {
@@ -71,6 +74,29 @@ func (f *fakeLegacyVideoGateway) RenameVideo(_ context.Context, identifier, disp
 	}
 	f.renamedID, f.renamedTo = identifier, displayName
 	return mediadomain.Job{ID: "video-job-1", UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4", InputJSON: `{"display_name":"` + displayName + `"}`}, nil
+}
+
+func (f *fakeLegacyVideoGateway) DeleteVideo(_ context.Context, id string, _ clientkeydomain.Key) (bool, error) {
+	f.deletedID = id
+	return f.deleteResult, f.deleteError
+}
+
+func TestVideoCacheDeleteSupportsOwnedMediaJobs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{deleteResult: true}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/cache/delete", strings.NewReader(`{"items":[{"source":"mediaJob","cache_key":"video_123"}]}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"deleted":1`) || videoGateway.deletedID != "video_123" {
+		t.Fatalf("status=%d body=%s id=%q", recorder.Code, recorder.Body.String(), videoGateway.deletedID)
+	}
 }
 
 func TestVideoRenameFallsBackToMigratedCache(t *testing.T) {

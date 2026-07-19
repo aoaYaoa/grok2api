@@ -23,6 +23,7 @@ type legacyImageCacheAdapter struct {
 type legacyImageMediaLibrary interface {
 	AdminListImages(context.Context, int, int, string) ([]mediadomain.Asset, int64, error)
 	PublicImageURL(string) string
+	DeleteImage(context.Context, string) (bool, error)
 }
 
 func newLegacyImageCacheAdapter(handler *cachehttp.Handler, media legacyImageMediaLibrary) legacyhttp.LegacyImageCache {
@@ -63,6 +64,8 @@ func (a *legacyImageCacheAdapter) ListImages(ctx context.Context) ([]legacyhttp.
 			}
 			for _, asset := range assets {
 				result = append(result, legacyhttp.LegacyCachedImage{
+					Source:       "mediaAsset",
+					CacheKey:     asset.ID,
 					Name:         mediaImageName(asset),
 					ViewURL:      a.media.PublicImageURL(asset.ID),
 					SizeBytes:    asset.SizeBytes,
@@ -85,19 +88,32 @@ func (a *legacyImageCacheAdapter) DeleteImages(ctx context.Context, targets []le
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if a.handler == nil && len(targets) > 0 {
-		return result, errors.New("legacy image cache is unavailable")
-	}
 	for _, target := range targets {
-		if target.Source != "legacy" {
-			return result, errors.New("unsupported image cache source")
+		target.Source = strings.TrimSpace(target.Source)
+		target.CacheKey = strings.TrimSpace(target.CacheKey)
+		if target.CacheKey == "" {
+			result.Failed++
+			continue
 		}
-		if strings.TrimSpace(target.CacheKey) == "" {
-			return result, errors.New("legacy image cache key is empty")
+		var deleted bool
+		var err error
+		switch target.Source {
+		case "legacy":
+			if a.handler == nil {
+				result.Failed++
+				continue
+			}
+			deleted, err = a.handler.DeleteItem("image", target.CacheKey)
+		case "mediaAsset":
+			if a.media == nil {
+				result.Failed++
+				continue
+			}
+			deleted, err = a.media.DeleteImage(ctx, target.CacheKey)
+		default:
+			result.Failed++
+			continue
 		}
-	}
-	for _, target := range targets {
-		deleted, err := a.handler.DeleteItem("image", target.CacheKey)
 		if deleted {
 			result.Deleted++
 			result.DeletedKeys = append(result.DeletedKeys, target.CacheKey)

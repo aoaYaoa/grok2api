@@ -22,8 +22,11 @@ type fakeImageGenerator struct {
 }
 
 type fakeLegacyImageCache struct {
-	items     []LegacyCachedImage
-	listError error
+	items        []LegacyCachedImage
+	listError    error
+	deleted      []CacheDeleteTarget
+	deleteResult CacheDeleteResult
+	deleteError  error
 }
 
 type legacyImageStatusError struct{ status int }
@@ -33,6 +36,29 @@ func (e legacyImageStatusError) HTTPStatusCode() int { return e.status }
 
 func (f *fakeLegacyImageCache) ListImages(context.Context) ([]LegacyCachedImage, error) {
 	return f.items, f.listError
+}
+
+func (f *fakeLegacyImageCache) DeleteImages(_ context.Context, targets []CacheDeleteTarget) (CacheDeleteResult, error) {
+	f.deleted = append(f.deleted, targets...)
+	return f.deleteResult, f.deleteError
+}
+
+func TestImagineCacheDeleteRequiresAuthenticationAndReturnsPartialResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	imageCache := &fakeLegacyImageCache{deleteResult: CacheDeleteResult{Deleted: 1, Skipped: 1, Failed: 1, DeletedKeys: []string{"one.jpg"}}}
+	handler := NewHandler(Options{PublicEnabled: true, ImageCache: imageCache}, authenticator)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/imagine/cache/delete", strings.NewReader(`{"items":[{"source":"legacy","cache_key":"one.jpg"},{"source":"legacy","cache_key":"missing.jpg"}]}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"deleted":1`) || len(imageCache.deleted) != 2 {
+		t.Fatalf("status=%d body=%s deleted=%#v", recorder.Code, recorder.Body.String(), imageCache.deleted)
+	}
 }
 
 func TestWriteImagineEditErrorPreservesProviderStatus(t *testing.T) {

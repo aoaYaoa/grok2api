@@ -102,6 +102,28 @@ func (h *Handler) registerImagine(public *gin.RouterGroup) {
 	public.POST("/imagine/workbench/edit", h.imagineWorkbenchEdit)
 	public.GET("/imagine/parent-post", h.imagineParentPost)
 	public.GET("/imagine/cache/list", h.imagineCacheList)
+	public.POST("/imagine/cache/delete", h.imagineCacheDelete)
+}
+
+func (h *Handler) imagineCacheDelete(c *gin.Context) {
+	var request struct {
+		Items []CacheDeleteTarget `json:"items"`
+	}
+	if json.NewDecoder(c.Request.Body).Decode(&request) != nil || len(request.Items) == 0 || len(request.Items) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid cache delete request"})
+		return
+	}
+	deleter, ok := h.imageCache.(LegacyImageCacheDeleter)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "Image cache deletion is unavailable"})
+		return
+	}
+	result, err := deleter.DeleteImages(c.Request.Context(), request.Items)
+	if err != nil && result.Deleted+result.Skipped+result.Failed == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Failed to delete images"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) imagineCacheList(c *gin.Context) {
