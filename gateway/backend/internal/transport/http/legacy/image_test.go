@@ -49,6 +49,7 @@ func TestImagineCacheListUsesPublicAuthentication(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	imageCache := &fakeLegacyImageCache{items: []LegacyCachedImage{{
+		Source: "legacy", CacheKey: "cached-image.jpg",
 		Name: "cached-image.jpg", ViewURL: "/v1/files/image/cached-image.jpg",
 		SizeBytes: 1234, ModifiedAtMS: 5678,
 	}}}
@@ -64,7 +65,7 @@ func TestImagineCacheListUsesPublicAuthentication(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	for _, expected := range []string{`"total":1`, `"name":"cached-image.jpg"`, `"view_url":"/v1/files/image/cached-image.jpg"`, `"size_bytes":1234`, `"mtime_ms":5678`} {
+	for _, expected := range []string{`"total":1`, `"name":"cached-image.jpg"`, `"view_url":"/v1/files/image/cached-image.jpg"`, `"source":"legacy"`, `"cache_key":"cached-image.jpg"`, `"size_bytes":1234`, `"mtime_ms":5678`} {
 		if !strings.Contains(recorder.Body.String(), expected) {
 			t.Fatalf("body missing %s: %s", expected, recorder.Body.String())
 		}

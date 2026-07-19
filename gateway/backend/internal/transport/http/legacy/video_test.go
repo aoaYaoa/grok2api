@@ -360,6 +360,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 		InputJSON:   `{"image_urls":[],"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
 	}}}
 	videoCache := &fakeLegacyVideoCache{items: []LegacyCachedVideo{{
+		Source: "legacy", CacheKey: "local.mp4",
 		Name: "local.mp4", ViewURL: "/v1/files/video/local.mp4", PosterURL: "/v1/files/image/local.jpg", PostID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		DisplayName: "Migrated title", SizeBytes: 42, ModifiedAtMS: 234567,
 	}}}
@@ -371,7 +372,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	listRequest.Header.Set("Authorization", "Bearer g2-direct-key")
 	listRecorder := httptest.NewRecorder()
 	router.ServeHTTP(listRecorder, listRequest)
-	for _, expected := range []string{`"display_name":"Saved title"`, `"task_id":"request-1"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"poster_url":"/v1/files/image/local.jpg"`, `"total":2`} {
+	for _, expected := range []string{`"display_name":"Saved title"`, `"task_id":"request-1"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"source":"legacy"`, `"cache_key":"local.mp4"`, `"poster_url":"/v1/files/image/local.jpg"`, `"total":2`} {
 		if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), expected) {
 			t.Fatalf("list status=%d body=%s missing=%s", listRecorder.Code, listRecorder.Body.String(), expected)
 		}

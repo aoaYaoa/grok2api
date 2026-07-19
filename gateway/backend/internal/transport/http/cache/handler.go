@@ -403,15 +403,20 @@ func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if err := validateDeleteName(mediaType, name); err != nil {
+		return false, err
+	}
 	path, err := h.filePath(mediaType, name)
 	if err != nil {
 		return false, err
+	}
+	if filepath.Base(path) != name {
+		return false, errors.New("invalid cache file name")
 	}
 	root := h.mediaRoots[mediaType]
 	if root == nil {
 		return false, errors.New("cache operation failed")
 	}
-	name = filepath.Base(path)
 	entry, err := root.Lstat(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -434,6 +439,13 @@ func (h *Handler) DeleteItem(mediaType, name string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func validateDeleteName(mediaType, name string) error {
+	if name == "" || strings.TrimSpace(name) != name || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) || filepath.Base(name) != name || !allowedFile(mediaType, name) {
+		return errors.New("invalid cache file name")
+	}
+	return nil
 }
 
 func (h *Handler) delete(mediaType, name string) (bool, error) {

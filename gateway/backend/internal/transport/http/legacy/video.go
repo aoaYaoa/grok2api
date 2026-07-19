@@ -54,7 +54,7 @@ type LegacyVideoCache interface {
 }
 
 type LegacyVideoCacheDeleter interface {
-	DeleteVideos([]LegacyCachedVideo) error
+	DeleteVideos([]CacheDeleteTarget) (CacheDeleteResult, error)
 }
 
 type VideoReferenceStore interface {
@@ -121,6 +121,7 @@ func (h *Handler) videoCacheList(c *gin.Context) {
 	for _, item := range values[start:end] {
 		items = append(items, gin.H{
 			"name": item.Name, "task_id": item.TaskID, "view_url": item.ViewURL, "poster_url": item.PosterURL, "post_id": item.PostID, "share_link": item.ShareLink,
+			"source": item.Source, "cache_key": item.CacheKey,
 			"original_post_id": item.OriginalPostID, "display_name": item.DisplayName,
 			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
 		})

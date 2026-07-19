@@ -251,6 +251,25 @@ func TestHandlerDeleteItemRejectsSymlinkedFile(t *testing.T) {
 	}
 }
 
+func TestHandlerDeleteItemRejectsNormalizedPathThatTargetsAnotherFile(t *testing.T) {
+	root := t.TempDir()
+	handler, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "video", "foo-bar.mp4")
+	if err := os.WriteFile(target, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if deleted, err := handler.DeleteItem("video", "foo/bar.mp4"); err == nil || deleted {
+		t.Fatalf("normalized path was accepted: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("normalized path deleted another file: %v", err)
+	}
+}
+
 func performRequest(router http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {

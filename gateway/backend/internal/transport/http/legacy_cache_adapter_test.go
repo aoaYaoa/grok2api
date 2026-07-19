@@ -116,17 +116,40 @@ func TestLegacyCacheAdaptersDeleteLegacyItems(t *testing.T) {
 
 	imageAdapter := &legacyImageCacheAdapter{handler: handler}
 	videoAdapter := &legacyVideoCacheAdapter{handler: handler}
-	if err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.LegacyCachedImage{{Source: "legacy", CacheKey: imageName}}); err != nil {
-		t.Fatal(err)
+	imageResult, err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{{Source: "legacy", CacheKey: imageName}})
+	if err != nil || imageResult.Deleted != 1 || imageResult.Skipped != 0 || imageResult.Failed != 0 || len(imageResult.DeletedKeys) != 1 || imageResult.DeletedKeys[0] != imageName {
+		t.Fatalf("image result=%#v err=%v", imageResult, err)
 	}
-	if err := videoAdapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "legacy", CacheKey: videoName}}); err != nil {
-		t.Fatal(err)
+	videoResult, err := videoAdapter.DeleteVideos([]legacyhttp.CacheDeleteTarget{{Source: "legacy", CacheKey: videoName}})
+	if err != nil || videoResult.Deleted != 1 || videoResult.Skipped != 0 || videoResult.Failed != 0 || len(videoResult.DeletedKeys) != 1 || videoResult.DeletedKeys[0] != videoName {
+		t.Fatalf("video result=%#v err=%v", videoResult, err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "image", imageName)); !os.IsNotExist(err) {
 		t.Fatalf("image was not deleted: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "video", videoName)); !os.IsNotExist(err) {
 		t.Fatalf("video was not deleted: %v", err)
+	}
+}
+
+func TestLegacyCacheAdaptersReportMissingAndFailedItems(t *testing.T) {
+	root := t.TempDir()
+	handler, err := cachehttp.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "cached.jpg"
+	if err := os.WriteFile(filepath.Join(root, "image", name), []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &legacyImageCacheAdapter{handler: handler}
+	result, err := adapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{
+		{Source: "legacy", CacheKey: name},
+		{Source: "legacy", CacheKey: "missing.jpg"},
+		{Source: "legacy", CacheKey: "foo/bar.jpg"},
+	})
+	if err != nil || result.Deleted != 1 || result.Skipped != 1 || result.Failed != 1 || len(result.DeletedKeys) != 1 || result.DeletedKeys[0] != name {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 
@@ -146,11 +169,11 @@ func TestLegacyCacheAdaptersRejectNonLegacyItems(t *testing.T) {
 	}
 
 	imageAdapter := &legacyImageCacheAdapter{handler: handler}
-	if err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.LegacyCachedImage{{Source: "mediaAsset", CacheKey: imageName}}); err == nil {
+	if _, err := imageAdapter.DeleteImages(context.Background(), []legacyhttp.CacheDeleteTarget{{Source: "mediaAsset", CacheKey: imageName}}); err == nil {
 		t.Fatal("non-legacy image item was accepted")
 	}
 	videoAdapter := &legacyVideoCacheAdapter{handler: handler}
-	if err := videoAdapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "mediaJob", CacheKey: videoName}}); err == nil {
+	if _, err := videoAdapter.DeleteVideos([]legacyhttp.CacheDeleteTarget{{Source: "mediaJob", CacheKey: videoName}}); err == nil {
 		t.Fatal("non-legacy video item was accepted")
 	}
 	if _, err := os.Stat(filepath.Join(root, "image", imageName)); err != nil {
@@ -163,7 +186,7 @@ func TestLegacyCacheAdaptersRejectNonLegacyItems(t *testing.T) {
 
 func TestLegacyVideoCacheAdapterRejectsDeletionWithoutHandler(t *testing.T) {
 	adapter := &legacyVideoCacheAdapter{}
-	if err := adapter.DeleteVideos([]legacyhttp.LegacyCachedVideo{{Source: "legacy", CacheKey: "cached.mp4"}}); err == nil {
+	if _, err := adapter.DeleteVideos([]legacyhttp.CacheDeleteTarget{{Source: "legacy", CacheKey: "cached.mp4"}}); err == nil {
 		t.Fatal("video deletion without handler did not return an error")
 	}
 }

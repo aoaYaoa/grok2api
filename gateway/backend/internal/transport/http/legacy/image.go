@@ -40,7 +40,7 @@ type LegacyImageCache interface {
 }
 
 type LegacyImageCacheDeleter interface {
-	DeleteImages(context.Context, []LegacyCachedImage) error
+	DeleteImages(context.Context, []CacheDeleteTarget) (CacheDeleteResult, error)
 }
 
 type imageTask struct {
@@ -125,7 +125,7 @@ func (h *Handler) imagineCacheList(c *gin.Context) {
 	result := make([]gin.H, 0, end-start)
 	for _, item := range items[start:end] {
 		result = append(result, gin.H{
-			"name": item.Name, "view_url": item.ViewURL,
+			"name": item.Name, "view_url": item.ViewURL, "source": item.Source, "cache_key": item.CacheKey,
 			"size_bytes": item.SizeBytes, "mtime_ms": item.ModifiedAtMS,
 		})
 	}
