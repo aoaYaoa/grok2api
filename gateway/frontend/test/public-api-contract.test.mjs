@@ -6,6 +6,7 @@ const stream = await import("../src/public/api/sse-parser.mjs").catch(() => null
 const publicErrors = await import("../src/public/api/public-error.mjs").catch(() => null);
 const imageCacheURL = await import("../src/public/features/image/cache-url.ts").catch(() => null);
 const cacheSelection = await import("../src/public/features/cache/cache-selection.ts").catch(() => null);
+const videoTaskState = await import("../src/public/features/video/video-task-state.ts").catch(() => null);
 
 test("public API contract preserves every active workspace endpoint", () => {
   assert.ok(contracts, "missing public API contract module");
@@ -96,4 +97,14 @@ test("cache delete payload uses the backend cache_key contract", () => {
   assert.deepEqual(cacheSelection.cacheDeletePayload([{ source: "mediaAsset", cacheKey: "img_123" }]), {
     items: [{ source: "mediaAsset", cache_key: "img_123" }],
   });
+});
+
+test("stopping video tasks removes unfinished cards but preserves completed results", () => {
+  assert.ok(videoTaskState, "missing video task state helpers");
+  const items = [
+    { taskID: "done", status: "completed", url: "done.mp4" },
+    { taskID: "running", status: "running", url: "" },
+    { taskID: "other", status: "running", url: "" },
+  ];
+  assert.deepEqual(videoTaskState.removeStoppedVideoTasks(items, ["done", "running"]), [items[0], items[2]]);
 });

@@ -16,6 +16,7 @@ import { cachedImage, deleteCachedImages, editImage, generatedImage, imageFromEd
 import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, deleteCachedVideos, listCachedVideos, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
+import { removeStoppedVideoTasks } from "@/public/features/video/video-task-state";
 import { filesToAssets, isHEICFile, type UploadAsset } from "@/public/lib/media";
 
 const supportedLocalImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif"]);
@@ -267,6 +268,7 @@ export function NsfwPage() {
     videoControllers.current.clear();
     const tasks = videoTasks.current;
     videoTasks.current = [];
+    setVideos((items) => removeStoppedVideoTasks(items, tasks));
     videoStartLock.current = false;
     setVideoStarting(false);
     setVideoRunning(false);

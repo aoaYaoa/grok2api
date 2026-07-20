@@ -16,6 +16,7 @@ import { cachedImage, cachedReferenceSource, deleteCachedImages, listCachedImage
 import { toggleCacheSelection } from "@/public/features/cache/cache-selection";
 import { useVideoFailureNotice } from "@/public/features/video/video-failure-notice";
 import { cachedVideo, deleteCachedVideos, listCachedVideos, renameVideo, startVideo, stopVideos, streamVideo, videoPostID, type VideoItem } from "@/public/features/video/video-api";
+import { removeStoppedVideoTasks } from "@/public/features/video/video-task-state";
 import { filesToAssets, isImageUploadFile, type UploadAsset } from "@/public/lib/media";
 
 function isAbortError(error: unknown) {
@@ -143,6 +144,7 @@ export function VideoPage() {
     controllers.current.clear();
     const tasks = taskIDs.current;
     taskIDs.current = [];
+    setVideos((items) => removeStoppedVideoTasks(items, tasks));
     startLock.current = false;
     setStarting(false);
     setRunning(false);
