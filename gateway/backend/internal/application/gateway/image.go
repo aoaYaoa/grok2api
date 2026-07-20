@@ -169,6 +169,14 @@ func (s *Service) executeImage(
 	for attempt := 0; attempt < attempts; attempt++ {
 		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
 		if err != nil {
+			if lastCredentialError != nil && provider.IsMediaJobRetrySafe(lastCredentialError) {
+				failureStatus := http.StatusBadGateway
+				if status, ok := provider.ErrorHTTPStatus(lastCredentialError); ok && status >= 400 && status <= 599 {
+					failureStatus = status
+				}
+				writeFailureAudit(failureStatus, "upstream_unavailable", lastCredentialFailure)
+				return nil, lastCredentialError
+			}
 			writeFailureAudit(http.StatusServiceUnavailable, "upstream_unavailable", lastCredentialFailure)
 			return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 		}
@@ -199,7 +207,30 @@ func (s *Service) executeImage(
 			}
 			accountNeutral := provider.IsAccountHealthNeutral(err) || (failureStatus == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider))
 			if !provider.IsMediaPostProcessingError(err) && !accountNeutral {
-				s.selector.MarkFailure(ctx, credential, 0, 0)
+				s.selector.MarkFailure(ctx, credential, failureStatus, 0)
+			}
+			retryAcrossAccounts := operation == audit.OperationImageEdit && provider.IsMediaJobRetrySafe(err)
+			if retryAcrossAccounts {
+				switch {
+				case failureStatus == http.StatusForbidden:
+					retryAcrossAccounts = s.providers.RetryForbiddenAsEgress(credential.Provider)
+				case failureStatus == http.StatusRequestTimeout,
+					failureStatus == http.StatusTooEarly,
+					failureStatus == http.StatusTooManyRequests,
+					failureStatus >= http.StatusInternalServerError:
+				default:
+					retryAcrossAccounts = false
+				}
+			}
+			if retryAcrossAccounts && attempt+1 < attempts {
+				failedCredential := credential
+				lastCredentialFailure = &failedCredential
+				lastCredentialError = err
+				lease.Release()
+				if s.logger != nil {
+					s.logger.Warn("image_account_switched", "event_id", eventID, "request_id", requestID, "account_id", credential.ID, "account_retry", attempt+1, "error", err)
+				}
+				continue
 			}
 			lease.Release()
 			errorCode := "upstream_unavailable"

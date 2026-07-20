@@ -800,6 +800,75 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	}
 }
 
+func TestImageEditRetriesRetrySafeUploadErrorAcrossAccounts(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "image-edit-failover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	now := time.Now().UTC()
+	for _, name := range []string{"image-edit-primary", "image-edit-backup"} {
+		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierSuper,
+			Name: name, SourceKey: name, EncryptedAccessToken: "encrypted-" + name, Enabled: true,
+			AuthStatus: account.AuthStatusActive, MaxConcurrent: 2,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if createErr = modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-imagine-image-edit"}, now); createErr != nil {
+			t.Fatal(createErr)
+		}
+	}
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{{
+		PublicID: "grok-imagine-image-edit", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image-edit",
+		Capability: modeldomain.CapabilityImageEdit, Enabled: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "image-edit-key", Prefix: "image-edit", SecretHash: strings.Repeat("c", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &imageEditFailoverAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+
+	result, err := service.EditImage(ctx, ImageEditInput{
+		RequestID: "req-image-edit-failover", ClientKey: key, PublicModel: "grok-imagine-image-edit",
+		Prompt: "edit", ImageURLs: []string{"data:image/png;base64,a"}, Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(result.Body)
+	result.Finalize(Usage{}, "", "")
+	_ = result.Body.Close()
+	attempts := adapter.Attempts()
+	if len(attempts) != 2 || attempts[0] == attempts[1] {
+		t.Fatalf("image edit attempts = %#v", attempts)
+	}
+	logs, total, err := auditRepo.List(ctx, 0, 10)
+	if err != nil || total != 1 || logs[0].RequestID != "req-image-edit-failover" || logs[0].StatusCode != http.StatusOK || logs[0].AccountID == nil || *logs[0].AccountID != attempts[1] {
+		t.Fatalf("image edit audit = %#v, total=%d, err=%v", logs, total, err)
+	}
+}
+
 func TestSuccessfulWebChatRefreshesCurrentModeQuota(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "chat-quota-refresh.db"))
@@ -1006,10 +1075,45 @@ type webImageStreamAdapter struct {
 
 type retrySafeImageStatusError struct{ status int }
 
-func (e retrySafeImageStatusError) Error() string            { return "image upstream status" }
-func (e retrySafeImageStatusError) HTTPStatusCode() int      { return e.status }
-func (retrySafeImageStatusError) MediaJobRetrySafe() bool    { return true }
-func (retrySafeImageStatusError) AccountHealthNeutral() bool { return true }
+func (e retrySafeImageStatusError) Error() string         { return "image upstream status" }
+func (e retrySafeImageStatusError) HTTPStatusCode() int   { return e.status }
+func (retrySafeImageStatusError) MediaJobRetrySafe() bool { return true }
+func (e retrySafeImageStatusError) AccountHealthNeutral() bool {
+	return e.status == http.StatusForbidden
+}
+
+type imageEditFailoverAdapter struct {
+	mu       sync.Mutex
+	attempts []uint64
+}
+
+func (*imageEditFailoverAdapter) Provider() account.Provider { return account.ProviderWeb }
+
+func (*imageEditFailoverAdapter) Definition() provider.Definition {
+	definition := testConversationDefinition(account.ProviderWeb)
+	definition.Media.ImageEdit = true
+	return definition
+}
+
+func (a *imageEditFailoverAdapter) EditImage(_ context.Context, request provider.ImageEditRequest) (*provider.Response, error) {
+	a.mu.Lock()
+	a.attempts = append(a.attempts, request.Credential.ID)
+	attempt := len(a.attempts)
+	a.mu.Unlock()
+	if attempt == 1 {
+		return nil, retrySafeImageStatusError{status: http.StatusInternalServerError}
+	}
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"created":1,"data":[{"url":"https://example.com/edit.png"}]}`)), QuotaUnits: request.Count,
+	}, nil
+}
+
+func (a *imageEditFailoverAdapter) Attempts() []uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]uint64(nil), a.attempts...)
+}
 
 type webChatQuotaAdapter struct {
 	synced chan string
