@@ -5,6 +5,7 @@ export const gatewayRoutePaths: Readonly<{
   dashboard: "/dashboard";
   accounts: "/accounts";
   models: "/models";
+  creativeConsole: "/creative-console";
   clientKeys: "/client-keys";
   gallery: "/gallery";
   videoGallery: "/video-gallery";

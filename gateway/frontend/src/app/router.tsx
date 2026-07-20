@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter, type RouteObject } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredCachePage, DeferredClientKeysPage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredCachePage, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
 import { gatewayBasename, gatewayRoutePaths } from "@/app/gateway-paths.mjs";
 import { LoginPage } from "@/features/auth/login-page";
 
@@ -20,6 +20,7 @@ export const gatewayRouterRoutes: RouteObject[] = [
           { path: gatewayRoutePaths.dashboard, element: <DeferredDashboardPage /> },
           { path: gatewayRoutePaths.accounts, element: <DeferredAccountsPage /> },
           { path: gatewayRoutePaths.models, element: <DeferredModelsPage /> },
+          { path: gatewayRoutePaths.creativeConsole, element: <DeferredCreativeConsolePage /> },
           { path: gatewayRoutePaths.clientKeys, element: <DeferredClientKeysPage /> },
           { path: gatewayRoutePaths.gallery, element: <DeferredGalleryPage /> },
           { path: gatewayRoutePaths.videoGallery, element: <DeferredVideoGalleryPage /> },

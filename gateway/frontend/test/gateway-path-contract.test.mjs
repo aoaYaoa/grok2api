@@ -67,10 +67,41 @@ test("the actual router configuration resolves nested gateway docs URLs", async 
 	);
 	assert.ok(cacheMatches, "the React cache URL must match the actual router configuration");
 	assert.equal(cacheMatches.at(-1)?.route.path, gatewayPaths.gatewayRoutePaths.cache);
+
+	const creativeConsoleMatches = matchRoutes(
+	  routerModule.gatewayRouterRoutes,
+	  "/gateway/creative-console",
+	  routerModule.gatewayRouterOptions.basename,
+	);
+	assert.ok(creativeConsoleMatches, "the Creative Console URL must match the actual router configuration");
+	assert.equal(creativeConsoleMatches.at(-1)?.route.path, gatewayPaths.gatewayRoutePaths.creativeConsole);
   } finally {
     await server.close();
     await rm(cacheDir, { recursive: true, force: true });
   }
+});
+
+test("v3.0.5 Creative Console is wired into the customized admin shell", async () => {
+  const packageJSON = JSON.parse(await readFile(path.join(frontendRoot, "package.json"), "utf8"));
+  const paths = await readFile(path.join(frontendRoot, "src/app/gateway-paths.mjs"), "utf8");
+  const router = await readFile(path.join(frontendRoot, "src/app/router.tsx"), "utf8");
+  const deferred = await readFile(path.join(frontendRoot, "src/app/deferred-pages.tsx"), "utf8");
+  const shell = await readFile(path.join(frontendRoot, "src/app/app-shell.tsx"), "utf8");
+  const api = await readFile(path.join(frontendRoot, "src/features/creative-console/creative-console-api.ts"), "utf8").catch(() => "");
+  const page = await readFile(path.join(frontendRoot, "src/features/creative-console/creative-console-page.tsx"), "utf8").catch(() => "");
+
+  assert.equal(packageJSON.dependencies.marked, "^18.0.6");
+  assert.equal(packageJSON.dependencies["@shadcn/react"], "^0.2.1");
+  assert.match(paths, /creativeConsole:\s*"\/creative-console"/);
+  assert.match(router, /gatewayRoutePaths\.creativeConsole/);
+  assert.match(deferred, /DeferredCreativeConsolePage/);
+  assert.match(shell, /nav\.creativeConsole/);
+  assert.match(api, /fetch\("\/v1\/responses"/);
+  assert.match(api, /response\.output_text\.delta/);
+  assert.match(page, /import \{ marked \} from "marked"/);
+  assert.match(page, /reasoningEffort/);
+  assert.match(page, /webSearch/);
+  assert.match(page, /xSearch/);
 });
 
 test("admin action menu links back to the public workspace", async () => {
