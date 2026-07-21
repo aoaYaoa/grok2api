@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { AccountDTO, BillingDTO, QuotaDTO } from "@/features/accounts/accounts-api";
-import { normalizeWeeklyQuotaProducts } from "@/features/accounts/weekly-quota-products.mjs";
+import { getWebQuotaAvailability, normalizeWeeklyQuotaProducts } from "@/features/accounts/weekly-quota-products.mjs";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 
@@ -168,17 +168,22 @@ function WeeklyWebQuota({ window, locale, t }: { window: WebQuotaWindow; locale:
   const remainingPercent = Math.max(0, 100 - usedPercent);
   const products = normalizeWeeklyQuotaProducts(window.breakdown);
   const visibleProducts = products.slice(0, 3);
+  const exhausted = getWebQuotaAvailability([window]).exhausted;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button type="button" className="block w-full min-w-0 text-left">
           {visibleProducts.length > 0 ? (
             <div className={cn("grid w-full min-w-0 divide-x divide-border/70", visibleProducts.length === 1 ? "grid-cols-1" : visibleProducts.length === 2 ? "grid-cols-2" : "grid-cols-3")}>
-              {visibleProducts.map((item) => <div key={item.productCode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate text-muted-foreground">{quotaProductLabel(item.productCode, t)}</span><span className="shrink-0 tabular-nums">{formatNumber(item.remainingPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full", quotaProductColor(item.productCode))} style={{ width: `${item.remainingPercent}%` }} /></div></div>)}
+              {visibleProducts.map((item) => {
+                const itemExhausted = item.remainingPercent <= 0;
+                return <div key={item.productCode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className={cn("truncate", itemExhausted ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground")}>{quotaProductLabel(item.productCode, t)}</span><span className={cn("shrink-0 tabular-nums", itemExhausted && "font-medium text-amber-700 dark:text-amber-300")}>{t("accounts.quotaRemainingShort", { percent: formatNumber(item.remainingPercent, locale, 1) })}</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full", quotaProductColor(item.productCode))} style={{ width: `${item.remainingPercent}%` }} /></div></div>;
+              })}
             </div>
           ) : (
-            <><div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span><span className="shrink-0 tabular-nums">{formatNumber(remainingPercent, locale, 1)}%</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${remainingPercent}%` }} /></div></>
+            <><div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-muted-foreground">{t("accounts.weeklyQuota")}</span><span className="shrink-0 tabular-nums">{t("accounts.quotaRemainingShort", { percent: formatNumber(remainingPercent, locale, 1) })}</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${remainingPercent}%` }} /></div></>
           )}
+          {exhausted ? <div className="mt-1.5 truncate text-[10px] font-medium text-amber-700 dark:text-amber-300">{window.resetAt ? t("accounts.webQuotaWaitingResetUntil", { time: formatDateTime(window.resetAt, locale) }) : t("accounts.webQuotaWaitingReset")}</div> : null}
         </button>
       </TooltipTrigger>
       <TooltipContent>

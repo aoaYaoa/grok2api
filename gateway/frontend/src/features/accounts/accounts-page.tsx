@@ -80,6 +80,7 @@ import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/accoun
 import { AccountNameCell } from "@/features/accounts/account-name-cell";
 import { WebAccountScriptsDialog } from "@/features/accounts/web-account-scripts";
 import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "@/features/accounts/web-account-settings";
+import { getWebQuotaAvailability } from "@/features/accounts/weekly-quota-products.mjs";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -1219,7 +1220,7 @@ function AccountTypeText({ label, title, variant }: { label: string; title?: str
 }
 
 function AccountStatus({ account }: { account: AccountDTO }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   if (!account.enabled) {
     return <Badge variant="outline" className="text-muted-foreground">{t("accounts.statusDisabled")}</Badge>;
   }
@@ -1228,6 +1229,11 @@ function AccountStatus({ account }: { account: AccountDTO }) {
   }
   if (account.provider === "grok_console" && account.quotaWindows?.some((window) => window.mode === "console" && window.remaining <= 0)) {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;
+  }
+  const webQuota = account.provider === "grok_web" ? getWebQuotaAvailability(account.quotaWindows ?? []) : null;
+  if (webQuota?.exhausted) {
+    const description = webQuota.resetAt ? t("accounts.webQuotaWaitingResetUntil", { time: formatDateTime(webQuota.resetAt, i18n.language) }) : t("accounts.webQuotaWaitingReset");
+    return <Badge title={description} variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusQuotaRecovering")}</Badge>;
   }
   if (account.quota.status === "waitingReset") {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;
