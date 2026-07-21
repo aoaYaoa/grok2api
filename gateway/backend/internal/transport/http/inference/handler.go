@@ -8,9 +8,11 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
@@ -23,27 +25,56 @@ import (
 )
 
 type Handler struct {
-	gateway      *gateway.Service
-	models       *modelapp.Service
-	maxBodyBytes int64
+	gateway          *gateway.Service
+	models           *modelapp.Service
+	maxBodyBytes     int64
+	publicAPIBaseURL string
+	publicBaseURL    func() string
 }
 
 const (
-	responseCopyBufferBytes        = 32 << 10
-	maxJSONMetadataInspectionBytes = 8 << 20
-	maxStreamEventInspectionBytes  = 8 << 20
-	maxJSONResponseTransferBytes   = 128 << 20
-	maxStreamResponseTransferBytes = 256 << 20
-	maxMediaResponseTransferBytes  = int64(2) << 30
-	responseWriteTimeout           = 30 * time.Second
+	responseCopyBufferBytes         = 32 << 10
+	maxJSONMetadataInspectionBytes  = 8 << 20
+	maxStreamEventInspectionBytes   = 8 << 20
+	maxStreamFailureDiagnosticBytes = 64 << 10
+	maxCredentialErrorInspectBytes  = 64 << 10
+	maxJSONResponseTransferBytes    = 128 << 20
+	maxStreamResponseTransferBytes  = 256 << 20
+	maxMediaResponseTransferBytes   = int64(2) << 30
+	responseWriteTimeout            = 30 * time.Second
 )
 
-var errResponseTransferLimit = errors.New("响应超过代理安全上限")
+var (
+	errResponseTransferLimit    = errors.New("响应超过代理安全上限")
+	errUpstreamStreamIncomplete = errors.New("上游流在终止事件前结束")
+	errUpstreamStreamFailed     = errors.New("上游流返回失败终止事件")
+	errUpstreamStreamRead       = errors.New("读取上游流失败")
+)
+
+type streamProtocol uint8
+
+const (
+	streamProtocolResponses streamProtocol = iota
+	streamProtocolChat
+	streamProtocolAnthropic
+	streamProtocolImage
+)
 
 const mediaTransferErrorTrailer = "X-Grok2API-Transfer-Error"
 
-func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBodyBytes int64) *Handler {
-	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes}
+func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBodyBytes int64, publicAPIBaseURL ...string) *Handler {
+	baseURL := ""
+	if len(publicAPIBaseURL) > 0 {
+		baseURL = strings.TrimRight(strings.TrimSpace(publicAPIBaseURL[0]), "/")
+	}
+	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes, publicAPIBaseURL: baseURL}
+}
+
+// SetPublicAPIBaseURLResolver 让视频内容 URL 跟随运行设置热更新。
+// 应在 Register 前设置；请求处理期间只读取该函数。
+func (h *Handler) SetPublicAPIBaseURLResolver(resolve func() string) *Handler {
+	h.publicBaseURL = resolve
+	return h
 }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
@@ -56,6 +87,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/videos", h.generateLegacyVideo)
 	router.POST("/videos/generations", h.generateVideo)
 	router.GET("/videos/:requestId", h.getVideo)
+	router.GET("/videos/:requestId/content", h.getVideoContent)
 	router.POST("/responses/compact", h.compactResponse)
 	router.GET("/responses/:responseId", h.getResponse)
 	router.DELETE("/responses/:responseId", h.deleteResponse)
@@ -93,6 +125,7 @@ type imageGenerationRequest struct {
 	Model          string          `json:"model"`
 	Prompt         string          `json:"prompt"`
 	Count          *int            `json:"n"`
+	PartialImages  *int            `json:"partial_images"`
 	Size           string          `json:"size"`
 	AspectRatio    string          `json:"aspect_ratio"`
 	Resolution     string          `json:"resolution"`
@@ -134,9 +167,13 @@ type imageEditJSONRequest struct {
 	Image          *imageEditJSONImage  `json:"image"`
 	Images         []imageEditJSONImage `json:"images"`
 	Count          *int                 `json:"n"`
+	Size           string               `json:"size"`
+	AspectRatio    string               `json:"aspect_ratio"`
 	Resolution     string               `json:"resolution"`
 	ResponseFormat string               `json:"response_format"`
 	StorageOptions json.RawMessage      `json:"storage_options"`
+	Stream         bool                 `json:"stream"`
+	PartialImages  *int                 `json:"partial_images"`
 }
 
 type videoGenerationImage struct {
@@ -224,12 +261,13 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
+		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream)
+	h.writeResult(c, result, request.Stream, streamProtocolChat)
 }
 
 func (h *Handler) createMessage(c *gin.Context) {
@@ -264,12 +302,13 @@ func (h *Handler) createMessage(c *gin.Context) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
+		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream)
+	h.writeAnthropicResult(c, result, request.Stream)
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
@@ -295,6 +334,22 @@ func (h *Handler) generateImage(c *gin.Context) {
 		}
 		count = *request.Count
 	}
+	if request.Stream && count != 1 {
+		writeImageGenerationUserError(c, "unsupported_parameter", "input", "Streaming is only supported with n=1.")
+		return
+	}
+	partialImages := 0
+	if request.PartialImages != nil {
+		if *request.PartialImages < 0 || *request.PartialImages > 3 {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 必须在 0 到 3 之间")
+			return
+		}
+		partialImages = *request.PartialImages
+		if partialImages > 0 && !request.Stream {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 仅可在 stream=true 时使用")
+			return
+		}
+	}
 	clientKey, requestID, ok := requestIdentity(c)
 	if !ok {
 		return
@@ -302,13 +357,14 @@ func (h *Handler) generateImage(c *gin.Context) {
 	result, err := h.gateway.GenerateImage(c.Request.Context(), gateway.ImageGenerationInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: normalizeLegacyImageModel(request.Model), Prompt: request.Prompt,
 		Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
-		Resolution: request.Resolution, ResponseFormat: request.ResponseFormat, Streaming: request.Stream,
+		Resolution: request.Resolution, ResponseFormat: request.ResponseFormat,
+		Streaming: request.Stream, PartialImages: partialImages,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream)
+	h.writeResult(c, result, request.Stream, streamProtocolImage)
 }
 
 func normalizeLegacyImageModel(value string) string {
@@ -445,6 +501,12 @@ func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 	errorCode := ""
 	defer result.Body.Close()
 	defer func() { result.Finalize(gateway.Usage{}, "", errorCode) }()
+	if isUpstreamCredentialStatus(result.StatusCode) {
+		errorCode = "upstream_unavailable"
+		clientCode := readCredentialErrorCode(result.StatusCode, result.Body)
+		writeOpenAIError(c, http.StatusServiceUnavailable, clientCode, credentialErrorMessage(clientCode))
+		return
+	}
 	contentLength, contentLengthErr := strconv.ParseInt(result.Header.Get("Content-Length"), 10, 64)
 	if contentLengthErr == nil && contentLength > maxMediaResponseTransferBytes {
 		errorCode = "response_too_large"
@@ -569,16 +631,38 @@ func (h *Handler) editImage(c *gin.Context) {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片编辑缺少有效 model 或 prompt")
 		return
 	}
-	if count < 1 || count > 10 {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "n 必须在 1 到 10 之间")
+	if count != 1 {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web 图片编辑当前仅支持 n=1")
+		return
+	}
+	partialImages := 0
+	if request.PartialImages != nil {
+		if *request.PartialImages < 0 || *request.PartialImages > 3 {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 必须在 0 到 3 之间")
+			return
+		}
+		partialImages = *request.PartialImages
+		if partialImages > 0 && !request.Stream {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 仅可在 stream=true 时使用")
+			return
+		}
+	}
+	aspectRatio := strings.ToLower(strings.TrimSpace(request.AspectRatio))
+	size := strings.ToLower(strings.TrimSpace(request.Size))
+	if aspectRatio != "" && !validImageAspectRatio(aspectRatio) {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "aspect_ratio 不受支持")
+		return
+	}
+	if size != "" && !validImageEditSize(size) {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "size 必须是 auto、1024x1024、1024x1536 或 1536x1024")
 		return
 	}
 	resolution := strings.ToLower(strings.TrimSpace(request.Resolution))
 	if resolution == "" {
 		resolution = "1k"
 	}
-	if resolution != "1k" && resolution != "2k" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "resolution 必须是 1k 或 2k")
+	if resolution != "1k" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web 图片编辑当前仅支持 resolution=1k")
 		return
 	}
 	clientKey, requestID, ok := requestIdentity(c)
@@ -587,13 +671,15 @@ func (h *Handler) editImage(c *gin.Context) {
 	}
 	result, err := h.gateway.EditImage(c.Request.Context(), gateway.ImageEditInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: model, Prompt: prompt,
-		ImageURLs: imageURLs, Count: count, Resolution: resolution, ResponseFormat: request.ResponseFormat,
+		ImageURLs: imageURLs, Count: count, Size: size, AspectRatio: aspectRatio,
+		Resolution: resolution, ResponseFormat: request.ResponseFormat,
+		Streaming: request.Stream, PartialImages: partialImages,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, false)
+	h.writeResult(c, result, request.Stream, streamProtocolImage)
 }
 
 func requestIdentity(c *gin.Context) (clientkeydomain.Key, string, bool) {
@@ -705,7 +791,57 @@ func (h *Handler) getVideo(c *gin.Context) {
 		writeGatewayError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, videoGenerationResponse(job))
+	c.JSON(http.StatusOK, videoGenerationResponse(job, h.videoContentURL(job.ID)))
+}
+
+func (h *Handler) videoContentURL(jobID string) string {
+	path := "/v1/videos/" + url.PathEscape(jobID) + "/content"
+	baseURL := h.publicAPIBaseURL
+	if h.publicBaseURL != nil {
+		baseURL = strings.TrimRight(strings.TrimSpace(h.publicBaseURL()), "/")
+	}
+	if baseURL == "" {
+		return path
+	}
+	return baseURL + path
+}
+
+func (h *Handler) getVideoContent(c *gin.Context) {
+	clientKey, _, ok := requestIdentity(c)
+	if !ok {
+		return
+	}
+	body, contentType, size, err := h.gateway.OpenVideoContent(c.Request.Context(), strings.TrimSpace(c.Param("requestId")), clientKey)
+	if err != nil {
+		writeGatewayError(c, err)
+		return
+	}
+	defer func() { _ = body.Close() }()
+	writeVideoContent(c, body, contentType, size)
+}
+
+func writeVideoContent(c *gin.Context, body io.Reader, contentType string, size int64) {
+	if size > maxMediaResponseTransferBytes {
+		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "上游媒体超过 2 GiB 安全上限")
+		return
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", "inline")
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	if size >= 0 {
+		c.Header("Content-Length", strconv.FormatInt(size, 10))
+	} else {
+		c.Header("Trailer", mediaTransferErrorTrailer)
+	}
+	c.Status(http.StatusOK)
+	if err := copyMedia(responseDeadlineWriter{ResponseWriter: c.Writer}, body, maxMediaResponseTransferBytes); err != nil && size < 0 {
+		errorCode := "stream_interrupted"
+		if errors.Is(err, errResponseTransferLimit) {
+			errorCode = "response_too_large"
+		}
+		c.Header(mediaTransferErrorTrailer, errorCode)
+	}
 }
 
 func parseVideoDuration(durationRaw json.RawMessage) (int, error) {
@@ -756,12 +892,34 @@ func validVideoAspectRatio(value string) bool {
 	}
 }
 
-func videoGenerationResponse(job mediadomain.Job) gin.H {
+func validImageAspectRatio(value string) bool {
+	switch value {
+	case "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20":
+		return true
+	default:
+		return false
+	}
+}
+
+func validImageEditSize(value string) bool {
+	switch value {
+	case "auto", "1024x1024", "1024x1536", "1536x1024":
+		return true
+	default:
+		return false
+	}
+}
+
+func videoGenerationResponse(job mediadomain.Job, contentURLs ...string) gin.H {
 	switch job.Status {
 	case mediadomain.StatusCompleted:
+		videoURL := job.UpstreamURL
+		if len(contentURLs) > 0 && contentURLs[0] != "" {
+			videoURL = contentURLs[0]
+		}
 		return gin.H{
 			"status": "done", "model": job.Model, "progress": 100,
-			"video": gin.H{"url": job.UpstreamURL, "duration": job.Seconds, "respect_moderation": true},
+			"video": gin.H{"url": videoURL, "duration": job.Seconds, "respect_moderation": true},
 		}
 	case mediadomain.StatusFailed:
 		return gin.H{
@@ -820,6 +978,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
+		GrokTurnIndex: c.GetHeader("x-grok-turn-idx"),
 	}
 	var result *gateway.Result
 	if compact {
@@ -831,7 +990,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream && !compact)
+	h.writeResult(c, result, request.Stream && !compact, streamProtocolResponses)
 }
 
 func isJSONRequest(c *gin.Context) bool {
@@ -887,15 +1046,33 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, false)
+	h.writeResult(c, result, false, streamProtocolResponses)
 }
 
-func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool) {
+func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool, protocol streamProtocol) {
+	h.writeProtocolResult(c, result, stream, false, protocol)
+}
+
+func (h *Handler) writeAnthropicResult(c *gin.Context, result *gateway.Result, stream bool) {
+	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic)
+}
+
+func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol) {
 	usage := gateway.Usage{}
 	responseID := ""
 	errorCode := ""
 	defer result.Body.Close()
 	defer func() { result.Finalize(usage, responseID, errorCode) }()
+	if isUpstreamCredentialStatus(result.StatusCode) {
+		errorCode = "upstream_unavailable"
+		clientCode := readCredentialErrorCode(result.StatusCode, result.Body)
+		if anthropic {
+			writeAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", credentialErrorMessage(clientCode), clientCode)
+		} else {
+			writeOpenAIError(c, http.StatusServiceUnavailable, clientCode, credentialErrorMessage(clientCode))
+		}
+		return
+	}
 	transferLimit := int64(maxJSONResponseTransferBytes)
 	if stream {
 		transferLimit = maxStreamResponseTransferBytes
@@ -912,29 +1089,40 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 	}
 	var err error
 	if stream {
-		metadata, copyErr := copyStream(c.Writer, result.Body)
+		metadata, copyErr := copyStream(c.Writer, result.Body, protocol)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
+		if metadata.StreamFailure != nil && result.RecordStreamFailure != nil {
+			result.RecordStreamFailure(*metadata.StreamFailure)
+		}
 	} else {
 		metadata, copyErr := copyJSON(c.Writer, result.Body)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
 	}
 	if err != nil {
-		if errors.Is(err, errResponseTransferLimit) {
+		switch {
+		case errors.Is(err, errResponseTransferLimit):
 			errorCode = "response_too_large"
-		} else {
+		case errors.Is(err, errUpstreamStreamFailed):
+			errorCode = "upstream_stream_error"
+		case errors.Is(err, errUpstreamStreamIncomplete):
+			errorCode = "upstream_stream_incomplete"
+		case errors.Is(err, errUpstreamStreamRead):
+			errorCode = "upstream_stream_interrupted"
+		default:
 			errorCode = "stream_interrupted"
 		}
 	}
 }
 
 type responseMetadata struct {
-	Usage      gateway.Usage
-	ResponseID string
-	Model      string
+	Usage         gateway.Usage
+	ResponseID    string
+	Model         string
+	StreamFailure *gateway.StreamFailureDiagnostic
 }
 
-func copyStream(writer gin.ResponseWriter, source io.Reader) (responseMetadata, error) {
-	inspector := &responseInspector{}
+func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (responseMetadata, error) {
+	inspector := &responseInspector{protocol: protocol}
 	buffer := make([]byte, responseCopyBufferBytes)
 	transferred := 0
 	for {
@@ -957,9 +1145,12 @@ func copyStream(writer gin.ResponseWriter, source io.Reader) (responseMetadata, 
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				inspector.Finish()
+				return inspector.Metadata(), inspector.TerminalError()
+			}
+			if inspector.terminalSuccess {
 				return inspector.Metadata(), nil
 			}
-			return inspector.Metadata(), readErr
+			return inspector.Metadata(), fmt.Errorf("%w: %v", errUpstreamStreamRead, readErr)
 		}
 	}
 }
@@ -1005,8 +1196,11 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader) (responseMetadata, er
 }
 
 type responseInspector struct {
-	pending  []byte
-	metadata responseMetadata
+	protocol        streamProtocol
+	pending         []byte
+	metadata        responseMetadata
+	terminalSuccess bool
+	terminalFailure bool
 }
 
 func (i *responseInspector) Inspect(chunk []byte) {
@@ -1023,13 +1217,14 @@ func (i *responseInspector) Inspect(chunk []byte) {
 		i.pending = i.pending[index+1:]
 		if bytes.HasPrefix(line, []byte("data:")) {
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			i.observeTerminal(value)
 			if !bytes.Equal(value, []byte("[DONE]")) {
 				metadata := extractMetadata(value)
-				if metadata.Usage.TotalTokens > 0 {
+				if hasUsageSignal(metadata.Usage) {
 					if metadata.Usage.ResponseModel == "" {
 						metadata.Usage.ResponseModel = i.metadata.Model
 					}
-					i.metadata.Usage = metadata.Usage
+					i.metadata.Usage = mergeGatewayUsage(i.metadata.Usage, metadata.Usage)
 				}
 				if metadata.ResponseID != "" {
 					i.metadata.ResponseID = metadata.ResponseID
@@ -1044,6 +1239,162 @@ func (i *responseInspector) Inspect(chunk []byte) {
 }
 
 func (i *responseInspector) Metadata() responseMetadata { return i.metadata }
+
+func (i *responseInspector) TerminalError() error {
+	if i.terminalFailure {
+		return errUpstreamStreamFailed
+	}
+	if !i.terminalSuccess {
+		return errUpstreamStreamIncomplete
+	}
+	return nil
+}
+
+func (i *responseInspector) observeTerminal(data []byte) {
+	if bytes.Equal(data, []byte("[DONE]")) {
+		if i.protocol == streamProtocolChat {
+			i.terminalSuccess = true
+		}
+		return
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &payload) != nil {
+		return
+	}
+	switch i.protocol {
+	case streamProtocolResponses:
+		switch payload.Type {
+		case "response.completed":
+			i.terminalSuccess = true
+		case "response.failed", "response.incomplete", "response.error", "error":
+			i.markTerminalFailure(data)
+		}
+	case streamProtocolChat:
+		if payload.Type == "error" {
+			i.markTerminalFailure(data)
+		}
+	case streamProtocolAnthropic:
+		switch payload.Type {
+		case "message_stop":
+			i.terminalSuccess = true
+		case "error":
+			i.markTerminalFailure(data)
+		}
+	case streamProtocolImage:
+		switch payload.Type {
+		case "image_generation.completed":
+			i.terminalSuccess = true
+		case "image_generation.failed", "error":
+			i.markTerminalFailure(data)
+		}
+	}
+}
+
+func (i *responseInspector) markTerminalFailure(data []byte) {
+	i.terminalFailure = true
+	if i.metadata.StreamFailure != nil {
+		return
+	}
+	diagnostic := projectStreamFailureDiagnostic(data)
+	if len(diagnostic.Body) > 0 {
+		i.metadata.StreamFailure = &diagnostic
+	}
+}
+
+func projectStreamFailureDiagnostic(data []byte) gateway.StreamFailureDiagnostic {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return gateway.StreamFailureDiagnostic{}
+	}
+	projected := make(map[string]json.RawMessage)
+	copySafeDiagnosticFields(projected, root, "type", "status", "code", "message", "param")
+	if raw := projectSafeErrorValue(root["error"]); len(raw) > 0 {
+		projected["error"] = raw
+	}
+	if responseRaw := root["response"]; len(responseRaw) > 0 {
+		var response map[string]json.RawMessage
+		if json.Unmarshal(responseRaw, &response) == nil {
+			safeResponse := make(map[string]json.RawMessage)
+			copySafeDiagnosticFields(safeResponse, response, "id", "status", "code", "message")
+			if raw := projectSafeErrorValue(response["error"]); len(raw) > 0 {
+				safeResponse["error"] = raw
+			}
+			if raw := projectSafeErrorValue(response["incomplete_details"]); len(raw) > 0 {
+				safeResponse["incomplete_details"] = raw
+			}
+			if len(safeResponse) > 0 {
+				if encoded, err := json.Marshal(safeResponse); err == nil {
+					projected["response"] = encoded
+				}
+			}
+		}
+	}
+	if len(projected) == 0 {
+		return gateway.StreamFailureDiagnostic{}
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return gateway.StreamFailureDiagnostic{}
+	}
+	diagnostic := gateway.StreamFailureDiagnostic{Body: encoded}
+	if len(diagnostic.Body) > maxStreamFailureDiagnosticBytes {
+		bounded := diagnostic.Body[:maxStreamFailureDiagnosticBytes]
+		for len(bounded) > 0 && !utf8.Valid(bounded) {
+			bounded = bounded[:len(bounded)-1]
+		}
+		diagnostic.Body = append([]byte(nil), bounded...)
+		diagnostic.BodyTruncated = true
+	} else {
+		diagnostic.Body = append([]byte(nil), diagnostic.Body...)
+	}
+	return diagnostic
+}
+
+func copySafeDiagnosticFields(destination, source map[string]json.RawMessage, fields ...string) {
+	for _, field := range fields {
+		if raw := projectSafeScalar(source[field]); len(raw) > 0 {
+			destination[field] = raw
+		}
+	}
+}
+
+func projectSafeErrorValue(raw json.RawMessage) json.RawMessage {
+	if scalar := projectSafeScalar(raw); len(scalar) > 0 {
+		return scalar
+	}
+	var value map[string]json.RawMessage
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	projected := make(map[string]json.RawMessage)
+	copySafeDiagnosticFields(projected, value, "type", "status", "code", "message", "param", "reason")
+	if len(projected) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func projectSafeScalar(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	switch value.(type) {
+	case nil, string, bool, float64:
+		return append(json.RawMessage(nil), raw...)
+	default:
+		return nil
+	}
+}
 
 func (i *responseInspector) Finish() {
 	if len(i.pending) == 0 {
@@ -1086,20 +1437,28 @@ type responsePayloadDTO struct {
 }
 
 type responseUsageDTO struct {
-	InputTokens            int64                     `json:"input_tokens"`
-	InputTokensCamel       int64                     `json:"inputTokens"`
-	OutputTokens           int64                     `json:"output_tokens"`
-	OutputTokensCamel      int64                     `json:"outputTokens"`
-	TotalTokens            int64                     `json:"total_tokens"`
-	TotalTokensCamel       int64                     `json:"totalTokens"`
-	CostInUSDTicks         int64                     `json:"cost_in_usd_ticks"`
-	NumSourcesUsed         int64                     `json:"num_sources_used"`
-	NumServerSideToolsUsed int64                     `json:"num_server_side_tools_used"`
-	InputTokensDetails     responseInputDetailsDTO   `json:"input_tokens_details"`
-	OutputTokensDetails    responseOutputDetailsDTO  `json:"output_tokens_details"`
-	ContextDetails         responseContextDetailsDTO `json:"context_details"`
-	PromptTokens           int64                     `json:"prompt_tokens"`
-	CompletionTokens       int64                     `json:"completion_tokens"`
+	InputTokens            int64 `json:"input_tokens"`
+	InputTokensCamel       int64 `json:"inputTokens"`
+	OutputTokens           int64 `json:"output_tokens"`
+	OutputTokensCamel      int64 `json:"outputTokens"`
+	TotalTokens            int64 `json:"total_tokens"`
+	TotalTokensCamel       int64 `json:"totalTokens"`
+	CostInUSDTicks         int64 `json:"cost_in_usd_ticks"`
+	NumSourcesUsed         int64 `json:"num_sources_used"`
+	NumServerSideToolsUsed int64 `json:"num_server_side_tools_used"`
+	// Responses 协议：input_tokens_details.cached_tokens
+	InputTokensDetails responseInputDetailsDTO `json:"input_tokens_details"`
+	// OpenAI Chat Completions 协议：prompt_tokens_details.cached_tokens
+	PromptTokensDetails responseInputDetailsDTO `json:"prompt_tokens_details"`
+	// Anthropic Messages 协议：顶层 cache_read_input_tokens
+	CacheReadInputTokens     int64                    `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens"`
+	OutputTokensDetails      responseOutputDetailsDTO `json:"output_tokens_details"`
+	// OpenAI Chat Completions 协议：completion_tokens_details.reasoning_tokens
+	CompletionTokensDetails responseOutputDetailsDTO  `json:"completion_tokens_details"`
+	ContextDetails          responseContextDetailsDTO `json:"context_details"`
+	PromptTokens            int64                     `json:"prompt_tokens"`
+	CompletionTokens        int64                     `json:"completion_tokens"`
 }
 
 type responseInputDetailsDTO struct {
@@ -1137,14 +1496,74 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 	if total == 0 {
 		total = input + output
 	}
+	// 统一缓存命中：Responses / Chat Completions / Anthropic Messages
+	cached := value.InputTokensDetails.CachedTokens
+	if cached == 0 {
+		cached = value.PromptTokensDetails.CachedTokens
+	}
+	if cached == 0 {
+		cached = value.CacheReadInputTokens
+	}
+	reasoning := value.OutputTokensDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = value.CompletionTokensDetails.ReasoningTokens
+	}
 	return gateway.Usage{
-		InputTokens: input, CachedInputTokens: value.InputTokensDetails.CachedTokens,
-		OutputTokens: output, ReasoningTokens: value.OutputTokensDetails.ReasoningTokens,
+		InputTokens: input, CachedInputTokens: cached,
+		OutputTokens: output, ReasoningTokens: reasoning,
 		TotalTokens: total, CostInUSDTicks: value.CostInUSDTicks,
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextDetails.InputTokens, ContextOutputTokens: value.ContextDetails.OutputTokens,
 		ResponseModel: responseModel,
 	}
+}
+
+func hasUsageSignal(usage gateway.Usage) bool {
+	return usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0 ||
+		usage.CachedInputTokens > 0 || usage.ReasoningTokens > 0 || usage.CostInUSDTicks > 0 ||
+		usage.NumSourcesUsed > 0 || usage.NumServerSideToolsUsed > 0 ||
+		usage.ContextInputTokens > 0 || usage.ContextOutputTokens > 0
+}
+
+// mergeGatewayUsage 合并流式多帧 usage：非零字段覆盖，避免后到半截帧抹掉已解析缓存命中。
+func mergeGatewayUsage(base, next gateway.Usage) gateway.Usage {
+	if next.InputTokens > 0 {
+		base.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens > 0 {
+		base.OutputTokens = next.OutputTokens
+	}
+	if next.TotalTokens > 0 {
+		base.TotalTokens = next.TotalTokens
+	}
+	if next.CachedInputTokens > 0 {
+		base.CachedInputTokens = next.CachedInputTokens
+	}
+	if next.ReasoningTokens > 0 {
+		base.ReasoningTokens = next.ReasoningTokens
+	}
+	if next.CostInUSDTicks > 0 {
+		base.CostInUSDTicks = next.CostInUSDTicks
+	}
+	if next.NumSourcesUsed > 0 {
+		base.NumSourcesUsed = next.NumSourcesUsed
+	}
+	if next.NumServerSideToolsUsed > 0 {
+		base.NumServerSideToolsUsed = next.NumServerSideToolsUsed
+	}
+	if next.ContextInputTokens > 0 {
+		base.ContextInputTokens = next.ContextInputTokens
+	}
+	if next.ContextOutputTokens > 0 {
+		base.ContextOutputTokens = next.ContextOutputTokens
+	}
+	if next.ResponseModel != "" {
+		base.ResponseModel = next.ResponseModel
+	}
+	if base.TotalTokens == 0 && (base.InputTokens > 0 || base.OutputTokens > 0) {
+		base.TotalTokens = base.InputTokens + base.OutputTokens
+	}
+	return base
 }
 
 func copyHeaders(destination, source http.Header) {
@@ -1185,6 +1604,12 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
 }
 
+func writeImageGenerationUserError(c *gin.Context, code, param, message string) {
+	c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		"message": message, "type": "image_generation_user_error", "param": param, "code": code,
+	}})
+}
+
 func writeGatewayError(c *gin.Context, err error) {
 	status, code := http.StatusBadGateway, "upstream_unavailable"
 	message := "上游服务暂不可用"
@@ -1204,7 +1629,15 @@ func writeGatewayError(c *gin.Context, err error) {
 		status, code = http.StatusBadRequest, "unsupported_parameter"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
-		status, code, message = upstreamFailure.HTTPStatus, upstreamFailure.Code, upstreamFailure.PublicMessage
+		if isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) {
+			code = upstreamFailure.ClientCredentialErrorCode()
+			status, message = http.StatusServiceUnavailable, credentialErrorMessage(code)
+		} else {
+			status, code, message = upstreamFailure.HTTPStatus, upstreamFailure.Code, upstreamFailure.PublicMessage
+		}
+		if !isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) && upstreamFailure.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.FormatInt(max(1, int64(upstreamFailure.RetryAfter.Round(time.Second)/time.Second)), 10))
+		}
 	case errors.As(err, &selectionFailure):
 		status, code, message = selectionErrorResponse(c, selectionFailure)
 	case errors.Is(err, gateway.ErrResponseAccountUnavailable), errors.Is(err, gateway.ErrNoAvailableAccount):
@@ -1217,6 +1650,7 @@ func writeGatewayError(c *gin.Context, err error) {
 func writeGatewayAnthropicError(c *gin.Context, err error) {
 	status, errorType := http.StatusBadGateway, "api_error"
 	message := "上游服务暂不可用"
+	clientCode := ""
 	var upstreamFailure *gateway.UpstreamFailure
 	var selectionFailure *gateway.SelectionUnavailableError
 	switch {
@@ -1230,7 +1664,15 @@ func writeGatewayAnthropicError(c *gin.Context, err error) {
 		status, errorType = http.StatusBadRequest, "invalid_request_error"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
-		status, message = upstreamFailure.HTTPStatus, upstreamFailure.PublicMessage
+		if isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) {
+			clientCode = upstreamFailure.ClientCredentialErrorCode()
+			status, errorType, message = http.StatusServiceUnavailable, "overloaded_error", credentialErrorMessage(clientCode)
+		} else {
+			status, message = upstreamFailure.HTTPStatus, upstreamFailure.PublicMessage
+		}
+		if !isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) && upstreamFailure.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.FormatInt(max(1, int64(upstreamFailure.RetryAfter.Round(time.Second)/time.Second)), 10))
+		}
 		if status == http.StatusTooManyRequests {
 			errorType = "rate_limit_error"
 		}
@@ -1245,7 +1687,11 @@ func writeGatewayAnthropicError(c *gin.Context, err error) {
 		status, errorType = http.StatusServiceUnavailable, "overloaded_error"
 		message = "当前没有可用的上游账号"
 	}
-	writeAnthropicError(c, status, errorType, message)
+	writeAnthropicError(c, status, errorType, message, clientCode)
+}
+
+func isUpstreamCredentialStatus(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailableError) (int, string, string) {
@@ -1272,8 +1718,27 @@ func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailabl
 	return status, code, message
 }
 
-func writeAnthropicError(c *gin.Context, status int, errorType, message string) {
-	c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
+func writeAnthropicError(c *gin.Context, status int, errorType, message string, errorCode ...string) {
+	errorPayload := gin.H{"type": errorType, "message": message}
+	if len(errorCode) > 0 && errorCode[0] != "" && errorCode[0] != "upstream_unavailable" {
+		errorPayload["code"] = errorCode[0]
+	}
+	c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": errorPayload})
+}
+
+func readCredentialErrorCode(status int, source io.Reader) string {
+	body, err := io.ReadAll(io.LimitReader(source, maxCredentialErrorInspectBytes+1))
+	if err != nil || len(body) > maxCredentialErrorInspectBytes {
+		return "upstream_unavailable"
+	}
+	return gateway.ClientCredentialErrorCodeFromBody(status, body)
+}
+
+func credentialErrorMessage(code string) string {
+	if code == "permission-denied" {
+		return "上游服务暂不可用，聊天端点访问被拒绝"
+	}
+	return "上游服务暂不可用"
 }
 
 func forceJSONBoolean(body []byte, key string, value bool) ([]byte, error) {

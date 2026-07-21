@@ -54,6 +54,18 @@ legacy:
 	if cfg.Batch.AccountTaskBatchSize != 1000 || cfg.Batch.ImportConcurrency != 25 || cfg.Batch.ConversionConcurrency != 25 || cfg.Batch.SyncConcurrency != 25 || cfg.Batch.RefreshConcurrency != 25 || cfg.Batch.RandomDelay.Value() != 500*time.Millisecond {
 		t.Fatalf("batch defaults = %#v", cfg.Batch)
 	}
+	if cfg.Routing.PreferFreeBuild {
+		t.Fatal("preferFreeBuild should retain its false default when omitted from YAML")
+	}
+	if cfg.Accounts.AutoCleanReauthEnabled || cfg.Accounts.AutoCleanIncludeDisabled {
+		t.Fatal("accounts auto-clean flags should default to false")
+	}
+	if cfg.Accounts.AutoCleanReauthInterval.Value() != 10*time.Minute || cfg.Accounts.AutoCleanReauthMinAge.Value() != time.Hour {
+		t.Fatalf("accounts auto-clean defaults = %#v", cfg.Accounts)
+	}
+	if !cfg.Routing.ReasoningReplayEnabled || cfg.Routing.ReasoningReplayTTL.Value() != time.Hour || cfg.Routing.ReasoningReplayMaxEntries != 10240 {
+		t.Fatalf("reasoning replay defaults = %#v", cfg.Routing)
+	}
 	expectedDatabasePath := filepath.Join(dir, "data", "backend.db")
 	if cfg.Database.SQLite.Path != expectedDatabasePath {
 		t.Fatalf("database path = %q, want %q", cfg.Database.SQLite.Path, expectedDatabasePath)
@@ -81,13 +93,13 @@ legacy:
 
 func TestDefaultGrokBuildClientVersionMatchesLocalBaseline(t *testing.T) {
 	build := defaultConfig().Provider.Build
-	if RecommendedBuildClientVersion != "0.2.103" {
+	if RecommendedBuildClientVersion != "0.2.106" {
 		t.Fatalf("recommended clientVersion = %q", RecommendedBuildClientVersion)
 	}
 	if build.ClientVersion != RecommendedBuildClientVersion {
 		t.Fatalf("clientVersion = %q", build.ClientVersion)
 	}
-	if RecommendedBuildUserAgent != "grok-shell/0.2.103 (linux; x86_64)" {
+	if RecommendedBuildUserAgent != "grok-shell/0.2.106 (linux; x86_64)" {
 		t.Fatalf("recommended userAgent = %q", RecommendedBuildUserAgent)
 	}
 	if build.UserAgent != RecommendedBuildUserAgent {
@@ -97,8 +109,29 @@ func TestDefaultGrokBuildClientVersionMatchesLocalBaseline(t *testing.T) {
 
 func TestDefaultConsoleProviderConfig(t *testing.T) {
 	console := defaultConfig().Provider.Console
-	if console.BaseURL != "https://console.x.ai" || console.UserAgent == "" || console.ChatTimeout.Value() != 5*time.Minute {
+	if console.BaseURL != "https://console.x.ai" || console.LegacyUserAgent != "" || console.ChatTimeout.Value() != 5*time.Minute {
 		t.Fatalf("console defaults = %#v", console)
+	}
+}
+
+func TestLoadAcceptsLegacyConsoleUserAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`provider:
+  console:
+    userAgent: "legacy-console-agent"
+secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Console.LegacyUserAgent != "legacy-console-agent" {
+		t.Fatalf("legacy userAgent = %q", cfg.Provider.Console.LegacyUserAgent)
 	}
 }
 
@@ -109,12 +142,13 @@ func TestLoadAcceptsRuntimeDefaultsAndRejectsUnknownFields(t *testing.T) {
   credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 routing:
   maxAttempts: 9
+  preferFreeBuild: true
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
-	if err != nil || cfg.Routing.MaxAttempts != 9 {
+	if err != nil || cfg.Routing.MaxAttempts != 9 || !cfg.Routing.PreferFreeBuild {
 		t.Fatalf("runtime defaults = %#v, err = %v", cfg.Routing, err)
 	}
 	data = append(data, []byte("unknownField: true\n")...)
@@ -171,7 +205,6 @@ func TestValidateRejectsUnsafeRuntimeLimits(t *testing.T) {
 		"batch size":   func(cfg *Config) { cfg.Batch.AccountTaskBatchSize = 1001 },
 		"batch jitter": func(cfg *Config) { cfg.Batch.RandomDelay = Duration(6 * time.Second) },
 		"console url":  func(cfg *Config) { cfg.Provider.Console.BaseURL = "http://console.x.ai" },
-		"console ua":   func(cfg *Config) { cfg.Provider.Console.UserAgent = "" },
 		"console timeout": func(cfg *Config) {
 			cfg.Provider.Console.ChatTimeout = Duration(time.Second)
 		},
@@ -235,6 +268,29 @@ func TestValidateStatsigModes(t *testing.T) {
 	remote.Provider.Web.StatsigSignerURL = "http://signer.example.com:8788/sign"
 	if err := remote.Validate(); err == nil {
 		t.Fatal("public plaintext Statsig signer URL was accepted")
+	}
+}
+
+func TestValidateFlareSolverrClearance(t *testing.T) {
+	base := defaultConfig()
+	base.Secrets.JWTSecret = "12345678901234567890123456789012"
+	base.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	base.Provider.Web.ClearanceMode = ClearanceModeFlareSolverr
+	base.Provider.Web.FlareSolverrURL = "http://flaresolverr:8191"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid FlareSolverr config rejected: %v", err)
+	}
+	base.Provider.Web.FlareSolverrURL = "ftp://solver.example"
+	if err := base.Validate(); err == nil {
+		t.Fatal("invalid FlareSolverr scheme was accepted")
+	}
+	base.Provider.Web.FlareSolverrURL = "http://solver.example:8191"
+	if err := base.Validate(); err == nil {
+		t.Fatal("public plaintext FlareSolverr URL was accepted")
+	}
+	base.Provider.Web.FlareSolverrURL = "https://solver.example/v1"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("public HTTPS FlareSolverr URL rejected: %v", err)
 	}
 }
 

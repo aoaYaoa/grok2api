@@ -8,8 +8,9 @@ import (
 	"strings"
 )
 
-const stickyProxyRetryLimit = 2
-
+// do retries only the connection phase of an account-bound proxy request.
+// Once the request is written to the upstream tunnel, replaying a POST could
+// duplicate generation or billing and is therefore never attempted here.
 func (l *Lease) do(request *http.Request) (*http.Response, error) {
 	if l == nil || l.client == nil {
 		return nil, errors.New("出口客户端未初始化")
@@ -20,10 +21,14 @@ func (l *Lease) do(request *http.Request) (*http.Response, error) {
 	current := request
 	for attempt := 0; ; attempt++ {
 		written := false
-		trace := &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { written = true }}
+		trace := &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) {
+			// The callback also fires when writing fails after a partial write;
+			// treat that as submitted because the upstream may have received it.
+			written = true
+		}}
 		traced := current.WithContext(httptrace.WithClientTrace(current.Context(), trace))
 		response, err := l.client.Do(traced)
-		if err == nil && !retryableStickyResponse(response) {
+		if err == nil && !retryableResinResponse(response) {
 			return response, nil
 		}
 		if attempt >= stickyProxyRetryLimit || written || !safeProxyConnectionFailure(err, response) {
@@ -68,14 +73,17 @@ func cloneRequestBody(request *http.Request) (*http.Request, error) {
 
 func safeProxyConnectionFailure(err error, response *http.Response) bool {
 	if response != nil {
-		proxyError := strings.ToUpper(strings.TrimSpace(response.Header.Get("X-Resin-Error")))
-		return response.StatusCode >= http.StatusBadGateway && (proxyError == "UPSTREAM_CONNECT_FAILED" || proxyError == "NO_AVAILABLE_NODES")
+		resinError := strings.ToUpper(strings.TrimSpace(response.Header.Get("X-Resin-Error")))
+		return response.StatusCode >= http.StatusBadGateway && (resinError == "UPSTREAM_CONNECT_FAILED" || resinError == "NO_AVAILABLE_NODES")
 	}
 	if err == nil {
 		return false
 	}
 	value := strings.ToLower(err.Error())
-	for _, marker := range []string{"proxyconnect", "socks connect", "socks5: authentication", "tls handshake timeout", "connection refused", "no route to host"} {
+	for _, marker := range []string{
+		"proxyconnect", "socks connect", "socks5: authentication", "tls handshake timeout",
+		"connection refused", "no route to host",
+	} {
 		if strings.Contains(value, marker) {
 			return true
 		}
@@ -84,10 +92,10 @@ func safeProxyConnectionFailure(err error, response *http.Response) bool {
 	return errors.As(err, &tlsError)
 }
 
-func retryableStickyResponse(response *http.Response) bool {
+func retryableResinResponse(response *http.Response) bool {
 	if response == nil {
 		return false
 	}
-	proxyError := strings.ToUpper(strings.TrimSpace(response.Header.Get("X-Resin-Error")))
-	return response.StatusCode >= http.StatusBadGateway && (proxyError == "UPSTREAM_CONNECT_FAILED" || proxyError == "NO_AVAILABLE_NODES")
+	resinError := strings.ToUpper(strings.TrimSpace(response.Header.Get("X-Resin-Error")))
+	return (resinError == "UPSTREAM_CONNECT_FAILED" || resinError == "NO_AVAILABLE_NODES") && response.StatusCode >= 502
 }

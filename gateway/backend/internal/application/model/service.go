@@ -434,6 +434,18 @@ func (s *Service) syncAccountCapabilities(ctx context.Context, value account.Cre
 		return nil, err
 	}
 	models := normalizeDiscoveredModels(values)
+	if normalizer, ok := adapter.(provider.AccountModelCapabilityNormalizer); ok {
+		var billing *account.Billing
+		snapshot, billingErr := s.accounts.GetBilling(ctx, credential.ID)
+		if billingErr == nil {
+			billing = &snapshot
+		} else if !errors.Is(billingErr, repository.ErrNotFound) {
+			// Billing 不存在按 Unknown 处理；其他仓储错误保留失败语义。
+			s.markCapabilitySyncFailed(credential.ID, attemptedAt, billingErr)
+			return nil, billingErr
+		}
+		models = normalizeDiscoveredModels(normalizer.NormalizeAccountModelCapabilities(models, billing, credential))
+	}
 	if err := s.models.ReplaceAccountCapabilities(ctx, credential.ID, models, attemptedAt); err != nil {
 		s.markCapabilitySyncFailed(credential.ID, attemptedAt, err)
 		return nil, err
@@ -466,24 +478,15 @@ func (s *Service) markCapabilitySyncFailed(accountID uint64, attemptedAt time.Ti
 }
 
 func normalizePage(page, pageSize int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 20
-	}
-	if pageSize > 100 {
-		pageSize = 100
-	}
-	return page, pageSize
+	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
 }
 
 func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return nil, invalidInput("至少选择一个模型")
 	}
-	if len(ids) > 500 {
-		return nil, invalidInput("单次最多处理 500 个模型")
+	if len(ids) > repository.MaxPageSize {
+		return nil, invalidInput(fmt.Sprintf("单次最多处理 %d 个模型", repository.MaxPageSize))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))

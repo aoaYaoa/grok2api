@@ -10,6 +10,7 @@ import (
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"gorm.io/gorm"
 )
 
 func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
@@ -42,6 +43,7 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 		testMediaJob("media_job_completed_new", accountValue.ID, key.ID, mediadomain.StatusCompleted, now.Add(-time.Hour)),
 	}
 	jobs[0].Prompt = "A quiet harbor"
+	jobs[0].ResultAssetID = "vid_media_list_00000001"
 	jobs[1].Prompt = "Northern lights"
 	jobs[2].Prompt = "Desert sunrise"
 	jobs[3].Prompt = "City skyline"
@@ -84,8 +86,8 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 		t.Fatalf("completed total = %d", total)
 	}
 	assertMediaJobIDs(t, completed, "media_job_completed_new", "media_job_completed_old")
-	if completed[0].ClientKeyID != key.ID {
-		t.Fatalf("completed job client key = %d, want %d", completed[0].ClientKeyID, key.ID)
+	if completed[1].ResultAssetID != jobs[0].ResultAssetID {
+		t.Fatalf("completed asset ID = %q", completed[1].ResultAssetID)
 	}
 
 	searched, total, err := jobRepo.ListMediaJobs(ctx, repository.MediaJobListQuery{
@@ -123,211 +125,54 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 	}
 }
 
-func TestMediaJobRepositoryDeletesOnlyOwnedTerminalJobs(t *testing.T) {
+func TestAccountDeleteDetachesTerminalMediaJobsAndRejectsActiveJobs(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
-
-	accountValue, _, err := NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
-		Provider:             accountdomain.ProviderWeb,
-		AuthType:             accountdomain.AuthTypeSSO,
-		WebTier:              accountdomain.WebTierBasic,
-		Name:                 "media-delete-account",
-		SourceKey:            "media-delete-account",
-		EncryptedAccessToken: testEncryptedToken,
-		AuthStatus:           accountdomain.AuthStatusActive,
+	accounts := NewAccountRepository(database)
+	accountValue, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		Name: "media-delete-account", SourceKey: "media-delete-account",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	key := clientKeyModel{Name: "media-delete-key", Prefix: "media-delete-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
-	foreignKey := clientKeyModel{Name: "media-delete-foreign-key", Prefix: "media-delete-foreign-key", SecretHash: strings.Repeat("b", 64), EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
 	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := database.db.WithContext(ctx).Create(&foreignKey).Error; err != nil {
+	job := testMediaJob("media_job_account_delete", accountValue.ID, key.ID, mediadomain.StatusCompleted, time.Now().UTC())
+	job.AccountName = accountValue.Name
+	jobs := NewMediaJobRepository(database)
+	if err := jobs.CreateMediaJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 
-	jobRepo := NewMediaJobRepository(database)
-	now := time.Now().UTC()
-	jobs := []mediadomain.Job{
-		testMediaJob("media_delete_completed_recorded", accountValue.ID, key.ID, mediadomain.StatusCompleted, now),
-		testMediaJob("media_delete_failed_recorded", accountValue.ID, key.ID, mediadomain.StatusFailed, now),
-		testMediaJob("media_delete_completed_unrecorded", accountValue.ID, key.ID, mediadomain.StatusCompleted, now),
-		testMediaJob("media_delete_queued", accountValue.ID, key.ID, mediadomain.StatusQueued, now),
-		testMediaJob("media_delete_running", accountValue.ID, key.ID, mediadomain.StatusInProgress, now),
-		testMediaJob("media_delete_foreign", accountValue.ID, foreignKey.ID, mediadomain.StatusCompleted, now),
+	if err := accounts.Delete(ctx, accountValue.ID); err != nil {
+		t.Fatalf("delete account with terminal media job: %v", err)
 	}
-	jobs[0].UsageRecordedAt = &now
-	jobs[1].UsageRecordedAt = &now
-	jobs[5].UsageRecordedAt = &now
-	for _, job := range jobs {
-		if err := jobRepo.CreateMediaJob(ctx, job); err != nil {
-			t.Fatal(err)
-		}
+	stored, err := jobs.GetMediaJobsByIDs(ctx, []string{job.ID})
+	if err != nil || len(stored) != 1 || stored[0].AccountID != 0 || stored[0].AccountName != accountValue.Name {
+		t.Fatalf("detached terminal job = %#v, error = %v", stored, err)
 	}
 
-	for _, id := range []string{"media_delete_completed_recorded", "media_delete_failed_recorded"} {
-		deleted, err := jobRepo.DeleteOwnedTerminalMediaJob(ctx, id, key.ID)
-		if err != nil || !deleted {
-			t.Fatalf("delete %q = %v, %v", id, deleted, err)
-		}
-	}
-	for _, id := range []string{"media_delete_completed_unrecorded", "media_delete_queued", "media_delete_running", "media_delete_foreign", "media_delete_completed_recorded"} {
-		deleted, err := jobRepo.DeleteOwnedTerminalMediaJob(ctx, id, key.ID)
-		if err != nil || deleted {
-			t.Fatalf("delete %q = %v, %v", id, deleted, err)
-		}
-	}
-}
-
-func TestMediaAssetRepositoryOldestExcludesAssetsUsedByActiveVideoJobs(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accountValue, _, err := NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
-		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, WebTier: accountdomain.WebTierBasic,
-		Name: "media-reference-account", SourceKey: "media-reference-account", EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
+	activeAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		Name: "media-active-account", SourceKey: "media-active-account",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := clientKeyModel{Name: "media-reference-key", Prefix: "media-reference-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
-	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
+	activeJob := testMediaJob("media_job_account_active", activeAccount.ID, key.ID, mediadomain.StatusInProgress, time.Now().UTC())
+	if err := jobs.CreateMediaJob(ctx, activeJob); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	assetRepo := NewMediaAssetRepository(database)
-	for index, id := range []string{"img_active_reference_0001", "img_unused_reference_0002"} {
-		if err := assetRepo.CreateMediaAsset(ctx, mediadomain.Asset{ID: id, Kind: "image", StorageKey: "images/" + id + ".png", MIMEType: "image/png", SizeBytes: 100, SHA256: strings.Repeat("a", 64), CreatedAt: now.Add(time.Duration(index) * time.Minute)}); err != nil {
-			t.Fatal(err)
-		}
+	if err := accounts.Delete(ctx, activeAccount.ID); !errors.Is(err, repository.ErrConflict) || !strings.Contains(err.Error(), "进行中") {
+		t.Fatalf("delete account with active media job error = %v", err)
 	}
-	job := testMediaJob("media_job_active_reference", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
-	job.InputJSON = `{"image_urls":["grok2api-media://image/img_active_reference_0001"]}`
-	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, job); err != nil {
-		t.Fatal(err)
-	}
-	values, err := assetRepo.ListOldestMediaAssets(ctx, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != 1 || values[0].ID != "img_unused_reference_0002" {
-		t.Fatalf("cleanup candidates = %#v", values)
-	}
-	deleted, err := assetRepo.DeleteMediaAssetIfUnused(ctx, "img_active_reference_0001")
-	if err != nil || deleted {
-		t.Fatalf("delete active asset = %v, %v", deleted, err)
-	}
-	if _, err := assetRepo.GetMediaAsset(ctx, "img_active_reference_0001"); err != nil {
-		t.Fatalf("active asset was deleted: %v", err)
-	}
-	deleted, err = assetRepo.DeleteMediaAssetIfUnused(ctx, "img_unused_reference_0002")
-	if err != nil || !deleted {
-		t.Fatalf("delete unused asset = %v, %v", deleted, err)
-	}
-}
-
-func TestMediaJobRepositoryValidatesInternalAssetReferences(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accountValue, _, err := NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
-		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, WebTier: accountdomain.WebTierBasic,
-		Name: "media-contract-account", SourceKey: "media-contract-account", EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := clientKeyModel{Name: "media-contract-key", Prefix: "media-contract-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
-	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
-		t.Fatal(err)
-	}
-	assetRepo := NewMediaAssetRepository(database)
-	jobRepo := NewMediaJobRepository(database)
-	asset := testMediaAsset("img_contract_asset_0001", "media/contract-asset.png", time.Now().UTC())
-	if err := assetRepo.CreateMediaAsset(ctx, asset); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, value := range []struct {
-		id        string
-		inputJSON string
-		wantErr   error
-	}{
-		{id: "media_job_scheme_reference", inputJSON: `{"image_urls":["grok2api-media://image/img_contract_asset_0001"]}`},
-		{id: "media_job_path_reference", inputJSON: `{"image_urls":["/v1/media/images/img_contract_asset_0001"]}`},
-		{id: "media_job_configured_path_reference", inputJSON: `{"image_urls":["/api/v2/v1/media/images/img_contract_asset_0001"]}`},
-		{id: "media_job_external_reference", inputJSON: `{"image_urls":["https://example.com/source.png"]}`},
-		{id: "media_job_external_matching_route", inputJSON: `{"image_urls":["https://cdn.example/api/v1/media/images/img_contract_missing_external"]}`},
-		{id: "media_job_missing_scheme", inputJSON: `{"image_urls":["grok2api-media://image/img_contract_missing_0002"]}`, wantErr: repository.ErrNotFound},
-		{id: "media_job_missing_path", inputJSON: `{"image_urls":["/v1/media/images/img_contract_missing_0003"]}`, wantErr: repository.ErrNotFound},
-		{id: "media_job_missing_configured_path", inputJSON: `{"image_urls":["/api/v2/v1/media/images/img_contract_missing_0004"]}`, wantErr: repository.ErrNotFound},
-		{id: "media_job_nested_internal_path", inputJSON: `{"image_urls":["/api/v1/media/images/img_contract_asset_0001/extra"]}`, wantErr: repository.ErrNotFound},
-	} {
-		job := testMediaJob(value.id, accountValue.ID, key.ID, mediadomain.StatusQueued, time.Now().UTC())
-		job.InputJSON = value.inputJSON
-		err := jobRepo.CreateMediaJob(ctx, job)
-		if !errors.Is(err, value.wantErr) {
-			t.Fatalf("create %q error = %v, want %v", value.id, err, value.wantErr)
-		}
-	}
-}
-
-func TestMediaRepositoriesConcurrentCreateAndDeletePreserveAssetReference(t *testing.T) {
-	ctx := context.Background()
-	database := openTestDatabase(t)
-	accountValue, _, err := NewAccountRepository(database).UpsertByIdentity(ctx, accountdomain.Credential{
-		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, WebTier: accountdomain.WebTierBasic,
-		Name: "media-interleave-account", SourceKey: "media-interleave-account", EncryptedAccessToken: testEncryptedToken, AuthStatus: accountdomain.AuthStatusActive,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := clientKeyModel{Name: "media-interleave-key", Prefix: "media-interleave-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
-	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
-		t.Fatal(err)
-	}
-	assetRepo := NewMediaAssetRepository(database)
-	jobRepo := NewMediaJobRepository(database)
-	asset := testMediaAsset("img_interleave_asset_0001", "media/interleave-asset.png", time.Now().UTC())
-	if err := assetRepo.CreateMediaAsset(ctx, asset); err != nil {
-		t.Fatal(err)
-	}
-	job := testMediaJob("media_job_interleave", accountValue.ID, key.ID, mediadomain.StatusQueued, time.Now().UTC())
-	job.InputJSON = `{"image_urls":["grok2api-media://image/img_interleave_asset_0001"]}`
-
-	start := make(chan struct{})
-	deleteResult := make(chan bool, 1)
-	deleteError := make(chan error, 1)
-	createError := make(chan error, 1)
-	go func() {
-		<-start
-		deleted, deleteErr := assetRepo.DeleteMediaAssetIfUnused(ctx, asset.ID)
-		deleteResult <- deleted
-		deleteError <- deleteErr
-	}()
-	go func() {
-		<-start
-		createError <- jobRepo.CreateMediaJob(ctx, job)
-	}()
-	close(start)
-	deleted, deleteErr, createErr := <-deleteResult, <-deleteError, <-createError
-	if deleteErr != nil {
-		t.Fatal(deleteErr)
-	}
-	if createErr == nil {
-		if deleted {
-			t.Fatal("job was created while its referenced asset was deleted")
-		}
-		if _, err := assetRepo.GetMediaAsset(ctx, asset.ID); err != nil {
-			t.Fatalf("created job lost its asset: %v", err)
-		}
-		return
-	}
-	if !errors.Is(createErr, repository.ErrNotFound) || !deleted {
-		t.Fatalf("create error = %v, deleted = %v", createErr, deleted)
-	}
-	if _, err := jobRepo.GetMediaJob(ctx, job.ID, key.ID); !errors.Is(err, repository.ErrNotFound) {
-		t.Fatalf("failed job creation committed: %v", err)
+	if _, err := accounts.Get(ctx, activeAccount.ID); err != nil {
+		t.Fatalf("active job conflict removed account: %v", err)
 	}
 }
 
@@ -425,6 +270,89 @@ func testMediaJob(id string, accountID, clientKeyID uint64, status mediadomain.S
 		job.CompletedAt = &completedAt
 	}
 	return job
+}
+
+func TestMediaUploadTicketRepositoryDeleteUploadTicketByHash(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	repo := NewMediaUploadTicketRepository(database)
+	now := time.Now().UTC()
+	hash := strings.Repeat("ab", 32)
+	otherHash := strings.Repeat("cd", 32)
+	if err := repo.CreateUploadTicket(ctx, repository.MediaUploadTicket{
+		TokenHash: hash, AssetID: "vid_delete_by_hash_1", JobID: "job_delete_by_hash",
+		MaxBytes: 1024, AllowedMIME: "video/mp4", ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateUploadTicket(ctx, repository.MediaUploadTicket{
+		TokenHash: otherHash, AssetID: "vid_delete_by_hash_2", JobID: "job_delete_keep",
+		MaxBytes: 1024, AllowedMIME: "video/mp4", ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.DeleteUploadTicketByHash(ctx, hash); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := repo.GetUploadTicketByHash(ctx, hash); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("deleted ticket still readable: %v", err)
+	}
+	// 精确删除不得影响其他票据。
+	if _, err := repo.GetUploadTicketByHash(ctx, otherHash); err != nil {
+		t.Fatalf("other ticket removed: %v", err)
+	}
+	// 幂等：再次删除缺失行成功。
+	if err := repo.DeleteUploadTicketByHash(ctx, hash); err != nil {
+		t.Fatalf("idempotent delete: %v", err)
+	}
+	if err := repo.DeleteUploadTicketByHash(ctx, ""); err != nil {
+		t.Fatalf("empty hash delete: %v", err)
+	}
+}
+
+func TestMediaUploadTicketRepositoryConsumeRollsBackWhenTicketReadFails(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	repo := NewMediaUploadTicketRepository(database)
+	now := time.Now().UTC()
+	hash := strings.Repeat("ef", 32)
+	if err := repo.CreateUploadTicket(ctx, repository.MediaUploadTicket{
+		TokenHash: hash, AssetID: "vid_consume_rollback_1", JobID: "job_consume_rollback",
+		MaxBytes: 1024, AllowedMIME: "video/mp4", ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected ticket read failure")
+	callbackName := "test:fail_consumed_ticket_read"
+	failed := false
+	if err := database.db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if !failed && tx.Statement != nil && tx.Statement.Table == "media_upload_tickets" {
+			failed = true
+			_ = tx.AddError(injected)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, consumed, err := repo.ConsumeUploadTicket(ctx, hash, now)
+	if removeErr := database.db.Callback().Query().Remove(callbackName); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	if !errors.Is(err, injected) || consumed {
+		t.Fatalf("consume = (%v, %v), want injected error and consumed=false", consumed, err)
+	}
+	if !failed {
+		t.Fatal("ticket read failure callback did not run")
+	}
+	ticket, err := repo.GetUploadTicketByHash(ctx, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.ConsumedAt != nil {
+		t.Fatalf("consume transaction was not rolled back: consumed_at=%v", ticket.ConsumedAt)
+	}
 }
 
 func testMediaAsset(id, storageKey string, createdAt time.Time) mediadomain.Asset {

@@ -22,7 +22,7 @@ import (
 
 type Config struct {
 	BaseURL        string
-	UserAgent      string
+	SessionBaseURL string
 	TimeoutSeconds int
 }
 
@@ -140,7 +140,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		cancel()
 		return nil, err
 	}
-	applyHeaders(upstream, token, cfg.UserAgent, lease)
+	applyHeaders(upstream, token, lease)
 	if request.Streaming {
 		upstream.Header.Set("Accept", "text/event-stream")
 	}
@@ -152,8 +152,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		return nil, err
 	}
 	responseBodyTruncated := false
+	var rateLimit *provider.RateLimitMetadata
 	if response.StatusCode == http.StatusTooManyRequests {
-		responseBodyTruncated, err = normalizeRateLimitResponse(response)
+		responseBodyTruncated, rateLimit, err = normalizeRateLimitResponse(response)
 		if err != nil {
 			_ = response.Body.Close()
 			lease.Release()
@@ -171,7 +172,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			response.Body = conversation.ConvertResponseStreamWithOptions(response.Body, request.Operation, conversationOptions)
 			response.Header.Del("Content-Length")
 			response.Header.Set("Content-Type", "text/event-stream")
-			return responseResult(response, &releaseBody{ReadCloser: response.Body, release: release}), nil
+			result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
+			result.RateLimit = rateLimit
+			return result, nil
 		}
 		var data []byte
 		var readErr error
@@ -197,6 +200,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			response.Header.Set("Content-Type", "application/json")
 			result := responseResult(response, io.NopCloser(bytes.NewReader(converted)))
 			result.Diagnostic = diagnostic
+			result.RateLimit = rateLimit
 			return result, nil
 		}
 		converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
@@ -205,9 +209,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 		response.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 		response.Header.Set("Content-Type", "application/json")
-		return responseResult(response, io.NopCloser(bytes.NewReader(converted))), nil
+		result := responseResult(response, io.NopCloser(bytes.NewReader(converted)))
+		result.RateLimit = rateLimit
+		return result, nil
 	}
-	return responseResult(response, &releaseBody{ReadCloser: response.Body, release: release}), nil
+	result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
+	result.RateLimit = rateLimit
+	return result, nil
 }
 
 func normalizeConversationError(data []byte, operation string, status int) []byte {
@@ -270,21 +278,32 @@ func consoleEndpoint(baseURL string) string {
 	return baseURL + "/v1/responses"
 }
 
-func normalizeRateLimitResponse(response *http.Response) (bool, error) {
+func normalizeRateLimitResponse(response *http.Response) (bool, *provider.RateLimitMetadata, error) {
 	data, truncated, err := provider.ReadDiagnosticBody(response.Body)
 	if err != nil {
-		return truncated, err
+		return truncated, nil, err
 	}
 	_ = response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	response.ContentLength = int64(len(data))
 	response.Header.Set("Content-Length", strconv.Itoa(len(data)))
-	if response.Header.Get("Retry-After") == "" {
-		if retryAfter := consoleRetryAfter(data); retryAfter > 0 {
+	metadata := parseConsoleRateLimitMetadata(data)
+	if headerValue := response.Header.Get("Retry-After"); headerValue != "" {
+		if metadata != nil {
+			if retryAfter := parseConsoleRetryAfterHeader(headerValue, time.Now().UTC()); retryAfter > 0 {
+				metadata.RetryAfter = retryAfter
+			}
+		}
+	} else {
+		retryAfter := consoleRetryAfter(data)
+		if metadata != nil {
+			retryAfter = metadata.RetryAfter
+		}
+		if retryAfter > 0 {
 			response.Header.Set("Retry-After", strconv.FormatInt(int64(retryAfter/time.Second), 10))
 		}
 	}
-	return truncated, nil
+	return truncated, metadata, nil
 }
 
 func responseResult(response *http.Response, body io.ReadCloser) *provider.Response {

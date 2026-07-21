@@ -55,7 +55,7 @@ func buildOfficialTokenPrices() map[string]tokenPrice {
 	}
 	register("grok-build-0.1", tokenPrice{InputTicks: 10000, CachedInputTicks: 2000, OutputTicks: 20000, LongContextTokens: 200000, LongInputTicks: 20000, LongCachedTicks: 4000, LongOutputTicks: 40000},
 		"grok-code-fast-1", "grok-code-fast", "grok-code-fast-1-0825", "grok-composer-2.5-fast")
-	register("grok-4.5", tokenPrice{InputTicks: 20000, CachedInputTicks: 5000, OutputTicks: 60000, LongContextTokens: 200000, LongInputTicks: 40000, LongCachedTicks: 10000, LongOutputTicks: 120000},
+	register("grok-4.5", tokenPrice{InputTicks: 20000, CachedInputTicks: 3000, OutputTicks: 60000, LongContextTokens: 200000, LongInputTicks: 40000, LongCachedTicks: 6000, LongOutputTicks: 120000},
 		"grok-4.5-latest", "grok-build-latest")
 	standard := tokenPrice{InputTicks: 12500, CachedInputTicks: 2000, OutputTicks: 25000, LongContextTokens: 200000, LongInputTicks: 25000, LongCachedTicks: 4000, LongOutputTicks: 50000}
 	register("grok-4.3", standard, "grok-4.3-latest", "grok-latest")
@@ -239,8 +239,13 @@ func EstimateOfficialImageEditCost(model, resolution string, outputCount, inputC
 }
 
 // EstimateOfficialVideoCost 按请求视频时长和分辨率计算费用。
+// 仅精确支持 grok-imagine-video 与 grok-imagine-video-1.5（可带来源前缀）；未知后缀拒绝。
 func EstimateOfficialVideoCost(model, resolution string, seconds int) (PricingResult, bool) {
-	if normalizePricingModel(model) != "grok-imagine-video" || seconds <= 0 {
+	if seconds <= 0 {
+		return PricingResult{}, false
+	}
+	baseModel, ok := officialVideoPricingModel(model)
+	if !ok {
 		return PricingResult{}, false
 	}
 	resolution = strings.ToLower(strings.TrimSpace(resolution))
@@ -254,7 +259,18 @@ func EstimateOfficialVideoCost(model, resolution string, seconds int) (PricingRe
 		return PricingResult{}, false
 	}
 	return PricingResult{
-		Model:          "grok-imagine-video-" + resolution,
+		Model:          baseModel + "-" + resolution,
 		CostInUSDTicks: int64(seconds) * ticksPerSecond,
 	}, true
+}
+
+func officialVideoPricingModel(model string) (string, bool) {
+	switch normalizePricingModel(model) {
+	case "grok-imagine-video":
+		return "grok-imagine-video", true
+	case "grok-imagine-video-1.5":
+		return "grok-imagine-video-1.5", true
+	default:
+		return "", false
+	}
 }

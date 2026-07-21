@@ -3,6 +3,7 @@ package account
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,16 @@ const (
 	ProviderWeb     Provider = "grok_web"
 	ProviderConsole Provider = "grok_console"
 )
+
+// LinkedAccount 表示同一上游用户在另一 Provider 下的弱关联账号。
+// 关联只用于出口身份与管理端展示，不共享额度、健康或路由状态。
+type LinkedAccount struct {
+	ID       uint64
+	Provider Provider
+	Name     string
+	Email    string
+	UserID   string
+}
 
 var providers = [...]Provider{ProviderBuild, ProviderWeb, ProviderConsole}
 
@@ -62,6 +73,28 @@ const (
 	WebTierHeavy WebTier = "heavy"
 )
 
+// BuildRouteMode 控制 Build 账号的推理地址；模型、Billing 与 OAuth 不受影响。
+type BuildRouteMode string
+
+// CurrentWebTermsVersion 是 Grok Web 当前要求接受的产品服务协议版本。
+// accounts.x.ai 的账号协议使用独立版本，不与该值混用。
+const CurrentWebTermsVersion = 5
+
+const (
+	BuildRouteAuto  BuildRouteMode = "auto"
+	BuildRouteBuild BuildRouteMode = "build"
+	BuildRouteXAI   BuildRouteMode = "xai"
+)
+
+func (m BuildRouteMode) IsValid() bool {
+	switch m {
+	case BuildRouteAuto, BuildRouteBuild, BuildRouteXAI:
+		return true
+	default:
+		return false
+	}
+}
+
 const (
 	DefaultPriority         = 1
 	DefaultMaxConcurrent    = 8
@@ -99,6 +132,8 @@ type Credential struct {
 	RefreshPermanent          bool
 	Enabled                   bool
 	AuthStatus                AuthStatus
+	// ReauthMarkedAt 仅在切入 reauthRequired 时写入；恢复 active 时清空。自动清理以该时刻为 minAge 锚点。
+	ReauthMarkedAt            *time.Time
 	Priority                  int
 	MaxConcurrent             int
 	MinimumRemaining          float64
@@ -110,11 +145,38 @@ type Credential struct {
 	ObservedModelAt           *time.Time
 	WebTier                   WebTier
 	WebTierSyncedAt           *time.Time
-	LinkedAccountID           uint64
-	LinkedAccountName         string
-	LinkedProvider            Provider
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
+	// EgressIdentity 是不含凭据和个人信息的稳定出口身份。
+	// 关联到同一 Web 账号的 Build/Console 只共享该值，不共享任何运行状态。
+	EgressIdentity string
+	// WebNSFWEnabledAt 记录 Grok Web 上游首次确认 NSFW 已成功开启的时间。
+	// 普通导入、额度同步和凭据更新不得清除。
+	WebNSFWEnabledAt *time.Time
+	// WebTermsAcceptedAt 记录 Grok Web 上游确认当前版本完整服务协议已接受的时间。
+	// 关联渠道只共享该展示状态，不获得修改 Web 资料的能力。
+	WebTermsAcceptedAt *time.Time
+	// WebTermsAcceptedVersion 记录已完成的 Grok Web 产品协议版本。
+	// 历史数据默认为 0，必须补执行当前版本后才视为完整接受。
+	WebTermsAcceptedVersion int
+	// WebBirthDateSetAt 记录 Grok Web 上游首次确认生日已设置的时间。
+	// 该字段用于避免批量脚本重复请求不可修改的生日接口。
+	WebBirthDateSetAt *time.Time
+	LinkedAccountID   uint64
+	LinkedAccountName string
+	LinkedProvider    Provider
+	LinkedAccounts    []LinkedAccount
+	// BuildAPIFallback 仅记录 grok_build 曾因当次 Build 403 成功回退到 XAI。
+	// 它不参与路由；每个新请求仍先走 Build，只有当次严格 403 才可尝试 XAI。
+	// token refresh / SSO 转换 / 普通 upsert / 重启不得清除。
+	BuildAPIFallback bool
+	// BuildRouteMode 是管理员设置的账号级推理地址策略。
+	// auto 使用 bot flag / Build 403 自动规则；build 与 xai 分别强制单一地址。
+	BuildRouteMode BuildRouteMode
+	// BuildSuperEntitled 仅对 grok_build 有效：管理员已确认该账号具备 Super/1.5 entitlement。
+	// 不替代 Billing 快照，不等同于 BuildAPIFallback，也不表示请求应走 XAI。
+	// 普通导入/upsert/token refresh/SSO 转换不得清除；仅显式管理员 PATCH 可改。
+	BuildSuperEntitled bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // CredentialRefreshDueAt 将账号稳定地分散到到期前 5~8 分钟，避免同批导入账号同时刷新。
@@ -179,6 +241,9 @@ type QuotaRecoveryEvent struct {
 type BillingHistoryEntry struct {
 	Year         int
 	Month        int
+	PeriodType   string
+	PeriodStart  string
+	PeriodEnd    string
 	IncludedUsed float64
 	OnDemandUsed float64
 	TotalUsed    float64
@@ -196,6 +261,7 @@ type Billing struct {
 	PrepaidBalance       float64
 	CreditUsagePercent   float64
 	IsUnifiedBillingUser bool
+	OnDemandEnabled      *bool
 	TopUpMethod          string
 	UsagePeriodType      string
 	UsagePeriodStart     string
@@ -296,6 +362,78 @@ func (b Billing) Remaining() float64 {
 		return 0
 	}
 	return remaining
+}
+
+// IsPaid 判断 Billing 快照是否呈现 Super/paid 信号。
+// 语义与 SQL accountPaidBillingPredicate 及 QuotaView paid 分支一致：
+// 已确认的付费订阅名称，或任一付费额度字段为正，即为 paid。
+// creditUsagePercent 只是当前周期使用率，Free 与 paid 都可能存在，不能参与判级。
+// 无快照时应由调用方按 Unknown 处理，不得调用本方法。
+// 注意：零 Billing + 管理员确认的 BuildSuperEntitled 由 IsBuildSuper 统一判定，不经本方法。
+func (b Billing) IsPaid() bool {
+	return isPaidBillingPlan(b.PlanCode) || isPaidBillingPlan(b.PlanName) ||
+		b.MonthlyLimit > 0 || b.OnDemandCap > 0 || b.OnDemandUsed > 0 || b.PrepaidBalance > 0
+}
+
+// HasFreeProfileSignal 仅接受明确的 Free/Basic 套餐名称。
+// currentPeriod、unified billing、top-up 等字段在零使用量的付费账号上同样存在，
+// 不能作为 Free 证据，否则会把刚开通的 SuperGrok 误判为 Free。
+func (b Billing) HasFreeProfileSignal() bool {
+	return isFreeBillingPlan(b.PlanCode) || isFreeBillingPlan(b.PlanName)
+}
+
+func normalizeBillingPlan(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.NewReplacer(" ", "", "_", "", "-", "", "+", "plus").Replace(value)
+}
+
+func isPaidBillingPlan(value string) bool {
+	switch normalizeBillingPlan(value) {
+	case "super", "supergrok", "supergrokpro", "supergrokheavy", "supergroklite",
+		"grokpro", "xpremium", "xpremiumplus", "apikey":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFreeBillingPlan(value string) bool {
+	switch normalizeBillingPlan(value) {
+	case "free", "grokfree", "freetier", "basic", "grokbasic", "xbasic":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsBuildSuper 判定 Grok Build 账号是否为 Super：Billing IsPaid 或管理员确认 BuildSuperEntitled。
+// 非 Build Provider 恒为 false。与 SQL accountBuildSuperPredicate 语义一致。
+func IsBuildSuper(credential Credential, billing *Billing) bool {
+	if credential.Provider != ProviderBuild {
+		return false
+	}
+	if credential.BuildSuperEntitled {
+		return true
+	}
+	return billing != nil && billing.IsPaid()
+}
+
+// IsKnownFreeBuild 判断候选是否是已确认的 Grok Build Free 账号。
+// Super（Billing paid 或 BuildSuperEntitled）优先，避免旧的响应模型或恢复记录把 Super 错分为 Free。
+func (c RoutingCandidate) IsKnownFreeBuild() bool {
+	if c.Credential.Provider != ProviderBuild {
+		return false
+	}
+	if IsBuildSuper(c.Credential, c.Billing) {
+		return false
+	}
+	if c.QuotaRecovery != nil && c.QuotaRecovery.Kind == QuotaRecoveryKindFree {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(c.Credential.ObservedModel)), "-build-free") {
+		return true
+	}
+	return c.Billing != nil && c.Billing.HasFreeProfileSignal()
 }
 
 // IsExhausted 判断额度快照是否已达到账号保留阈值。

@@ -1,9 +1,8 @@
 package cli
 
 import (
+	"encoding/base64"
 	"testing"
-
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
 )
 
 func TestParseBillingMonthlyPayload(t *testing.T) {
@@ -41,24 +40,28 @@ func TestParseBillingMatchesObservedBuildPayloads(t *testing.T) {
 		t.Fatalf("monthly = %#v", monthly)
 	}
 
-	credits, err := parseBilling([]byte(`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-08T00:00:00+00:00","end":"2026-07-15T00:00:00+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"isUnifiedBillingUser":true,"prepaidBalance":{"val":0},"topUpMethod":"TOP_UP_METHOD_SAVED_PAYMENT_METHOD","billingPeriodStart":"2026-07-08T00:00:00+00:00","billingPeriodEnd":"2026-07-15T00:00:00+00:00"}}`))
+	credits, err := parseBilling([]byte(`{"onDemandEnabled":false,"subscriptionTier":"SuperGrok Heavy","config":{"creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-08T00:00:00+00:00","end":"2026-07-15T00:00:00+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"isUnifiedBillingUser":true,"prepaidBalance":{"val":0},"topUpMethod":"TOP_UP_METHOD_SAVED_PAYMENT_METHOD","history":[{"period":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-01T00:00:00Z","end":"2026-07-08T00:00:00Z"},"onDemandUsed":{"val":120}}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !credits.IsUnifiedBillingUser || credits.UsagePeriodType != "USAGE_PERIOD_TYPE_WEEKLY" || credits.UsagePeriodEnd != "2026-07-15T00:00:00+00:00" || credits.TopUpMethod != "TOP_UP_METHOD_SAVED_PAYMENT_METHOD" {
+	if !credits.IsUnifiedBillingUser || credits.OnDemandEnabled == nil || *credits.OnDemandEnabled || credits.CreditUsagePercent != 42.5 || credits.UsagePeriodType != "USAGE_PERIOD_TYPE_WEEKLY" || credits.UsagePeriodEnd != "2026-07-15T00:00:00+00:00" || credits.TopUpMethod != "TOP_UP_METHOD_SAVED_PAYMENT_METHOD" || credits.PlanCode != "" || credits.PlanName != "SuperGrok Heavy" {
 		t.Fatalf("credits = %#v", credits)
+	}
+	if len(credits.History) != 1 || credits.History[0].PeriodType != "USAGE_PERIOD_TYPE_WEEKLY" || credits.History[0].PeriodStart != "2026-07-01T00:00:00Z" || credits.History[0].PeriodEnd != "2026-07-08T00:00:00Z" || credits.History[0].OnDemandUsed != 120 {
+		t.Fatalf("credits history = %#v", credits.History)
+	}
+	if !credits.IsPaid() {
+		t.Fatal("explicit SuperGrok tier must remain paid even when numeric limits are zero")
 	}
 }
 
-func TestMergeBillingSnapshotsUsesWeeklyUsagePeriod(t *testing.T) {
-	monthly := mergeBillingSnapshots(
-		account.Billing{MonthlyLimit: 15_000, Used: 197, CreditUsagePercent: 1.313, BillingPeriodStart: "2026-07-01T00:00:00Z", BillingPeriodEnd: "2026-08-01T00:00:00Z"},
-		account.Billing{CreditUsagePercent: 5, UsagePeriodType: "USAGE_PERIOD_TYPE_WEEKLY", UsagePeriodStart: "2026-07-12T04:52:00Z", UsagePeriodEnd: "2026-07-19T04:52:00Z"},
-	)
-	if monthly.MonthlyLimit != 15_000 || monthly.Used != 197 || monthly.CreditUsagePercent != 5 {
-		t.Fatalf("merged billing = %#v", monthly)
+func TestParseSubscriptionTierAndJWTFallback(t *testing.T) {
+	tier, err := parseSubscriptionTier([]byte(`{"user":{"subscriptionTier":"SuperGrokPro"}}`))
+	if err != nil || tier != "SuperGrokPro" {
+		t.Fatalf("tier = %q err=%v", tier, err)
 	}
-	if monthly.UsagePeriodType != "USAGE_PERIOD_TYPE_WEEKLY" || monthly.UsagePeriodEnd != "2026-07-19T04:52:00Z" || monthly.BillingPeriodEnd != "2026-08-01T00:00:00Z" {
-		t.Fatalf("usage period = %#v", monthly)
+	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"tier":5}`))
+	if got := subscriptionTierFromJWT("header." + claims + ".signature"); got != "supergrok_heavy" {
+		t.Fatalf("JWT tier = %q", got)
 	}
 }

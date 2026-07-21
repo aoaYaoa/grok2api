@@ -9,49 +9,93 @@ import (
 )
 
 // convertChatRequest 将 Chat Completions 请求完整转换为标准 Responses 输入。
-func convertChatRequest(body []byte, model string) ([]byte, error) {
+func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, error) {
 	var source map[string]json.RawMessage
 	if err := json.Unmarshal(body, &source); err != nil {
-		return nil, fmt.Errorf("解析 Chat Completions 请求: %w", err)
+		return nil, ResponseOptions{}, fmt.Errorf("解析 Chat Completions 请求: %w", err)
 	}
 	var messages []chatMessage
 	if err := json.Unmarshal(source["messages"], &messages); err != nil || len(messages) == 0 {
-		return nil, errors.New("messages 必须是非空数组")
+		return nil, ResponseOptions{}, errors.New("messages 必须是非空数组")
 	}
 	input, err := convertChatMessages(messages)
 	if err != nil {
-		return nil, err
+		return nil, ResponseOptions{}, err
 	}
 	target := map[string]json.RawMessage{"model": mustJSON(model), "input": mustJSON(input)}
-	copyFields(target, source, "stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "seed", "user", "parallel_tool_calls", "metadata", "store", "service_tier", "stop")
+	copyFields(target, source, "stream", "temperature", "top_p", "parallel_tool_calls", "metadata", "store", "service_tier")
+	if raw := source["user"]; !isEmptyJSON(raw) {
+		var user string
+		if json.Unmarshal(raw, &user) != nil || strings.TrimSpace(user) == "" {
+			return nil, ResponseOptions{}, errors.New("user 必须是非空字符串")
+		}
+		target["safety_identifier"] = mustJSON(strings.TrimSpace(user))
+	}
+	stopSequences, err := parseChatStopSequences(source["stop"])
+	if err != nil {
+		return nil, ResponseOptions{}, err
+	}
 	if raw := firstJSON(source["max_completion_tokens"], source["max_tokens"]); !isEmptyJSON(raw) {
 		target["max_output_tokens"] = raw
 	}
 	if raw := source["response_format"]; !isEmptyJSON(raw) {
 		format, err := convertResponseFormat(raw)
 		if err != nil {
-			return nil, err
+			return nil, ResponseOptions{}, err
 		}
 		target["text"] = mustJSON(map[string]json.RawMessage{"format": format})
 	}
 	if raw := source["reasoning_effort"]; !isEmptyJSON(raw) {
 		target["reasoning"] = mustJSON(map[string]json.RawMessage{"effort": raw})
 	}
+	var tools []any
 	if raw := source["tools"]; !isEmptyJSON(raw) {
-		tools, err := convertChatTools(raw)
+		tools, err = convertChatTools(raw)
 		if err != nil {
-			return nil, err
+			return nil, ResponseOptions{}, err
 		}
+	}
+	if !isEmptyJSON(source["web_search_options"]) && !containsToolType(tools, "web_search") {
+		tools = append(tools, map[string]any{"type": "web_search"})
+	}
+	if len(tools) > 0 {
 		target["tools"] = mustJSON(tools)
 	}
 	if raw := source["tool_choice"]; !isEmptyJSON(raw) {
 		choice, err := convertChatToolChoice(raw)
 		if err != nil {
-			return nil, err
+			return nil, ResponseOptions{}, err
 		}
 		target["tool_choice"] = choice
 	}
-	return json.Marshal(target)
+	converted, err := json.Marshal(target)
+	return converted, ResponseOptions{StopSequences: stopSequences}, err
+}
+
+func parseChatStopSequences(raw json.RawMessage) ([]string, error) {
+	if isEmptyJSON(raw) {
+		return nil, nil
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		if single == "" {
+			return nil, errors.New("stop 不能为空")
+		}
+		return []string{single}, nil
+	}
+	var values []string
+	if json.Unmarshal(raw, &values) != nil || len(values) == 0 {
+		return nil, errors.New("stop 必须是字符串或非空字符串数组")
+	}
+	if len(values) > 4 {
+		return nil, errors.New("stop 最多包含 4 个序列")
+	}
+	for index, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("stop[%d] 不能为空", index)
+		}
+	}
+	return values, nil
 }
 
 type chatMessage struct {
@@ -86,7 +130,7 @@ func convertChatMessages(messages []chatMessage) ([]any, error) {
 			if strings.TrimSpace(message.ToolCallID) == "" {
 				return nil, errors.New("tool 消息缺少 tool_call_id")
 			}
-			output, err := contentAsText(message.Content)
+			output, err := convertChatToolOutput(message.Content)
 			if err != nil {
 				return nil, err
 			}
@@ -122,11 +166,11 @@ func convertChatContent(raw json.RawMessage) (any, error) {
 			}
 			result = append(result, map[string]any{"type": "input_text", "text": value})
 		case "image_url", "input_image":
-			imageURL, err := parseImageURL(part)
+			image, err := convertChatImagePart(part)
 			if err != nil {
 				return nil, err
 			}
-			result = append(result, map[string]any{"type": "input_image", "image_url": imageURL})
+			result = append(result, image)
 		default:
 			return nil, fmt.Errorf("不支持 content.type=%q", typeName)
 		}
@@ -134,19 +178,60 @@ func convertChatContent(raw json.RawMessage) (any, error) {
 	return result, nil
 }
 
-func parseImageURL(part map[string]json.RawMessage) (string, error) {
+func convertChatToolOutput(raw json.RawMessage) (any, error) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text, nil
+	}
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil {
+		return contentAsText(raw)
+	}
+	hasImage := false
+	for _, part := range parts {
+		var typeName string
+		_ = json.Unmarshal(part["type"], &typeName)
+		if typeName == "image_url" || typeName == "input_image" {
+			hasImage = true
+			break
+		}
+	}
+	if !hasImage {
+		return contentAsText(raw)
+	}
+	return convertChatContent(raw)
+}
+
+func convertChatImagePart(part map[string]json.RawMessage) (map[string]any, error) {
+	imageURL, detail, err := parseImageURL(part)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"type": "input_image", "detail": detail, "image_url": imageURL}, nil
+}
+
+func parseImageURL(part map[string]json.RawMessage) (string, string, error) {
 	raw := firstJSON(part["image_url"], part["url"])
+	detail := "auto"
+	var directDetail string
+	if json.Unmarshal(part["detail"], &directDetail) == nil && strings.TrimSpace(directDetail) != "" {
+		detail = strings.TrimSpace(directDetail)
+	}
 	var value string
 	if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != "" {
-		return value, nil
+		return value, detail, nil
 	}
 	var nested struct {
-		URL string `json:"url"`
+		URL    string `json:"url"`
+		Detail string `json:"detail"`
 	}
 	if json.Unmarshal(raw, &nested) == nil && strings.TrimSpace(nested.URL) != "" {
-		return nested.URL, nil
+		if strings.TrimSpace(nested.Detail) != "" {
+			detail = strings.TrimSpace(nested.Detail)
+		}
+		return nested.URL, detail, nil
 	}
-	return "", errors.New("image_url 缺少有效 url")
+	return "", "", errors.New("image_url 缺少有效 url")
 }
 
 func convertAssistantToolCalls(raw json.RawMessage) ([]any, error) {
@@ -163,10 +248,14 @@ func convertAssistantToolCalls(raw json.RawMessage) ([]any, error) {
 	}
 	result := make([]any, 0, len(calls))
 	for _, call := range calls {
-		if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Function.Name) == "" || !json.Valid([]byte(call.Function.Arguments)) {
-			return nil, errors.New("assistant.tool_calls 缺少有效 id、name 或 arguments")
+		if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Function.Name) == "" {
+			return nil, errors.New("assistant.tool_calls 缺少有效 id 或 name")
 		}
-		result = append(result, map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
+		arguments := call.Function.Arguments
+		if arguments == "" {
+			arguments = "{}"
+		}
+		result = append(result, map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": arguments})
 	}
 	return result, nil
 }
@@ -183,7 +272,21 @@ func convertChatTools(raw json.RawMessage) ([]any, error) {
 		if typeName != "function" {
 			var value any
 			_ = json.Unmarshal(mustJSON(tool), &value)
-			result = append(result, value)
+			object, _ := value.(map[string]any)
+			switch typeName {
+			case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
+				converted := map[string]any{"type": "web_search"}
+				if filters, ok := object["filters"].(map[string]any); ok {
+					if domains, exists := filters["allowed_domains"]; exists {
+						converted["filters"] = map[string]any{"allowed_domains": domains}
+					}
+				} else if domains, exists := object["allowed_domains"]; exists {
+					converted["filters"] = map[string]any{"allowed_domains": domains}
+				}
+				result = append(result, converted)
+			default:
+				result = append(result, value)
+			}
 			continue
 		}
 		var function map[string]any
@@ -194,6 +297,16 @@ func convertChatTools(raw json.RawMessage) ([]any, error) {
 		result = append(result, function)
 	}
 	return result, nil
+}
+
+func containsToolType(tools []any, kind string) bool {
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if ok && tool["type"] == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func convertChatToolChoice(raw json.RawMessage) (json.RawMessage, error) {

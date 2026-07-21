@@ -2,10 +2,17 @@ package repository
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 )
+
+// AccountConcurrencyKey 返回账号推理租约使用的统一运行态键。
+// 账号维护任务必须复用该键判断是否仍有请求占用，避免复制协议字符串后发生漂移。
+func AccountConcurrencyKey(accountID uint64) string {
+	return "account:" + strconv.FormatUint(accountID, 10)
+}
 
 // RateLimiter 定义客户端 RPM 限制边界。
 type RateLimiter interface {
@@ -23,11 +30,22 @@ type ConcurrencySnapshotReader interface {
 	CurrentMany(ctx context.Context, keys []string) (map[string]int, error)
 }
 
-// StickySessionRepository 定义有过期时间的 prompt_cache_key 账号粘滞状态。
+// StickySessionRepository 定义有过期时间的会话账号粘滞状态。
 type StickySessionRepository interface {
-	Get(ctx context.Context, promptCacheKey string, now time.Time) (uint64, bool, error)
-	Set(ctx context.Context, promptCacheKey string, accountID uint64, expiresAt time.Time) error
+	Get(ctx context.Context, affinityKey string, now time.Time) (uint64, bool, error)
+	// Bind 原子保留已有有效绑定并刷新有效期；仅在绑定不存在或已过期时采用 proposedAccountID。
+	Bind(ctx context.Context, affinityKey string, proposedAccountID uint64, now, expiresAt time.Time) (accountID uint64, err error)
+	// Set 强制替换绑定，仅用于原账号已经确定不再适合当前请求时重新绑定。
+	Set(ctx context.Context, affinityKey string, accountID uint64, expiresAt time.Time) error
 	DeleteByAccount(ctx context.Context, accountID uint64) error
+}
+
+// ReasoningReplayRepository 保存无状态多轮所需的上一轮可回放 output items。
+// key 边界为 model + sessionKey；sessionKey 应使用已隔离的 PromptCacheKey。
+type ReasoningReplayRepository interface {
+	Get(ctx context.Context, model, sessionKey string, now time.Time, ttl time.Duration) (items [][]byte, ok bool, err error)
+	Set(ctx context.Context, model, sessionKey string, items [][]byte, expiresAt time.Time) error
+	Delete(ctx context.Context, model, sessionKey string) error
 }
 
 // DeviceSessionRepository 定义短期 Device OAuth 会话状态。

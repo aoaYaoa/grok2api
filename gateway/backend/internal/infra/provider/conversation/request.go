@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	OperationResponses = "responses"
-	OperationChat      = "chat"
-	OperationMessages  = "messages"
+	OperationResponses  = "responses"
+	OperationCompaction = "compaction"
+	OperationChat       = "chat"
+	OperationMessages   = "messages"
 )
 
 // ConvertRequest 将下游对话协议转换为 Responses 请求，作为 Provider 的统一上游协议。
@@ -23,8 +24,7 @@ func ConvertRequest(body []byte, model, operation string) ([]byte, error) {
 func ConvertRequestWithOptions(body []byte, model, operation string) ([]byte, ResponseOptions, error) {
 	switch operation {
 	case OperationChat:
-		converted, err := convertChatRequest(body, model)
-		return converted, ResponseOptions{}, err
+		return convertChatRequest(body, model)
 	case OperationMessages:
 		return convertMessagesRequest(body, model)
 	default:

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 )
 
@@ -28,6 +29,8 @@ type Trace struct {
 type traceContextKey struct{}
 type accountContextKey struct{}
 
+// WithAccount 将稳定的 Provider 账号身份传递到出口层。该值只用于渲染
+// Resin 等粘性代理的认证用户名，不会写入上游 Header 或审计。
 func WithAccount(ctx context.Context, provider string, accountID uint64) context.Context {
 	if ctx == nil || strings.TrimSpace(provider) == "" || accountID == 0 {
 		return ctx
@@ -35,6 +38,24 @@ func WithAccount(ctx context.Context, provider string, accountID uint64) context
 	return WithAccountIdentity(ctx, strings.TrimSpace(provider)+"_"+fmt.Sprintf("%d", accountID))
 }
 
+// WithCredential 将弱关联账号的稳定出口身份传给 Build 传输；未关联账号保持原有 Provider+ID 身份。
+func WithCredential(ctx context.Context, credential accountdomain.Credential) context.Context {
+	identity := strings.TrimSpace(credential.EgressIdentity)
+	if identity == "" {
+		provider := credential.Provider
+		if provider == "" {
+			provider = accountdomain.ProviderBuild
+		}
+		return WithAccount(ctx, string(provider), credential.ID)
+	}
+	return WithAccountIdentity(ctx, identity)
+}
+
+// WithAccountIdentity attaches the stable, non-sensitive identity used by
+// account-bound proxy templates such as Resin.  Providers that represent the
+// same upstream login (for example Web and Console sharing one SSO token) can
+// deliberately pass the same identity so their proxy and clearance lease is
+// not split by the internal provider name.
 func WithAccountIdentity(ctx context.Context, identity string) context.Context {
 	if ctx == nil || strings.TrimSpace(identity) == "" {
 		return ctx
@@ -42,13 +63,17 @@ func WithAccountIdentity(ctx context.Context, identity string) context.Context {
 	return context.WithValue(ctx, accountContextKey{}, strings.TrimSpace(identity))
 }
 
-func AccountFromContext(ctx context.Context) string {
+func accountFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
 	value, _ := ctx.Value(accountContextKey{}).(string)
 	return strings.TrimSpace(value)
 }
+
+// AccountFromContext exposes the non-sensitive sticky account identity to
+// provider transports while keeping the context key private.
+func AccountFromContext(ctx context.Context) string { return accountFromContext(ctx) }
 
 // WithTrace 为一次网关请求创建或复用并发安全的出口选择轨迹。
 func WithTrace(ctx context.Context) (context.Context, *Trace) {

@@ -19,16 +19,16 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
-type videoUpstreamError struct {
+type webMediaUpstreamError struct {
 	status int
 	body   string
 }
 
-func (e *videoUpstreamError) Error() string {
-	return fmt.Sprintf("视频上游返回 %d: %s", e.status, e.body)
+func (e *webMediaUpstreamError) Error() string {
+	return fmt.Sprintf("Grok Web 媒体上游返回 %d: %s", e.status, e.body)
 }
 
-func (e *videoUpstreamError) HTTPStatusCode() int { return e.status }
+func (e *webMediaUpstreamError) HTTPStatusCode() int { return e.status }
 
 type videoMissingURLError struct {
 	kind     string
@@ -321,7 +321,7 @@ func parseVideoPostResult(statusCode int, body []byte) (provider.VideoResult, er
 		return provider.VideoResult{}, provider.ErrUnauthorized
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		return provider.VideoResult{}, &videoUpstreamError{status: statusCode, body: summarizeUploadResponse(body)}
+		return provider.VideoResult{}, &webMediaUpstreamError{status: statusCode, body: summarizeUploadResponse(body)}
 	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
@@ -560,6 +560,67 @@ func (a *Adapter) loadStoredVideoReference(ctx context.Context, assetID string, 
 	return provider.ImageInput{Filename: "image" + imageExtension(mimeType), MIMEType: mimeType, Data: raw}, nil
 }
 
+type videoContentReadCloser struct {
+	io.ReadCloser
+	release func()
+}
+
+func (c *videoContentReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	if c.release != nil {
+		c.release()
+		c.release = nil
+	}
+	return err
+}
+
+// DownloadVideo retrieves a completed Grok asset through its source SSO
+// session. Direct asset URLs are not public and must not be exposed as a
+// substitute for this authenticated transfer.
+func (a *Adapter) DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" || !trustedImageAssetHost(parsed.Hostname()) || parsed.User != nil {
+		return nil, "", 0, fmt.Errorf("视频内容 URL 不受信任")
+	}
+	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	// 视频生成与成品下载必须复用同一账号身份；否则 Resin 会为 WebAsset
+	// 重新分配租约，账号级 Cloudflare clearance 也不会进入下载请求。
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWebAsset, credential)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		lease.Release()
+		return nil, "", 0, err
+	}
+	request.Header = buildHeaders(token, lease, "")
+	request.Header.Del("Content-Type")
+	response, err := lease.Do(request)
+	if err != nil {
+		lease.Release()
+		return nil, "", 0, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_ = response.Body.Close()
+		lease.Release()
+		return nil, "", 0, fmt.Errorf("下载视频返回 %d", response.StatusCode)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = "video/mp4"
+	}
+	if !strings.HasPrefix(contentType, "video/") {
+		_ = response.Body.Close()
+		lease.Release()
+		return nil, "", 0, fmt.Errorf("上游视频 Content-Type 无效")
+	}
+	return &videoContentReadCloser{ReadCloser: response.Body, release: lease.Release}, contentType, response.ContentLength, nil
+}
+
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {
 	result, postIDs, err := parseVideoStreamCandidates(response, progress)
 	postID := ""
@@ -575,7 +636,7 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 		if response.StatusCode == http.StatusUnauthorized {
 			return provider.VideoResult{}, nil, provider.ErrUnauthorized
 		}
-		return provider.VideoResult{}, nil, &videoUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		return provider.VideoResult{}, nil, &webMediaUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
 	}
 	var result provider.VideoResult
 	var videoIDs []string
@@ -605,36 +666,40 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 		if errorValue, ok := root["error"].(map[string]any); ok {
 			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
 		}
+		if errorValue := nestedMap(root, "result", "response", "error"); errorValue != nil {
+			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
+		}
 		stream := nestedMap(root, "result", "response", "streamingVideoGenerationResponse")
-		if stream == nil {
-			return false, nil
-		}
-		addCandidate(&videoIDs, stream["videoId"])
-		addCandidate(&assetIDs, stream["assetId"])
-		addCandidate(&videoPostIDs, stream["videoPostId"])
-		moderated, _ := stream["moderated"].(bool)
-		if moderated {
-			return true, errVideoModerated
-		}
-		if value, _ := stream["thumbnailImageUrl"].(string); value != "" {
-			result.PosterURL = absoluteVideoAssetURL(value)
-		}
-		if value, _ := stream["videoUrl"].(string); value != "" {
-			result.URL = absoluteVideoAssetURL(value)
-			result.ContentType = "video/mp4"
-		}
-		if value, ok := numberAsInt(stream["progress"]); ok {
-			if value >= 100 && result.URL == "" {
-				pendingTerminalProgress = max(pendingTerminalProgress, value)
-			} else if progress != nil {
-				progress(value)
-				if value >= pendingTerminalProgress {
-					pendingTerminalProgress = 0
+		if stream != nil {
+			addCandidate(&videoIDs, stream["videoId"])
+			addCandidate(&assetIDs, stream["assetId"])
+			addCandidate(&videoPostIDs, stream["videoPostId"])
+			moderated, _ := stream["moderated"].(bool)
+			if moderated {
+				return true, errVideoModerated
+			}
+			if value, _ := stream["thumbnailImageUrl"].(string); value != "" {
+				result.PosterURL = absoluteVideoAssetURL(value)
+			}
+			setVideoResultURL(&result, firstString(stream, "videoUrl", "contentUrl", "contentURL", "assetUrl", "assetURL", "fileUri", "fileURL"))
+			if value, ok := numberAsInt(stream["progress"]); ok {
+				if value >= 100 && result.URL == "" {
+					pendingTerminalProgress = max(pendingTerminalProgress, value)
+				} else if progress != nil {
+					progress(value)
+					if value >= pendingTerminalProgress {
+						pendingTerminalProgress = 0
+					}
 				}
 			}
+			if result.URL != "" {
+				return true, nil
+			}
 		}
-		if result.URL != "" {
-			return true, nil
+		for _, attachment := range videoFileAttachments(root) {
+			if setVideoResultURL(&result, attachment) {
+				return true, nil
+			}
 		}
 		return false, nil
 	}
@@ -666,6 +731,35 @@ func absoluteVideoAssetURL(value string) string {
 		return value
 	}
 	return "https://assets.grok.com/" + strings.TrimPrefix(value, "/")
+}
+
+func videoFileAttachments(root map[string]any) []string {
+	modelResponse := nestedMap(root, "result", "response", "modelResponse")
+	if modelResponse == nil {
+		return nil
+	}
+	values, _ := modelResponse["fileAttachments"].([]any)
+	attachments := make([]string, 0, len(values))
+	for _, value := range values {
+		if attachment, _ := value.(string); attachment != "" {
+			attachments = append(attachments, attachment)
+		}
+	}
+	return attachments
+}
+
+func setVideoResultURL(result *provider.VideoResult, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	if !strings.HasSuffix(strings.SplitN(lower, "?", 2)[0], ".mp4") && !strings.Contains(lower, "/content") {
+		return false
+	}
+	result.URL = absoluteAssetURL(value)
+	result.ContentType = "video/mp4"
+	return true
 }
 
 func consumeVideoSSE(reader io.Reader, handle func(map[string]any) (bool, error)) error {

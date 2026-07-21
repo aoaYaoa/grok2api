@@ -1,4 +1,8 @@
 export async function copyToClipboard(text: string): Promise<boolean> {
+  // The async Clipboard API is only reliable in a secure context. Some
+  // browsers still expose navigator.clipboard over plain HTTP but reject the
+  // write asynchronously; waiting for that rejection consumes the transient
+  // user activation and makes the legacy fallback fail as well.
   if (globalThis.isSecureContext === true && navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);

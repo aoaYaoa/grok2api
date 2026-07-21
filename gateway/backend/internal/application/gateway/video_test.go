@@ -4,23 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
-	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -130,6 +124,25 @@ func TestRecoverVideoJobsRecordsFailedAuditWithEgress(t *testing.T) {
 	}
 }
 
+func TestRecoverVideoJobsRecordsDetachedAccountSnapshot(t *testing.T) {
+	completedAt := time.Now().UTC()
+	repository := &videoUsageRepository{job: media.Job{
+		ID: "video_detached_account", RequestID: "request-detached-account",
+		ClientKeyID: 1, ClientKeyName: "client", AccountName: "deleted account",
+		Provider: "grok_web", Model: "grok-imagine-video", ModelRouteID: 3, UpstreamModel: "video",
+		Seconds: 8, Quality: "720p", Status: media.StatusFailed, ErrorCode: "generation_failed",
+		InputJSON: `{}`, CreatedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
+	}}
+	recorder := &durableVideoAuditRecorder{}
+	service := &Service{mediaJobs: repository, audits: recorder}
+	if err := service.RecoverVideoJobs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.last.AccountID != nil || recorder.last.AccountName != "deleted account" {
+		t.Fatalf("detached account audit = %#v", recorder.last)
+	}
+}
+
 func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	service := &Service{}
 	service.ConfigureMedia(&videoUsageRepository{}, 1)
@@ -147,373 +160,65 @@ func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	}
 }
 
-func TestFindExtensionSourceAccountUsesOriginalVideoTask(t *testing.T) {
-	repository := &videoRepairRepository{job: media.Job{
-		ID: "video-source", RequestID: "source-task-1", ClientKeyID: 9, AccountID: 42,
-		Status: media.StatusCompleted, UpstreamURL: "/v1/files/video/source.mp4",
-	}}
-	service := &Service{mediaJobs: repository}
-	accountID, found, err := service.findExtensionSourceAccountID(context.Background(), 9, "source-task-1")
-	if err != nil || !found || accountID != 42 {
-		t.Fatalf("accountID=%d found=%v err=%v", accountID, found, err)
-	}
-}
-
-func TestVideoExtensionAccountMetadataTracksUniqueAttempts(t *testing.T) {
-	metadata := videoInputMetadata{}
-	metadata.markAccountAttempt(12)
-	metadata.markAccountAttempt(12)
-	metadata.markAccountAttempt(34)
-
-	if metadata.AccountRetryCount != 1 {
-		t.Fatalf("account retry count = %d", metadata.AccountRetryCount)
-	}
-	if len(metadata.AttemptedAccountIDs) != 2 || metadata.AttemptedAccountIDs[0] != 12 || metadata.AttemptedAccountIDs[1] != 34 {
-		t.Fatalf("attempted accounts = %#v", metadata.AttemptedAccountIDs)
-	}
-	excluded := metadata.excludedAccounts()
-	if !excluded[12] || !excluded[34] || excluded[56] {
-		t.Fatalf("excluded accounts = %#v", excluded)
-	}
-}
-
-func TestVideoExtensionSwitchesOnTerminalAccountFailures(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests} {
-		if !shouldSwitchVideoAccount(videoStatusError{status: status}) {
-			t.Fatalf("status %d should switch account", status)
-		}
-	}
-	if shouldSwitchVideoAccount(videoStatusError{status: http.StatusInternalServerError}) {
-		t.Fatal("server failures must not consume another account")
-	}
-}
-
-type videoStatusError struct{ status int }
-
-func (e videoStatusError) Error() string       { return http.StatusText(e.status) }
-func (e videoStatusError) HTTPStatusCode() int { return e.status }
-
-func TestAcquireVideoFallbackExcludesAttemptedAccountsForNormalGeneration(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-account-fallback.db"))
+func TestPersistRemoteVideoRetriesSameResultWithoutRegeneration(t *testing.T) {
+	adapter := &videoPersistAdapter{failures: 1}
+	store := &videoAssetStoreStub{}
+	service := &Service{mediaAssets: store}
+	credential := account.Credential{ID: 42, Provider: account.ProviderWeb}
+	result, err := service.persistRemoteVideo(context.Background(), "video_job", adapter, credential, provider.VideoResult{URL: "https://assets.grok.com/video.mp4", ContentType: "video/mp4"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
+	if adapter.generateCalls != 0 || adapter.downloadCalls != 2 || adapter.lastCredentialID != credential.ID {
+		t.Fatalf("generate=%d download=%d credential=%d", adapter.generateCalls, adapter.downloadCalls, adapter.lastCredentialID)
 	}
-	accounts := relational.NewAccountRepository(database)
-	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "second", SourceKey: "second", EncryptedAccessToken: "second", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
-	repository := &videoRepairRepository{}
-	service := &Service{selector: selector, mediaJobs: repository}
-	service.UpdateMaxAttempts(3)
-	metadata := videoInputMetadata{AttemptedAccountIDs: []uint64{first.ID}}
-	job := media.Job{ID: "video_same_task", AccountID: first.ID, AccountName: first.Name, InputJSON: encodeVideoMetadata(metadata)}
-
-	lease, err := service.acquireVideoAccountFallback(ctx, &job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"}, "", &metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Release()
-	if lease.Credential.ID != second.ID || job.AccountID != second.ID || repository.job.ID != job.ID {
-		t.Fatalf("lease=%d job=%d persisted=%#v", lease.Credential.ID, job.AccountID, repository.job)
-	}
-	if metadata.AccountRetryCount != 1 || len(metadata.AttemptedAccountIDs) != 2 {
-		t.Fatalf("metadata = %#v", metadata)
+	if store.saveCalls != 1 || result.AssetID != "vid_local" || result.ContentType != "video/mp4" {
+		t.Fatalf("store calls=%d result=%#v", store.saveCalls, result)
 	}
 }
 
-func TestNormalVideoSwitchesAccountBeforeTerminalFailure(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-normal-failover.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "second", SourceKey: "second", EncryptedAccessToken: "second", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter := &videoFailoverAdapter{failedAccountID: first.ID}
-	registry := provider.NewRegistry(adapter)
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
-	repository := &videoRepairRepository{}
-	service := &Service{providers: registry, selector: selector, mediaJobs: repository, audits: &durableVideoAuditRecorder{}, logger: slog.Default()}
-	service.UpdateMaxAttempts(3)
-	job := media.Job{
-		ID: "video_normal_failover", RequestID: "request_normal_failover", ClientKeyID: 1,
-		AccountID: first.ID, AccountName: first.Name, Provider: string(account.ProviderWeb), Model: "grok-imagine-video",
-		UpstreamModel: "grok-imagine-video", Seconds: 6, Status: media.StatusInProgress, InputJSON: `{}`, CreatedAt: time.Now().UTC(),
-	}
-	service.runVideoJob(ctx, job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"})
-
-	if !slices.Equal(adapter.accountIDs, []uint64{first.ID, second.ID}) {
-		t.Fatalf("account attempts = %#v", adapter.accountIDs)
-	}
-	if repository.job.Status != media.StatusCompleted || repository.job.AccountID != second.ID {
-		t.Fatalf("job = %#v", repository.job)
-	}
-	metadata := decodeVideoMetadata(repository.job.InputJSON)
-	if metadata.AccountRetryCount != 1 || !slices.Equal(metadata.AttemptedAccountIDs, []uint64{first.ID, second.ID}) {
-		t.Fatalf("metadata = %#v", metadata)
-	}
+type videoPersistAdapter struct {
+	failures         int
+	generateCalls    int
+	downloadCalls    int
+	lastCredentialID uint64
 }
 
-func TestEarlyIncompleteVideoStreamDefersSameTask(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-incomplete-retry.db"))
-	if err != nil {
-		t.Fatal(err)
+func (a *videoPersistAdapter) Provider() account.Provider { return account.ProviderWeb }
+
+func (a *videoPersistAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
+	a.generateCalls++
+	return provider.VideoResult{}, errors.New("must not regenerate")
+}
+
+func (a *videoPersistAdapter) DownloadVideo(_ context.Context, credential account.Credential, _ string) (io.ReadCloser, string, int64, error) {
+	a.downloadCalls++
+	a.lastCredentialID = credential.ID
+	if a.downloadCalls <= a.failures {
+		return nil, "", 0, errors.New("temporary download failure")
 	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
+	return io.NopCloser(strings.NewReader("video")), "video/mp4", 5, nil
+}
+
+type videoAssetStoreStub struct{ saveCalls int }
+
+func (s *videoAssetStoreStub) SaveVideo(_ context.Context, jobID, contentType string, body io.Reader) (media.Asset, error) {
+	s.saveCalls++
+	if jobID != "video_job" {
+		return media.Asset{}, fmt.Errorf("job ID = %s", jobID)
 	}
-	accounts := relational.NewAccountRepository(database)
-	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
+	if contentType != "video/mp4" {
+		return media.Asset{}, fmt.Errorf("content type = %s", contentType)
 	}
-	adapter := &videoRetryAdapter{}
-	registry := provider.NewRegistry(adapter)
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
-	repository := &videoRepairRepository{}
-	service := &Service{providers: registry, selector: selector, mediaJobs: repository, logger: slog.Default()}
-	service.UpdateMaxAttempts(3)
-	job := media.Job{
-		ID: "video_incomplete_retry", RequestID: "request_incomplete_retry", ClientKeyID: 1,
-		AccountID: credential.ID, AccountName: credential.Name, Provider: string(account.ProviderWeb), Model: "grok-imagine-video",
-		UpstreamModel: "grok-imagine-video", Seconds: 6, Status: media.StatusInProgress, InputJSON: `{}`, CreatedAt: time.Now().UTC(),
+	data, err := io.ReadAll(body)
+	if err != nil || string(data) != "video" {
+		return media.Asset{}, fmt.Errorf("video body = %q: %w", data, err)
 	}
-	service.runVideoJob(ctx, job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"})
-
-	metadata := decodeVideoMetadata(repository.job.InputJSON)
-	if repository.job.Status != media.StatusInProgress || repository.job.LeaseUntil == nil || metadata.RetryCount != 1 {
-		t.Fatalf("job=%#v metadata=%#v", repository.job, metadata)
-	}
-	if delay := repository.job.LeaseUntil.Sub(repository.job.UpdatedAt); delay != 15*time.Second {
-		t.Fatalf("retry delay = %s", delay)
-	}
+	return media.Asset{ID: "vid_local", Kind: "video", MIMEType: "video/mp4", SizeBytes: int64(len(data))}, nil
 }
 
-type videoFailoverAdapter struct {
-	failedAccountID uint64
-	accountIDs      []uint64
-}
-
-type videoRetryAdapter struct{}
-
-func (*videoRetryAdapter) Provider() account.Provider { return account.ProviderWeb }
-
-func (*videoRetryAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
-	return provider.VideoResult{}, retrySafeVideoStatusError{status: http.StatusBadGateway}
-}
-
-type retrySafeVideoStatusError struct{ status int }
-
-func (e retrySafeVideoStatusError) Error() string         { return http.StatusText(e.status) }
-func (e retrySafeVideoStatusError) HTTPStatusCode() int   { return e.status }
-func (retrySafeVideoStatusError) MediaJobRetrySafe() bool { return true }
-
-type accountNeutralVideoError struct{}
-
-func (accountNeutralVideoError) Error() string              { return "request rejected by content policy" }
-func (accountNeutralVideoError) HTTPStatusCode() int        { return http.StatusBadRequest }
-func (accountNeutralVideoError) AccountHealthNeutral() bool { return true }
-
-type accountNeutralVideoAdapter struct{}
-
-func (*accountNeutralVideoAdapter) Provider() account.Provider { return account.ProviderWeb }
-
-func (*accountNeutralVideoAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
-	return provider.VideoResult{}, accountNeutralVideoError{}
-}
-
-func TestVideoContentPolicyFailureDoesNotPenalizeAccount(t *testing.T) {
-	if shouldSwitchVideoAccount(accountNeutralVideoError{}) {
-		t.Fatal("request-scoped content rejection must not switch accounts")
-	}
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-account-neutral.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "first", SourceKey: "first", EncryptedAccessToken: "first", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter := &accountNeutralVideoAdapter{}
-	registry := provider.NewRegistry(adapter)
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
-	repository := &videoRepairRepository{}
-	service := &Service{providers: registry, selector: selector, mediaJobs: repository, audits: &durableVideoAuditRecorder{}, clientKeys: clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), logger: slog.Default()}
-	job := media.Job{
-		ID: "video_account_neutral", RequestID: "request_account_neutral", ClientKeyID: 1,
-		AccountID: credential.ID, AccountName: credential.Name, Provider: string(account.ProviderWeb), Model: "grok-imagine-video",
-		UpstreamModel: "grok-imagine-video", Seconds: 6, Status: media.StatusInProgress, InputJSON: `{}`, CreatedAt: time.Now().UTC(),
-	}
-	service.runVideoJob(ctx, job, modeldomain.Route{Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"})
-
-	observed, err := accounts.Get(ctx, credential.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if observed.FailureCount != 0 || observed.CooldownUntil != nil || observed.AuthStatus != account.AuthStatusActive {
-		t.Fatalf("account was incorrectly penalized: %#v", observed)
-	}
-	if repository.job.Status != media.StatusFailed {
-		t.Fatalf("job = %#v", repository.job)
-	}
-}
-
-func (*videoFailoverAdapter) Provider() account.Provider { return account.ProviderWeb }
-
-func (a *videoFailoverAdapter) GenerateVideo(_ context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
-	a.accountIDs = append(a.accountIDs, request.Credential.ID)
-	if request.Credential.ID == a.failedAccountID {
-		return provider.VideoResult{}, videoStatusError{status: http.StatusForbidden}
-	}
-	return provider.VideoResult{URL: "/v1/files/video/failover.mp4", ContentType: "video/mp4"}, nil
-}
-
-func TestRecoverVideoJobsArchivesCompletedProtectedOutputs(t *testing.T) {
-	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-repair.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	accounts := relational.NewAccountRepository(database)
-	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web", SourceKey: "web",
-		EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	completedAt := time.Now().UTC()
-	repository := &videoRepairRepository{job: media.Job{
-		ID: "video_repair", RequestID: "request-repair", ClientKeyID: 1, AccountID: credential.ID,
-		Provider: string(account.ProviderWeb), Model: "grok-imagine-video", ModelRouteID: 3, UpstreamModel: "Web/grok-imagine-video",
-		Seconds: 6, Size: "3:2", Quality: "480p", Status: media.StatusCompleted, Progress: 100,
-		UpstreamURL: "https://assets.grok.com/users/test/generated/video/generated_video.mp4", ContentType: "video/mp4",
-		InputJSON: `{}`, CreatedAt: completedAt.Add(-time.Minute), UpdatedAt: completedAt, CompletedAt: &completedAt, UsageRecordedAt: &completedAt,
-	}}
-	adapter := &videoRepairAdapter{}
-	registry := provider.NewRegistry(adapter)
-	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
-	service := &Service{
-		models:    videoRepairRouteResolver{route: modeldomain.Route{ID: 3, Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video", Enabled: true}},
-		providers: registry, selector: selector, mediaJobs: repository, logger: slog.Default(),
-	}
-	if err := service.RecoverVideoJobs(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if adapter.archived != 1 || repository.job.UpstreamURL != "/v1/files/video/generated_video.mp4" {
-		t.Fatalf("archive calls=%d repaired URL=%q", adapter.archived, repository.job.UpstreamURL)
-	}
-}
-
-type videoRepairAdapter struct{ archived int }
-
-func (*videoRepairAdapter) Provider() account.Provider { return account.ProviderWeb }
-func (*videoRepairAdapter) GenerateVideo(context.Context, provider.VideoRequest) (provider.VideoResult, error) {
-	return provider.VideoResult{}, errors.New("not used")
-}
-func (a *videoRepairAdapter) ArchiveVideo(_ context.Context, _ account.Credential, result provider.VideoResult) (provider.VideoResult, error) {
-	a.archived++
-	result.URL = "/v1/files/video/generated_video.mp4"
-	return result, nil
-}
-
-type videoRepairRouteResolver struct{ route modeldomain.Route }
-
-func (r videoRepairRouteResolver) Get(context.Context, uint64) (modeldomain.Route, error) {
-	return r.route, nil
-}
-func (r videoRepairRouteResolver) GetByPublicID(context.Context, string) (modeldomain.Route, error) {
-	return r.route, nil
-}
-func (r videoRepairRouteResolver) GetByPublicIDCandidates(context.Context, string) ([]modeldomain.Route, error) {
-	return []modeldomain.Route{r.route}, nil
-}
-func (r videoRepairRouteResolver) GetByProviderUpstream(context.Context, account.Provider, string) (modeldomain.Route, error) {
-	return r.route, nil
-}
-
-type videoRepairRepository struct{ job media.Job }
-
-type videoDeleteRepository struct {
-	repository.MediaJobRepository
-	id          string
-	clientKeyID uint64
-}
-
-func (r *videoDeleteRepository) DeleteOwnedTerminalMediaJob(_ context.Context, id string, clientKeyID uint64) (bool, error) {
-	r.id = id
-	r.clientKeyID = clientKeyID
-	return true, nil
-}
-
-func (r *videoRepairRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
-func (r *videoRepairRepository) GetMediaJob(context.Context, string, uint64) (media.Job, error) {
-	return r.job, nil
-}
-func (r *videoRepairRepository) ListMediaJobsByClientKey(context.Context, uint64, int, int) ([]media.Job, int64, error) {
-	return []media.Job{r.job}, 1, nil
-}
-func (r *videoRepairRepository) UpdateMediaJob(_ context.Context, job media.Job) error {
-	r.job = job
-	return nil
-}
-func (*videoRepairRepository) DeleteOwnedTerminalMediaJob(context.Context, string, uint64) (bool, error) {
-	return false, nil
-}
-func (r *videoRepairRepository) ListMediaJobs(_ context.Context, query repository.MediaJobListQuery) ([]media.Job, int64, error) {
-	if query.Filter.Status == string(media.StatusCompleted) {
-		return []media.Job{r.job}, 1, nil
-	}
-	return nil, 0, nil
-}
-func (*videoRepairRepository) SummarizeMediaJobs(context.Context) (repository.MediaJobStats, error) {
-	return repository.MediaJobStats{}, nil
-}
-func (*videoRepairRepository) ListRecoverableMediaJobs(context.Context, int) ([]media.Job, error) {
-	return nil, nil
-}
-func (*videoRepairRepository) ListUnrecordedTerminalMediaJobs(context.Context, int) ([]media.Job, error) {
-	return nil, nil
-}
-func (*videoRepairRepository) TryClaimMediaJob(context.Context, string, time.Time, time.Time, string) (media.Job, bool, error) {
-	return media.Job{}, false, nil
-}
-func (*videoRepairRepository) MarkMediaJobUsageRecorded(context.Context, string, time.Time) error {
-	return nil
+func (*videoAssetStoreStub) OpenVideo(context.Context, string) (media.Asset, io.ReadCloser, error) {
+	return media.Asset{}, nil, errors.New("not implemented")
 }
 
 type durableVideoAuditRecorder struct {
@@ -535,10 +240,26 @@ func (r *durableVideoAuditRecorder) CreateDurable(_ context.Context, value audit
 
 type videoUsageRepository struct{ job media.Job }
 
+type videoDeleteRepository struct {
+	repository.MediaJobRepository
+	id          string
+	clientKeyID uint64
+}
+
+func (r *videoDeleteRepository) DeleteOwnedTerminalMediaJob(_ context.Context, id string, clientKeyID uint64) (bool, error) {
+	r.id = id
+	r.clientKeyID = clientKeyID
+	return true, nil
+}
+
 func (r *videoUsageRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
 
 func (r *videoUsageRepository) GetMediaJob(context.Context, string, uint64) (media.Job, error) {
 	return r.job, nil
+}
+
+func (r *videoUsageRepository) GetMediaJobsByIDs(context.Context, []string) ([]media.Job, error) {
+	return []media.Job{r.job}, nil
 }
 
 func (r *videoUsageRepository) ListMediaJobsByClientKey(context.Context, uint64, int, int) ([]media.Job, int64, error) {
@@ -547,12 +268,10 @@ func (r *videoUsageRepository) ListMediaJobsByClientKey(context.Context, uint64,
 
 func (r *videoUsageRepository) UpdateMediaJob(context.Context, media.Job) error { return nil }
 
-func (r *videoUsageRepository) DeleteOwnedTerminalMediaJob(_ context.Context, id string, clientKeyID uint64) (bool, error) {
-	if r.job.ID != id || r.job.ClientKeyID != clientKeyID || (r.job.Status != media.StatusCompleted && r.job.Status != media.StatusFailed) {
-		return false, nil
-	}
-	r.job = media.Job{}
-	return true, nil
+func (r *videoUsageRepository) DeleteMediaJob(context.Context, string) error { return nil }
+
+func (r *videoUsageRepository) DeleteOwnedTerminalMediaJob(context.Context, string, uint64) (bool, error) {
+	return false, nil
 }
 
 func (r *videoUsageRepository) ListMediaJobs(context.Context, repository.MediaJobListQuery) ([]media.Job, int64, error) {

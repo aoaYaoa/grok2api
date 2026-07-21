@@ -44,6 +44,52 @@ func TestStickyLeaseRetriesSafeProxyConnectFailure(t *testing.T) {
 	}
 }
 
+func TestStickyLeaseRetriesExplicitResinConnectResponse(t *testing.T) {
+	client := &scriptedRequestClient{do: func(call int, _ *http.Request) (*http.Response, error) {
+		if call == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Header:     http.Header{"X-Resin-Error": []string{"UPSTREAM_CONNECT_FAILED"}},
+				Body:       io.NopCloser(strings.NewReader("connect failed")),
+			}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	}}
+	lease := &Lease{client: client, sticky: true}
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := lease.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK || client.calls != 2 {
+		t.Fatalf("response=%#v calls=%d err=%v", response, client.calls, err)
+	}
+}
+
+func TestStickyLeaseDoesNotRetryUnsafeUpstreamOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response *http.Response
+	}{
+		{name: "unauthorized", response: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: http.NoBody}},
+		{name: "rate limited", response: &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: http.NoBody}},
+		{name: "request may have reached upstream", response: &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{"X-Resin-Error": []string{"UPSTREAM_REQUEST_FAILED"}}, Body: http.NoBody}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &scriptedRequestClient{do: func(int, *http.Request) (*http.Response, error) { return test.response, nil }}
+			lease := &Lease{client: client, sticky: true}
+			request, err := http.NewRequest(http.MethodPost, "https://example.com/generate", bytes.NewReader([]byte("payload")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := lease.Do(request)
+			if err != nil || response != test.response || client.calls != 1 {
+				t.Fatalf("response=%#v calls=%d err=%v", response, client.calls, err)
+			}
+		})
+	}
+}
+
 func TestStickyLeaseDoesNotRetryAfterRequestWasWritten(t *testing.T) {
 	client := &scriptedRequestClient{do: func(_ int, request *http.Request) (*http.Response, error) {
 		trace := httptrace.ContextClientTrace(request.Context())

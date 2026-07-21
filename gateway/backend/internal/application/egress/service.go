@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("代理节点参数无效")
-	ErrInvalidSort  = errors.New("代理节点排序条件无效")
-	ErrNotFound     = errors.New("代理节点不存在")
+	ErrInvalidInput         = errors.New("代理节点参数无效")
+	ErrInvalidSort          = errors.New("代理节点排序条件无效")
+	ErrNotFound             = errors.New("代理节点不存在")
+	ErrClearanceUnavailable = errors.New("Clearance 刷新不可用")
 )
 
 const (
@@ -41,27 +42,37 @@ type Service struct {
 	repository repository.EgressRepository
 	cipher     *security.Cipher
 	mu         sync.RWMutex
-	webUA      string
-	consoleUA  string
+	browserUA  string
+	clearance  ClearanceManager
 }
 
-func NewService(repository repository.EgressRepository, cipher *security.Cipher, webUA, consoleUA string) *Service {
-	return &Service{repository: repository, cipher: cipher, webUA: strings.TrimSpace(webUA), consoleUA: strings.TrimSpace(consoleUA)}
+type ClearanceManager interface {
+	RefreshClearance(context.Context, uint64) error
+	ForgetClearance(uint64)
 }
 
-func (s *Service) UpdateDefaults(webUA, consoleUA string) {
+func NewService(repository repository.EgressRepository, cipher *security.Cipher, browserUA string) *Service {
+	return &Service{repository: repository, cipher: cipher, browserUA: strings.TrimSpace(browserUA)}
+}
+
+func (s *Service) UpdateDefaults(browserUA string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.webUA = strings.TrimSpace(webUA)
-	s.consoleUA = strings.TrimSpace(consoleUA)
+	s.browserUA = strings.TrimSpace(browserUA)
+}
+
+func (s *Service) SetClearanceManager(value ClearanceManager) {
+	s.mu.Lock()
+	s.clearance = value
+	s.mu.Unlock()
 }
 
 func (s *Service) DefaultUserAgents() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return map[string]string{
-		string(domain.ScopeBuild): "", string(domain.ScopeWeb): s.webUA, string(domain.ScopeConsole): s.consoleUA,
-		string(domain.ScopeWebAsset): s.webUA,
+		string(domain.ScopeBuild): "", string(domain.ScopeWeb): s.browserUA, string(domain.ScopeConsole): s.browserUA,
+		string(domain.ScopeWebAsset): s.browserUA,
 	}
 }
 
@@ -75,7 +86,7 @@ func (s *Service) List(ctx context.Context, scope domain.Scope, sort repository.
 	}
 	result := make([]domain.PublicNode, 0, len(values))
 	for _, value := range values {
-		result = append(result, publicNode(value))
+		result = append(result, s.publicNode(value))
 	}
 	return result, nil
 }
@@ -86,7 +97,10 @@ func (s *Service) Create(ctx context.Context, input Input) (domain.PublicNode, e
 		return domain.PublicNode{}, err
 	}
 	created, err := s.repository.CreateEgressNode(ctx, value)
-	return publicNode(created), err
+	if err == nil {
+		s.forgetClearance(created.ID)
+	}
+	return s.publicNode(created), err
 }
 
 func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.PublicNode, error) {
@@ -102,7 +116,10 @@ func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.Pu
 		return domain.PublicNode{}, err
 	}
 	updated, err := s.repository.UpdateEgressNode(ctx, value)
-	return publicNode(updated), err
+	if err == nil {
+		s.forgetClearance(updated.ID)
+	}
+	return s.publicNode(updated), err
 }
 
 func (s *Service) Delete(ctx context.Context, id uint64) error {
@@ -110,7 +127,34 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 	if errors.Is(err, repository.ErrNotFound) {
 		return ErrNotFound
 	}
+	if err == nil {
+		s.forgetClearance(id)
+	}
 	return err
+}
+
+func (s *Service) RefreshClearance(ctx context.Context, id uint64) error {
+	if _, err := s.repository.GetEgressNode(ctx, id); errors.Is(err, repository.ErrNotFound) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	manager := s.clearance
+	s.mu.RUnlock()
+	if manager == nil {
+		return ErrClearanceUnavailable
+	}
+	return manager.RefreshClearance(ctx, id)
+}
+
+func (s *Service) forgetClearance(id uint64) {
+	s.mu.RLock()
+	manager := s.clearance
+	s.mu.RUnlock()
+	if manager != nil {
+		manager.ForgetClearance(id)
+	}
 }
 
 func (s *Service) applyInput(value domain.Node, input Input, create bool) (domain.Node, error) {
@@ -130,7 +174,7 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	}
 	if input.Scope != domain.ScopeBuild && value.UserAgent == "" {
 		s.mu.RLock()
-		value.UserAgent = s.defaultUserAgent(input.Scope)
+		value.UserAgent = s.browserUA
 		s.mu.RUnlock()
 	}
 	if len(value.UserAgent) > 512 {
@@ -170,17 +214,15 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	if create {
 		value.Health = 1
 	}
+	// Any administrator edit invalidates freshness. Keep the binding fingerprint:
+	// managed mode may use the existing cookie as last-known-good only when the
+	// target and actual proxy still match the binding that produced it.
+	value.ClearanceRefreshedAt = nil
+	value.ClearanceFingerprint = ""
 	return value, nil
 }
 
-func (s *Service) defaultUserAgent(scope domain.Scope) string {
-	if scope == domain.ScopeConsole {
-		return s.consoleUA
-	}
-	return s.webUA
-}
-
-func publicNode(value domain.Node) domain.PublicNode {
+func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 	userAgent := value.UserAgent
 	if value.Scope == domain.ScopeBuild {
 		userAgent = ""
@@ -188,9 +230,18 @@ func publicNode(value domain.Node) domain.PublicNode {
 	return domain.PublicNode{
 		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled,
 		ProxyConfigured: value.EncryptedProxyURL != "", UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
-		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
+		AccountBoundProxy: s.accountBoundProxy(value),
+		Health:            value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+}
+
+func (s *Service) accountBoundProxy(value domain.Node) bool {
+	if s == nil || s.cipher == nil || strings.TrimSpace(value.EncryptedProxyURL) == "" {
+		return false
+	}
+	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
+	return err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder)
 }
 
 func NormalizeProxyURL(value string) (string, error) {

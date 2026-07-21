@@ -272,6 +272,7 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 		return account.QuotaWindow{}, fmt.Errorf("解析 Grok Web 周额度响应: %w", err)
 	}
 	var usagePercent float64
+	var usagePresent bool
 	var periodStart, periodEnd *time.Time
 	breakdown := make([]account.QuotaBreakdown, 0, 8)
 	for len(config) > 0 {
@@ -287,6 +288,7 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 				return account.QuotaWindow{}, fmt.Errorf("周额度使用率无效")
 			}
 			usagePercent = float64(math.Float32frombits(value))
+			usagePresent = true
 			config = config[consumed:]
 		case (number == 4 || number == 5) && fieldType == protowire.BytesType:
 			value, consumed := protowire.ConsumeBytes(config)
@@ -320,13 +322,17 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 			config = config[consumed:]
 		}
 	}
-	// proto3 omits scalar fields whose value is zero. A missing usage field therefore
-	// means 0% used, which the Grok app presents as 100% remaining.
-	if math.IsNaN(usagePercent) || math.IsInf(usagePercent, 0) || usagePercent < 0 || usagePercent > 100 {
+	if usagePresent && (math.IsNaN(usagePercent) || math.IsInf(usagePercent, 0) || usagePercent < 0 || usagePercent > 100) {
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 周额度响应缺少有效使用率")
 	}
 	if periodStart == nil || periodEnd == nil || !periodEnd.After(*periodStart) {
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 周额度响应缺少有效周期")
+	}
+	if !usagePresent && periodStart.Nanosecond() == 0 && periodEnd.Nanosecond() == 0 {
+		// Free accounts return a coarse entitlement period without a usage rate.
+		// A paid, unused weekly pool has the same rate omitted but retains its
+		// precise period boundaries, which represents zero percent used.
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web 周额度响应缺少有效使用率")
 	}
 	windowSeconds := int(periodEnd.Sub(*periodStart).Seconds())
 	if windowSeconds < 24*60*60 || windowSeconds > 31*24*60*60 {
@@ -341,20 +347,37 @@ func parseWeeklyCreditsResponse(body []byte, accountID uint64, syncedAt time.Tim
 }
 
 func firstGRPCWebMessage(body []byte) ([]byte, error) {
+	message, grpcStatus, err := parseGRPCWebFrames(body)
+	if err != nil {
+		return nil, err
+	}
+	if grpcStatus != "" && grpcStatus != "0" {
+		return nil, fmt.Errorf("Grok Web 周额度 gRPC 状态为 %s", grpcStatus)
+	}
+	if message == nil {
+		return nil, fmt.Errorf("Grok Web 周额度响应缺少消息帧")
+	}
+	return message, nil
+}
+
+func parseGRPCWebFrames(body []byte) ([]byte, string, error) {
 	var message []byte
 	grpcStatus := ""
-	for len(body) >= 5 {
+	for len(body) > 0 {
+		if len(body) < 5 {
+			return nil, "", fmt.Errorf("gRPC-Web 响应包含不完整帧头")
+		}
 		flag := body[0]
 		length := int(binary.BigEndian.Uint32(body[1:5]))
 		body = body[5:]
 		if length < 0 || length > len(body) {
-			return nil, fmt.Errorf("gRPC-Web 帧长度无效")
+			return nil, "", fmt.Errorf("gRPC-Web 帧长度无效")
 		}
 		payload := body[:length]
 		body = body[length:]
 		if flag&0x80 == 0 {
 			if flag != 0 {
-				return nil, fmt.Errorf("不支持压缩的 gRPC-Web 响应")
+				return nil, "", fmt.Errorf("不支持压缩的 gRPC-Web 响应")
 			}
 			if message == nil {
 				message = append([]byte(nil), payload...)
@@ -368,13 +391,7 @@ func firstGRPCWebMessage(body []byte) ([]byte, error) {
 			}
 		}
 	}
-	if grpcStatus != "" && grpcStatus != "0" {
-		return nil, fmt.Errorf("Grok Web 周额度 gRPC 状态为 %s", grpcStatus)
-	}
-	if message == nil {
-		return nil, fmt.Errorf("Grok Web 周额度响应缺少消息帧")
-	}
-	return message, nil
+	return message, grpcStatus, nil
 }
 
 func protobufMessageField(message []byte, target protowire.Number) ([]byte, error) {

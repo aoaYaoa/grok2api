@@ -1,16 +1,18 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `d3dc3d8f10570f57bdaa3774583a53d508a31435`
-- Imported: `2026-07-15`
+- Commit: `ca8b2474bf2ed1a0f96f22044cd3d8031a838e37`
+- Imported: `2026-07-21`
 
 ## Selected Updates
 
-The full vendored baseline above remains unchanged because this repository carries substantial Go and React compatibility work. The following reviewed fixes from upstream `v3.0.3` were applied individually on `2026-07-18`:
+The Go and React sources were three-way synchronized from the previous reviewed baseline `d3dc3d8f10570f57bdaa3774583a53d508a31435` to upstream `v3.0.6`. Local public workspaces, media caching, video extension, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
-- `4011a22` - Grok Build client baseline `0.2.102`.
-- `f15b735` - Chromium Client Hints for Grok Console requests, adapted to preserve configured and egress User-Agent precedence.
-- `73826a0` - Do not cool Grok Build egress nodes for normal Device OAuth HTTP 400 polling responses.
+- Grok Build client baseline `0.2.106` and provider fallback improvements.
+- Grok Console provider, account identity/settings synchronization, and updated model catalog support.
+- FlareSolverr-compatible egress support without enabling an additional production container by default.
+- Account auto-clean, media audits, prompt cache reliability, stream recovery, and unlimited client-key limit support.
+- Updated admin dashboard, media management, account tooling, and version update checks.
 
 ## Updating
 
@@ -35,4 +37,4 @@ git restore --source=HEAD -- gateway/UPSTREAM.md
 git add gateway/UPSTREAM.md
 ```
 
-Before committing the update, change both `Commit` above to the exact value of `UPSTREAM_COMMIT` and `Imported` to the import date, then stage those metadata changes in the same commit as the vendored tree. Reapply and review local patches after each import. Aside from this provenance file, local patches are limited to base-path routing, private account sync, config wiring, and tests; all other changes should be contributed upstream.
+Before committing the update, change `Commit` above to the exact value of `UPSTREAM_COMMIT` and `Imported` to the import date, then stage those metadata changes in the same commit as the vendored tree. Reapply and review the local public workspace, media, routing, and deployment compatibility patches after each import.

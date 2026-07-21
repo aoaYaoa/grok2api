@@ -40,15 +40,12 @@ export const settingsSchema = z.object({
   }),
   providerBuild: z.object({
     baseURL: z.url(),
+    fallbackBaseURL: z.url().refine((value) => value.startsWith("https://")),
     clientVersion: z.string().trim().min(1),
     clientIdentifier: z.string().trim().min(1),
-    tokenAuth: z.string().trim(),
+    tokenAuth: z.string().trim().min(1),
     tokenAuthConfigured: z.boolean(),
     userAgent: z.string().trim().min(1),
-  }).superRefine((value, context) => {
-    if (!value.tokenAuthConfigured && value.tokenAuth.length === 0) {
-      context.addIssue({ code: "custom", path: ["tokenAuth"], message: "required" });
-    }
   }),
   providerWeb: z.object({
     baseURL: z.url().refine((value) => value.startsWith("https://")),
@@ -56,6 +53,10 @@ export const settingsSchema = z.object({
     statsigManualValue: z.string().trim().max(4096),
     statsigManualConfigured: z.boolean(),
     statsigSignerURL: z.string().trim().max(2048),
+    clearanceMode: z.enum(["manual", "flaresolverr"]),
+    flareSolverrURL: z.string().trim().max(2048),
+    clearanceTimeout: durationSchema.refine((value) => durationSeconds(value) >= 10 && durationSeconds(value) <= 300),
+    clearanceRefresh: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 86_400),
     quotaTimeout: durationSchema, chatTimeout: durationSchema, imageTimeout: durationSchema, videoTimeout: durationSchema,
     mediaConcurrency: positiveInteger.max(64), allowNSFW: z.boolean(),
     recoveryBackoffBase: durationSchema, recoveryBackoffMax: durationSchema,
@@ -74,10 +75,12 @@ export const settingsSchema = z.object({
         context.addIssue({ code: "custom", path: ["statsigSignerURL"], message: "invalid" });
       }
     }
+    if (value.clearanceMode === "flaresolverr" && !validHTTPURL(value.flareSolverrURL)) {
+      context.addIssue({ code: "custom", path: ["flareSolverrURL"], message: "invalid" });
+    }
   }),
   providerConsole: z.object({
     baseURL: z.url().refine((value) => value.startsWith("https://")),
-    userAgent: z.string().trim().min(1).max(512),
     chatTimeout: consoleChatDuration,
   }),
   batch: z.object({
@@ -103,10 +106,23 @@ export const settingsSchema = z.object({
     cooldownMax: routingCooldownDuration,
     capacityWait: routingCapacityWaitDuration,
     maxAttempts: positiveInteger.max(10),
+    preferFreeBuild: z.boolean(),
   }).refine((value) => durationSeconds(value.cooldownMax) >= durationSeconds(value.cooldownBase), { path: ["cooldownMax"] }),
   audit: z.object({ bufferSize: positiveInteger.max(262_144), batchSize: positiveInteger.max(4_096), flushInterval: auditFlushDuration })
     .refine((value) => value.batchSize <= value.bufferSize, { path: ["batchSize"] }),
   clientKeyDefaults: z.object({ rpmLimit: positiveInteger.max(100_000), maxConcurrent: positiveInteger.max(1_024) }),
+  accounts: z.object({
+    autoCleanReauthEnabled: z.boolean(),
+    autoCleanReauthInterval: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 60 && seconds <= 3_600;
+    }),
+    autoCleanReauthMinAge: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 60 && seconds <= 30 * 86_400;
+    }),
+    autoCleanIncludeDisabled: z.boolean(),
+  }),
 });
 
 export type SettingsForm = z.infer<typeof settingsSchema>;
@@ -114,10 +130,11 @@ export type SettingsForm = z.infer<typeof settingsSchema>;
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
   return {
     server: config.server,
-    providerBuild: { ...config.providerBuild, tokenAuth: "" },
+    providerBuild: config.providerBuild,
     providerWeb: {
       ...config.providerWeb,
       statsigManualValue: "",
+      clearanceTimeout: parseDuration(config.providerWeb.clearanceTimeout), clearanceRefresh: parseDuration(config.providerWeb.clearanceRefresh),
       quotaTimeout: parseDuration(config.providerWeb.quotaTimeout), chatTimeout: parseDuration(config.providerWeb.chatTimeout),
       imageTimeout: parseDuration(config.providerWeb.imageTimeout), videoTimeout: parseDuration(config.providerWeb.videoTimeout),
       recoveryBackoffBase: parseDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: parseDuration(config.providerWeb.recoveryBackoffMax),
@@ -135,9 +152,16 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
     routing: {
       stickyTTL: parseDuration(config.routing.stickyTTL), cooldownBase: parseDuration(config.routing.cooldownBase),
       cooldownMax: parseDuration(config.routing.cooldownMax), capacityWait: parseDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
+      preferFreeBuild: config.routing.preferFreeBuild,
     },
     audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: parseDuration(config.audit.flushInterval) },
     clientKeyDefaults: config.clientKeyDefaults,
+    accounts: {
+      autoCleanReauthEnabled: config.accounts.autoCleanReauthEnabled,
+      autoCleanReauthInterval: parseDuration(config.accounts.autoCleanReauthInterval),
+      autoCleanReauthMinAge: parseDuration(config.accounts.autoCleanReauthMinAge),
+      autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
+    },
   };
 }
 
@@ -149,6 +173,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       ...config.providerWeb,
       quotaTimeout: formatDuration(config.providerWeb.quotaTimeout), chatTimeout: formatDuration(config.providerWeb.chatTimeout),
       imageTimeout: formatDuration(config.providerWeb.imageTimeout), videoTimeout: formatDuration(config.providerWeb.videoTimeout),
+      clearanceTimeout: formatDuration(config.providerWeb.clearanceTimeout), clearanceRefresh: formatDuration(config.providerWeb.clearanceRefresh),
       recoveryBackoffBase: formatDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: formatDuration(config.providerWeb.recoveryBackoffMax),
     },
     providerConsole: { ...config.providerConsole, chatTimeout: formatDuration(config.providerConsole.chatTimeout) },
@@ -164,9 +189,16 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
     routing: {
       stickyTTL: formatDuration(config.routing.stickyTTL), cooldownBase: formatDuration(config.routing.cooldownBase),
       cooldownMax: formatDuration(config.routing.cooldownMax), capacityWait: formatDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
+      preferFreeBuild: config.routing.preferFreeBuild,
     },
     audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: formatDuration(config.audit.flushInterval) },
     clientKeyDefaults: config.clientKeyDefaults,
+    accounts: {
+      autoCleanReauthEnabled: config.accounts.autoCleanReauthEnabled,
+      autoCleanReauthInterval: formatDuration(config.accounts.autoCleanReauthInterval),
+      autoCleanReauthMinAge: formatDuration(config.accounts.autoCleanReauthMinAge),
+      autoCleanIncludeDisabled: config.accounts.autoCleanIncludeDisabled,
+    },
   };
 }
 
@@ -233,6 +265,18 @@ function validStatsigID(value: string): boolean {
 }
 
 function validStatsigSignerURL(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return false;
+    const internal = internalSignerHostname(parsed.hostname);
+    if (internal) return parsed.protocol === "http:" || parsed.protocol === "https:";
+    return parsed.protocol === "https:" && (parsed.port === "" || parsed.port === "443");
+  } catch {
+    return false;
+  }
+}
+
+function validHTTPURL(value: string): boolean {
   try {
     const parsed = new URL(value);
     if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return false;

@@ -31,6 +31,7 @@ type settingsConfigDTO struct {
 	Routing           routingConfigDTO           `json:"routing"`
 	Audit             auditConfigDTO             `json:"audit"`
 	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
+	Accounts          *accountsConfigDTO         `json:"accounts,omitempty"`
 }
 
 type serverConfigDTO struct {
@@ -39,7 +40,6 @@ type serverConfigDTO struct {
 
 type providerConsoleConfigDTO struct {
 	BaseURL     string `json:"baseURL"`
-	UserAgent   string `json:"userAgent"`
 	ChatTimeout string `json:"chatTimeout"`
 }
 
@@ -56,6 +56,7 @@ type frontendConfigDTO struct {
 
 type providerBuildConfigDTO struct {
 	BaseURL             string `json:"baseURL"`
+	FallbackBaseURL     string `json:"fallbackBaseURL"`
 	ClientVersion       string `json:"clientVersion"`
 	ClientIdentifier    string `json:"clientIdentifier"`
 	TokenAuth           string `json:"tokenAuth"`
@@ -64,19 +65,23 @@ type providerBuildConfigDTO struct {
 }
 
 type providerWebConfigDTO struct {
-	BaseURL                 string `json:"baseURL"`
-	StatsigMode             string `json:"statsigMode"`
-	StatsigManualValue      string `json:"statsigManualValue,omitempty"`
-	StatsigManualConfigured bool   `json:"statsigManualConfigured"`
-	StatsigSignerURL        string `json:"statsigSignerURL"`
-	QuotaTimeout            string `json:"quotaTimeout"`
-	ChatTimeout             string `json:"chatTimeout"`
-	ImageTimeout            string `json:"imageTimeout"`
-	VideoTimeout            string `json:"videoTimeout"`
-	MediaConcurrency        int    `json:"mediaConcurrency"`
-	AllowNSFW               bool   `json:"allowNSFW"`
-	RecoveryBackoffBase     string `json:"recoveryBackoffBase"`
-	RecoveryBackoffMax      string `json:"recoveryBackoffMax"`
+	BaseURL                 string  `json:"baseURL"`
+	StatsigMode             string  `json:"statsigMode"`
+	StatsigManualValue      string  `json:"statsigManualValue,omitempty"`
+	StatsigManualConfigured bool    `json:"statsigManualConfigured"`
+	StatsigSignerURL        string  `json:"statsigSignerURL"`
+	ClearanceMode           *string `json:"clearanceMode,omitempty"`
+	FlareSolverrURL         *string `json:"flareSolverrURL,omitempty"`
+	ClearanceTimeout        *string `json:"clearanceTimeout,omitempty"`
+	ClearanceRefresh        *string `json:"clearanceRefresh,omitempty"`
+	QuotaTimeout            string  `json:"quotaTimeout"`
+	ChatTimeout             string  `json:"chatTimeout"`
+	ImageTimeout            string  `json:"imageTimeout"`
+	VideoTimeout            string  `json:"videoTimeout"`
+	MediaConcurrency        int     `json:"mediaConcurrency"`
+	AllowNSFW               bool    `json:"allowNSFW"`
+	RecoveryBackoffBase     string  `json:"recoveryBackoffBase"`
+	RecoveryBackoffMax      string  `json:"recoveryBackoffMax"`
 }
 
 type batchConfigDTO struct {
@@ -89,11 +94,12 @@ type batchConfigDTO struct {
 }
 
 type routingConfigDTO struct {
-	StickyTTL    string `json:"stickyTTL"`
-	CooldownBase string `json:"cooldownBase"`
-	CooldownMax  string `json:"cooldownMax"`
-	CapacityWait string `json:"capacityWait"`
-	MaxAttempts  int    `json:"maxAttempts"`
+	StickyTTL       string `json:"stickyTTL"`
+	CooldownBase    string `json:"cooldownBase"`
+	CooldownMax     string `json:"cooldownMax"`
+	CapacityWait    string `json:"capacityWait"`
+	MaxAttempts     int    `json:"maxAttempts"`
+	PreferFreeBuild bool   `json:"preferFreeBuild"`
 }
 
 type auditConfigDTO struct {
@@ -105,6 +111,13 @@ type auditConfigDTO struct {
 type clientKeyDefaultsConfigDTO struct {
 	RPMLimit      int `json:"rpmLimit"`
 	MaxConcurrent int `json:"maxConcurrent"`
+}
+
+type accountsConfigDTO struct {
+	AutoCleanReauthEnabled   bool   `json:"autoCleanReauthEnabled"`
+	AutoCleanReauthInterval  string `json:"autoCleanReauthInterval"`
+	AutoCleanReauthMinAge    string `json:"autoCleanReauthMinAge"`
+	AutoCleanIncludeDisabled bool   `json:"autoCleanIncludeDisabled"`
 }
 
 type settingsResponse struct {
@@ -152,25 +165,29 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
-	return settingsapp.EditableConfig{
+	clearanceProvided := value.ProviderWeb.ClearanceMode != nil || value.ProviderWeb.FlareSolverrURL != nil ||
+		value.ProviderWeb.ClearanceTimeout != nil || value.ProviderWeb.ClearanceRefresh != nil
+	result := settingsapp.EditableConfig{
 		Server: settingsapp.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
 		ProviderBuild: settingsapp.ProviderBuildConfig{
-			BaseURL: value.ProviderBuild.BaseURL, ClientVersion: value.ProviderBuild.ClientVersion,
-			ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
-			UserAgent: value.ProviderBuild.UserAgent,
+			BaseURL: value.ProviderBuild.BaseURL, FallbackBaseURL: value.ProviderBuild.FallbackBaseURL,
+			ClientVersion: value.ProviderBuild.ClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
+			TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: value.ProviderBuild.UserAgent,
 		},
 		ProviderWeb: settingsapp.ProviderWebConfig{
 			BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: value.ProviderWeb.QuotaTimeout,
 			StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue,
 			StatsigManualConfigured: value.ProviderWeb.StatsigManualConfigured, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
-			ChatTimeout: value.ProviderWeb.ChatTimeout, ImageTimeout: value.ProviderWeb.ImageTimeout,
+			ClearanceMode: optionalString(value.ProviderWeb.ClearanceMode), FlareSolverrURL: optionalString(value.ProviderWeb.FlareSolverrURL),
+			ClearanceTimeout: optionalString(value.ProviderWeb.ClearanceTimeout), ClearanceRefresh: optionalString(value.ProviderWeb.ClearanceRefresh),
+			ClearanceProvided: clearanceProvided,
+			ChatTimeout:       value.ProviderWeb.ChatTimeout, ImageTimeout: value.ProviderWeb.ImageTimeout,
 			VideoTimeout:     value.ProviderWeb.VideoTimeout,
 			MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 			RecoveryBackoffBase: value.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: value.ProviderWeb.RecoveryBackoffMax,
 		},
 		ProviderConsole: settingsapp.ProviderConsoleConfig{
-			BaseURL: value.ProviderConsole.BaseURL, UserAgent: value.ProviderConsole.UserAgent,
-			ChatTimeout: value.ProviderConsole.ChatTimeout,
+			BaseURL: value.ProviderConsole.BaseURL, ChatTimeout: value.ProviderConsole.ChatTimeout,
 		},
 		Batch: settingsapp.BatchConfig{
 			AccountTaskBatchSize: value.Batch.AccountTaskBatchSize,
@@ -188,6 +205,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 		Routing: settingsapp.RoutingConfig{
 			StickyTTL: value.Routing.StickyTTL, CooldownBase: value.Routing.CooldownBase,
 			CooldownMax: value.Routing.CooldownMax, CapacityWait: value.Routing.CapacityWait, MaxAttempts: value.Routing.MaxAttempts,
+			PreferFreeBuild: value.Routing.PreferFreeBuild,
 		},
 		Audit: settingsapp.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval,
@@ -196,6 +214,16 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
 		},
 	}
+	if value.Accounts != nil {
+		result.Accounts = settingsapp.AccountsConfig{
+			AutoCleanReauthEnabled:   value.Accounts.AutoCleanReauthEnabled,
+			AutoCleanReauthInterval:  value.Accounts.AutoCleanReauthInterval,
+			AutoCleanReauthMinAge:    value.Accounts.AutoCleanReauthMinAge,
+			AutoCleanIncludeDisabled: value.Accounts.AutoCleanIncludeDisabled,
+		}
+		result.AccountsProvided = true
+	}
+	return result
 }
 
 func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
@@ -204,22 +232,24 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 		Config: settingsConfigDTO{
 			Server: serverConfigDTO{MaxConcurrentRequests: config.Server.MaxConcurrentRequests},
 			ProviderBuild: providerBuildConfigDTO{
-				BaseURL: config.ProviderBuild.BaseURL, ClientVersion: config.ProviderBuild.ClientVersion,
-				ClientIdentifier: config.ProviderBuild.ClientIdentifier, TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "",
-				UserAgent: config.ProviderBuild.UserAgent,
+				BaseURL: config.ProviderBuild.BaseURL, FallbackBaseURL: config.ProviderBuild.FallbackBaseURL,
+				ClientVersion: config.ProviderBuild.ClientVersion, ClientIdentifier: config.ProviderBuild.ClientIdentifier,
+				TokenAuth:           config.ProviderBuild.TokenAuth,
+				TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "", UserAgent: config.ProviderBuild.UserAgent,
 			},
 			ProviderWeb: providerWebConfigDTO{
 				BaseURL: config.ProviderWeb.BaseURL, QuotaTimeout: config.ProviderWeb.QuotaTimeout,
 				StatsigMode: config.ProviderWeb.StatsigMode, StatsigManualConfigured: config.ProviderWeb.StatsigManualConfigured,
 				StatsigSignerURL: config.ProviderWeb.StatsigSignerURL,
-				ChatTimeout:      config.ProviderWeb.ChatTimeout, ImageTimeout: config.ProviderWeb.ImageTimeout,
+				ClearanceMode:    stringPointer(config.ProviderWeb.ClearanceMode), FlareSolverrURL: stringPointer(config.ProviderWeb.FlareSolverrURL),
+				ClearanceTimeout: stringPointer(config.ProviderWeb.ClearanceTimeout), ClearanceRefresh: stringPointer(config.ProviderWeb.ClearanceRefresh),
+				ChatTimeout: config.ProviderWeb.ChatTimeout, ImageTimeout: config.ProviderWeb.ImageTimeout,
 				VideoTimeout:     config.ProviderWeb.VideoTimeout,
 				MediaConcurrency: config.ProviderWeb.MediaConcurrency, AllowNSFW: config.ProviderWeb.AllowNSFW,
 				RecoveryBackoffBase: config.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: config.ProviderWeb.RecoveryBackoffMax,
 			},
 			ProviderConsole: providerConsoleConfigDTO{
-				BaseURL: config.ProviderConsole.BaseURL, UserAgent: config.ProviderConsole.UserAgent,
-				ChatTimeout: config.ProviderConsole.ChatTimeout,
+				BaseURL: config.ProviderConsole.BaseURL, ChatTimeout: config.ProviderConsole.ChatTimeout,
 			},
 			Batch: batchConfigDTO{
 				AccountTaskBatchSize: config.Batch.AccountTaskBatchSize,
@@ -237,12 +267,19 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			Routing: routingConfigDTO{
 				StickyTTL: config.Routing.StickyTTL, CooldownBase: config.Routing.CooldownBase,
 				CooldownMax: config.Routing.CooldownMax, CapacityWait: config.Routing.CapacityWait, MaxAttempts: config.Routing.MaxAttempts,
+				PreferFreeBuild: config.Routing.PreferFreeBuild,
 			},
 			Audit: auditConfigDTO{
 				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval,
 			},
 			ClientKeyDefaults: clientKeyDefaultsConfigDTO{
 				RPMLimit: config.ClientKeyDefaults.RPMLimit, MaxConcurrent: config.ClientKeyDefaults.MaxConcurrent,
+			},
+			Accounts: &accountsConfigDTO{
+				AutoCleanReauthEnabled:   config.Accounts.AutoCleanReauthEnabled,
+				AutoCleanReauthInterval:  config.Accounts.AutoCleanReauthInterval,
+				AutoCleanReauthMinAge:    config.Accounts.AutoCleanReauthMinAge,
+				AutoCleanIncludeDisabled: config.Accounts.AutoCleanIncludeDisabled,
 			},
 		},
 		RecommendedProviderBuild: providerBuildRecommendationDTO{
@@ -252,3 +289,12 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 		UpdatedAt: value.UpdatedAt, Revision: value.Revision, RestartRequired: value.RestartRequired,
 	}
 }
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func stringPointer(value string) *string { return &value }

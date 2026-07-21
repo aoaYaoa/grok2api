@@ -34,22 +34,53 @@ func TestSettingsResponseDoesNotExposeManualStatsigValue(t *testing.T) {
 	}
 }
 
-func TestSettingsResponseDoesNotExposeBuildTokenAuth(t *testing.T) {
-	response := newSettingsResponse(settingsapp.Snapshot{Config: settingsapp.EditableConfig{ProviderBuild: settingsapp.ProviderBuildConfig{TokenAuth: "must-not-leak"}}})
+func TestSettingsResponseIncludesBuildTokenAuth(t *testing.T) {
+	response := newSettingsResponse(settingsapp.Snapshot{Config: settingsapp.EditableConfig{ProviderBuild: settingsapp.ProviderBuildConfig{TokenAuth: "xai-grok-cli"}}})
 	data, err := json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "must-not-leak") || !strings.Contains(string(data), `"tokenAuthConfigured":true`) {
-		t.Fatalf("settings response leaked or lost Build token status: %s", data)
+	if !strings.Contains(string(data), `"tokenAuth":"xai-grok-cli"`) || !strings.Contains(string(data), `"tokenAuthConfigured":true`) {
+		t.Fatalf("settings response lost Build token auth: %s", data)
 	}
 }
 
 func TestSettingsResponseIncludesRecommendedBuildBaseline(t *testing.T) {
 	response := newSettingsResponse(settingsapp.Snapshot{RecommendedProviderBuild: settingsapp.ProviderBuildRecommendation{
-		ClientVersion: "0.2.103", UserAgent: "grok-shell/0.2.103 (linux; x86_64)",
+		ClientVersion: "0.2.106", UserAgent: "grok-shell/0.2.106 (linux; x86_64)",
 	}})
-	if response.RecommendedProviderBuild.ClientVersion != "0.2.103" || response.RecommendedProviderBuild.UserAgent == "" {
+	if response.RecommendedProviderBuild.ClientVersion != "0.2.106" || response.RecommendedProviderBuild.UserAgent == "" {
 		t.Fatalf("recommended build = %#v", response.RecommendedProviderBuild)
+	}
+}
+
+func TestSettingsResponseIncludesPreferFreeBuild(t *testing.T) {
+	response := newSettingsResponse(settingsapp.Snapshot{Config: settingsapp.EditableConfig{
+		Routing: settingsapp.RoutingConfig{PreferFreeBuild: true},
+	}})
+	if !response.Config.Routing.PreferFreeBuild {
+		t.Fatal("preferFreeBuild was lost from settings response")
+	}
+}
+
+func TestLegacySettingsRequestMayOmitAccounts(t *testing.T) {
+	var dto settingsConfigDTO
+	if err := json.Unmarshal([]byte(`{"server":{"maxConcurrentRequests":64}}`), &dto); err != nil {
+		t.Fatal(err)
+	}
+	input := dto.toApplication()
+	if input.AccountsProvided {
+		t.Fatal("missing accounts field was treated as an explicit update")
+	}
+}
+
+func TestLegacySettingsRequestMayOmitManagedClearance(t *testing.T) {
+	var dto settingsConfigDTO
+	if err := json.Unmarshal([]byte(`{"providerWeb":{"baseURL":"https://grok.com"}}`), &dto); err != nil {
+		t.Fatal(err)
+	}
+	input := dto.toApplication()
+	if input.ProviderWeb.ClearanceProvided {
+		t.Fatal("missing managed-clearance fields were treated as an explicit update")
 	}
 }

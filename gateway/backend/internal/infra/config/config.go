@@ -20,9 +20,12 @@ import (
 const (
 	StatsigModeManual             = "manual"
 	StatsigModeURL                = "url"
+	ClearanceModeManual           = "manual"
+	ClearanceModeFlareSolverr     = "flaresolverr"
 	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
-	RecommendedBuildClientVersion = "0.2.103"
-	RecommendedBuildUserAgent     = "grok-shell/0.2.103 (linux; x86_64)"
+	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
+	RecommendedBuildClientVersion = "0.2.106"
+	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
 	maxServerBodyBytes    = 256 << 20
 	maxRequestTimeout     = 24 * time.Hour
@@ -51,6 +54,7 @@ type Config struct {
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
+	Accounts          AccountsConfig          `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -134,17 +138,25 @@ type ProviderConfig struct {
 
 type BuildProviderConfig struct {
 	BaseURL          string `yaml:"baseURL"`
+	FallbackBaseURL  string `yaml:"fallbackBaseURL"`
 	ClientVersion    string `yaml:"clientVersion"`
 	ClientIdentifier string `yaml:"clientIdentifier"`
 	TokenAuth        string `yaml:"tokenAuth"`
 	UserAgent        string `yaml:"userAgent"`
 }
 
+// DefaultBuildFallbackBaseURL 是主 Build API 对可回退推理操作 403 时探测的 XAI API 根地址。
+const DefaultBuildFallbackBaseURL = "https://api.x.ai/v1"
+
 type WebProviderConfig struct {
 	BaseURL             string   `yaml:"baseURL"`
 	StatsigMode         string   `yaml:"-"`
 	StatsigManualValue  string   `yaml:"-"`
 	StatsigSignerURL    string   `yaml:"-"`
+	ClearanceMode       string   `yaml:"-"`
+	FlareSolverrURL     string   `yaml:"-"`
+	ClearanceTimeout    Duration `yaml:"-"`
+	ClearanceRefresh    Duration `yaml:"-"`
 	QuotaTimeout        Duration `yaml:"quotaTimeout"`
 	ChatTimeout         Duration `yaml:"chatTimeout"`
 	ImageTimeout        Duration `yaml:"imageTimeout"`
@@ -156,9 +168,9 @@ type WebProviderConfig struct {
 }
 
 type ConsoleProviderConfig struct {
-	BaseURL     string   `yaml:"baseURL"`
-	UserAgent   string   `yaml:"userAgent"`
-	ChatTimeout Duration `yaml:"chatTimeout"`
+	BaseURL         string   `yaml:"baseURL"`
+	LegacyUserAgent string   `yaml:"userAgent"` // Deprecated: 仅用于兼容旧配置文件，不参与请求。
+	ChatTimeout     Duration `yaml:"chatTimeout"`
 }
 
 // BatchConfig 定义可热加载的账号批量任务边界。
@@ -185,11 +197,15 @@ type LocalMediaConfig struct {
 }
 
 type RoutingConfig struct {
-	StickyTTL    Duration `yaml:"stickyTTL"`
-	CooldownBase Duration `yaml:"cooldownBase"`
-	CooldownMax  Duration `yaml:"cooldownMax"`
-	CapacityWait Duration `yaml:"capacityWait"`
-	MaxAttempts  int      `yaml:"maxAttempts"`
+	StickyTTL                 Duration `yaml:"stickyTTL"`
+	CooldownBase              Duration `yaml:"cooldownBase"`
+	CooldownMax               Duration `yaml:"cooldownMax"`
+	CapacityWait              Duration `yaml:"capacityWait"`
+	MaxAttempts               int      `yaml:"maxAttempts"`
+	PreferFreeBuild           bool     `yaml:"preferFreeBuild"`
+	ReasoningReplayEnabled    bool     `yaml:"reasoningReplayEnabled"`
+	ReasoningReplayTTL        Duration `yaml:"reasoningReplayTTL"`
+	ReasoningReplayMaxEntries int      `yaml:"reasoningReplayMaxEntries"`
 }
 
 type AuditConfig struct {
@@ -201,6 +217,14 @@ type AuditConfig struct {
 type ClientKeyDefaultsConfig struct {
 	RPMLimit      int `yaml:"rpmLimit"`
 	MaxConcurrent int `yaml:"maxConcurrent"`
+}
+
+// AccountsConfig 定义可热加载的账号池维护策略；默认全部关闭。
+type AccountsConfig struct {
+	AutoCleanReauthEnabled   bool
+	AutoCleanReauthInterval  Duration
+	AutoCleanReauthMinAge    Duration
+	AutoCleanIncludeDisabled bool
 }
 
 type Secrets struct {
@@ -401,9 +425,15 @@ func (c Config) Validate() error {
 	if c.Auth.AccessTokenTTL.Value() <= 0 || c.Auth.RefreshTokenTTL.Value() <= 0 {
 		return errors.New("JWT 有效期必须大于零")
 	}
-	providerURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Build.BaseURL))
-	if err != nil || providerURL.Scheme == "" || providerURL.Host == "" {
-		return errors.New("provider.build.baseURL 必须是有效 URL")
+	if err := validateAPIBaseURL("provider.build.baseURL", c.Provider.Build.BaseURL, false); err != nil {
+		return err
+	}
+	fallbackBase := strings.TrimSpace(c.Provider.Build.FallbackBaseURL)
+	if fallbackBase == "" {
+		fallbackBase = DefaultBuildFallbackBaseURL
+	}
+	if err := validateAPIBaseURL("provider.build.fallbackBaseURL", fallbackBase, true); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Provider.Build.ClientVersion) == "" || strings.TrimSpace(c.Provider.Build.ClientIdentifier) == "" || strings.TrimSpace(c.Provider.Build.TokenAuth) == "" || strings.TrimSpace(c.Provider.Build.UserAgent) == "" {
 		return errors.New("provider.build 客户端标识不能为空")
@@ -424,6 +454,21 @@ func (c Config) Validate() error {
 	default:
 		return errors.New("provider.web Statsig 模式必须是 manual 或 url")
 	}
+	switch c.Provider.Web.ClearanceMode {
+	case ClearanceModeManual:
+	case ClearanceModeFlareSolverr:
+		if err := validateFlareSolverrURL(c.Provider.Web.FlareSolverrURL); err != nil {
+			return fmt.Errorf("provider.web FlareSolverr URL 无效: %w", err)
+		}
+	default:
+		return errors.New("provider.web Clearance 模式必须是 manual 或 flaresolverr")
+	}
+	if c.Provider.Web.ClearanceTimeout.Value() < 10*time.Second || c.Provider.Web.ClearanceTimeout.Value() > 5*time.Minute {
+		return errors.New("provider.web Clearance 超时必须在 10 秒到 5 分钟之间")
+	}
+	if c.Provider.Web.ClearanceRefresh.Value() < time.Minute || c.Provider.Web.ClearanceRefresh.Value() > 24*time.Hour {
+		return errors.New("provider.web Clearance 刷新间隔必须在 1 分钟到 24 小时之间")
+	}
 	if c.Provider.Web.QuotaTimeout.Value() < time.Second || c.Provider.Web.QuotaTimeout.Value() > 2*time.Minute ||
 		c.Provider.Web.ChatTimeout.Value() < 5*time.Second || c.Provider.Web.ChatTimeout.Value() > 30*time.Minute ||
 		c.Provider.Web.ImageTimeout.Value() < 5*time.Second || c.Provider.Web.ImageTimeout.Value() > 30*time.Minute ||
@@ -436,9 +481,6 @@ func (c Config) Validate() error {
 	consoleURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Console.BaseURL))
 	if err != nil || consoleURL.Scheme != "https" || consoleURL.Host == "" || consoleURL.User != nil {
 		return errors.New("provider.console.baseURL 必须是无凭据的 HTTPS URL")
-	}
-	if userAgent := strings.TrimSpace(c.Provider.Console.UserAgent); len(userAgent) < 1 || len(userAgent) > 512 {
-		return errors.New("provider.console.userAgent 长度必须在 1 到 512 个字符之间")
 	}
 	if c.Provider.Console.ChatTimeout.Value() < 5*time.Second || c.Provider.Console.ChatTimeout.Value() > 30*time.Minute {
 		return errors.New("provider.console.chatTimeout 必须在 5 秒到 30 分钟之间")
@@ -461,13 +503,53 @@ func (c Config) Validate() error {
 	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL || c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown || c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > 5*time.Second || c.Routing.MaxAttempts < 1 || c.Routing.MaxAttempts > 10 {
 		return errors.New("routing 配置无效")
 	}
+	if c.Routing.ReasoningReplayTTL.Value() <= 0 || c.Routing.ReasoningReplayTTL.Value() > 24*time.Hour {
+		return errors.New("routing.reasoningReplayTTL 必须在 1 纳秒到 24 小时之间")
+	}
+	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
+		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
+	}
 	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize || c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize || c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
 		return errors.New("audit 队列和批量写入配置无效")
 	}
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
 		return errors.New("clientKeyDefaults 超出允许范围")
 	}
+	if c.Accounts.AutoCleanReauthInterval.Value() < time.Minute || c.Accounts.AutoCleanReauthInterval.Value() > time.Hour {
+		return errors.New("accounts.autoCleanReauthInterval 必须在 1 分钟到 1 小时之间")
+	}
+	if c.Accounts.AutoCleanReauthMinAge.Value() < time.Minute || c.Accounts.AutoCleanReauthMinAge.Value() > 30*24*time.Hour {
+		return errors.New("accounts.autoCleanReauthMinAge 必须在 1 分钟到 30 天之间")
+	}
 	return nil
+}
+
+// validateAPIBaseURL 仅允许无凭据、query、fragment 的 HTTP(S) API 根地址。
+// requireHTTPS 为 true 时强制 HTTPS（用于生产默认 XAI 备用地址）。
+func validateAPIBaseURL(name, raw string, requireHTTPS bool) error {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", name)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if requireHTTPS {
+			return fmt.Errorf("%s 必须是 HTTPS URL", name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", name)
+	}
+}
+
+// NormalizeBuildFallbackBaseURL 在旧配置缺字段时填入默认 XAI 备用地址。
+func NormalizeBuildFallbackBaseURL(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return DefaultBuildFallbackBaseURL
+	}
+	return strings.TrimSpace(value)
 }
 
 func defaultConfig() Config {
@@ -496,22 +578,21 @@ func defaultConfig() Config {
 		},
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{
-				BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: RecommendedBuildClientVersion,
-				ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
+				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: DefaultBuildFallbackBaseURL,
+				ClientVersion: RecommendedBuildClientVersion, ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
 				UserAgent: RecommendedBuildUserAgent,
 			},
 			Web: WebProviderConfig{
 				BaseURL: "https://grok.com", StatsigMode: StatsigModeURL, StatsigSignerURL: DefaultStatsigSignerURL,
+				ClearanceMode: ClearanceModeManual, FlareSolverrURL: DefaultFlareSolverrURL,
+				ClearanceTimeout: Duration(time.Minute), ClearanceRefresh: Duration(10 * time.Minute),
 				QuotaTimeout: Duration(25 * time.Second),
 				ChatTimeout:  Duration(2 * time.Minute), ImageTimeout: Duration(3 * time.Minute),
 				VideoTimeout:     Duration(15 * time.Minute),
 				MediaConcurrency: 4, RecoveryBackoffBase: Duration(30 * time.Second),
 				RecoveryBackoffMax: Duration(30 * time.Minute),
 			},
-			Console: ConsoleProviderConfig{
-				BaseURL: "https://console.x.ai", UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-				ChatTimeout: Duration(5 * time.Minute),
-			},
+			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute)},
 		},
 		Batch: BatchConfig{
 			AccountTaskBatchSize: 1000,
@@ -524,15 +605,32 @@ func defaultConfig() Config {
 			Local: LocalMediaConfig{Path: "./data/media"},
 		},
 		Routing: RoutingConfig{
-			StickyTTL:    Duration(time.Hour),
-			CooldownBase: Duration(30 * time.Second),
-			CooldownMax:  Duration(30 * time.Minute),
-			CapacityWait: Duration(500 * time.Millisecond),
-			MaxAttempts:  3,
+			StickyTTL:                 Duration(time.Hour),
+			CooldownBase:              Duration(30 * time.Second),
+			CooldownMax:               Duration(30 * time.Minute),
+			CapacityWait:              Duration(500 * time.Millisecond),
+			MaxAttempts:               3,
+			PreferFreeBuild:           false,
+			ReasoningReplayEnabled:    true,
+			ReasoningReplayTTL:        Duration(time.Hour),
+			ReasoningReplayMaxEntries: 10240,
 		},
 		Audit:             AuditConfig{BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
+		Accounts: AccountsConfig{
+			AutoCleanReauthEnabled:   false,
+			AutoCleanReauthInterval:  Duration(10 * time.Minute),
+			AutoCleanReauthMinAge:    Duration(time.Hour),
+			AutoCleanIncludeDisabled: false,
+		},
 	}
+}
+
+func validateFlareSolverrURL(value string) error {
+	if err := signerurl.Validate(value); err != nil {
+		return errors.New(strings.ReplaceAll(err.Error(), "签名 URL", "URL"))
+	}
+	return nil
 }
 
 func validStatsigID(value string) bool {

@@ -68,6 +68,42 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 	}
 }
 
+func TestSyncAccountIdentityUsesWebSessionWithConsoleCredential(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/auth/session" || request.Method != http.MethodGet {
+			http.NotFound(writer, request)
+			return
+		}
+		if request.Header.Get("User-Agent") != infraegress.DefaultUserAgent {
+			t.Errorf("user agent = %q", request.Header.Get("User-Agent"))
+		}
+		if request.Header.Get("Cookie") != "sso=test-sso; sso-rw=test-sso; cf_clearance=clear" {
+			t.Errorf("cookie = %q", request.Header.Get("Cookie"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"user":{"sub":"console-user","email":"console@example.com","teamId":"team-1"}}`))
+	}))
+	t.Cleanup(server.Close)
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _ := cipher.Encrypt("test-sso")
+	cookies, _ := cipher.Encrypt("cf_clearance=clear")
+	adapter := NewAdapter(Config{SessionBaseURL: server.URL}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher)
+	identity, err := adapter.SyncAccountIdentity(context.Background(), account.Credential{
+		ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO,
+		EncryptedAccessToken: token, EncryptedCloudflareCookie: cookies,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.UserID != "console-user" || identity.Email != "console@example.com" || identity.TeamID != "team-1" {
+		t.Fatalf("identity = %#v", identity)
+	}
+}
+
 func TestNormalizeRequestAppliesConsoleContract(t *testing.T) {
 	spec, ok := Resolve("grok-4.3")
 	if !ok {
@@ -93,19 +129,96 @@ func TestNormalizeRequestAppliesConsoleContract(t *testing.T) {
 		t.Fatalf("max_output_tokens = %#v", payload["max_output_tokens"])
 	}
 	reasoning, _ := payload["reasoning"].(map[string]any)
-	if reasoning["effort"] != "high" {
+	if reasoning["effort"] != "xhigh" {
 		t.Fatalf("reasoning = %#v", reasoning)
+	}
+	include, _ := payload["include"].([]any)
+	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v", include)
 	}
 	tools, _ := payload["tools"].([]any)
 	if len(tools) != 3 || toolIdentity(tools[0]) != "web_search" || toolIdentity(tools[1]) != "x_search" || toolIdentity(tools[2]) != "function:lookup" {
 		t.Fatalf("tools = %#v", tools)
 	}
-	for _, body := range []string{
-		`{"model":"grok-4.3","store":true,"input":"hello"}`,
-		`{"model":"grok-4.3","previous_response_id":"resp_1","input":"hello"}`,
+	webSearch, _ := tools[0].(map[string]any)
+	if webSearch["custom"] != nil || webSearch["enable_image_understanding"] != true {
+		t.Fatalf("web_search = %#v", webSearch)
+	}
+	stateless, err := normalizeRequest([]byte(`{"model":"grok-4.3","store":true,"previous_response_id":"resp_1","service_tier":"priority","input":"hello"}`), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statelessPayload map[string]any
+	if json.Unmarshal(stateless, &statelessPayload) != nil || statelessPayload["store"] != false || statelessPayload["previous_response_id"] != nil || statelessPayload["service_tier"] != nil {
+		t.Fatalf("stateless payload = %#v", statelessPayload)
+	}
+}
+
+func TestNormalizeRequestAppliesConsoleCompatibilityBoundary(t *testing.T) {
+	spec, ok := Resolve("grok-4.20-0309")
+	if !ok {
+		t.Fatal("grok-4.20-0309 missing")
+	}
+	body, err := normalizeRequest([]byte(`{
+		"model":"public",
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","strict":true,"schema":{"type":"object"}}},
+		"input":[
+			{"type":"reasoning","content":[{"text":"prior thought"}]},
+			{"type":"message","role":"user","content":[
+				{"type":"output_text","text":"hello"},
+				{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+			]}
+		],
+		"tools":[
+			{"type":"namespace","name":"crm","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
+			{"type":"web_search","external_web_access":true}
+		],
+		"tool_choice":"required"
+	}`), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["response_format"] != nil || payload["reasoning"] != nil || payload["tool_choice"] != "auto" {
+		t.Fatalf("payload boundary = %#v", payload)
+	}
+	include, _ := payload["include"].([]any)
+	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v", include)
+	}
+	text, _ := payload["text"].(map[string]any)
+	format, _ := text["format"].(map[string]any)
+	if format["type"] != "json_schema" || format["name"] != "answer" || format["json_schema"] != nil {
+		t.Fatalf("text.format = %#v", format)
+	}
+	input, _ := payload["input"].([]any)
+	reasoning := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if reasoning["type"] != "reasoning_text" {
+		t.Fatalf("reasoning content = %#v", reasoning)
+	}
+	parts := input[1].(map[string]any)["content"].([]any)
+	if parts[0].(map[string]any)["type"] != "input_text" || parts[1].(map[string]any)["type"] != "input_image" || parts[1].(map[string]any)["image_url"] != "https://example.com/image.png" {
+		t.Fatalf("message parts = %#v", parts)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 2 || toolIdentity(tools[0]) != "web_search" || toolIdentity(tools[1]) != "x_search" {
+		t.Fatalf("sanitized tools = %#v", tools)
+	}
+	if tools[0].(map[string]any)["external_web_access"] != nil {
+		t.Fatalf("unsupported web search controls leaked: %#v", tools[0])
+	}
+}
+
+func TestNormalizeReasoningPreservesReferenceEfforts(t *testing.T) {
+	for input, want := range map[string]string{
+		"none": "none", "minimal": "low", "low": "low", "medium": "medium",
+		"high": "high", "xhigh": "xhigh", "max": "xhigh",
 	} {
-		if _, err := normalizeRequest([]byte(body), spec); err == nil {
-			t.Fatalf("expected stateless validation error for %s", body)
+		if got := normalizeEffort(input); got != want {
+			t.Fatalf("normalizeEffort(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
@@ -118,12 +231,15 @@ func TestConsoleImportAcceptsJSONPlainTextAndCookieFormat(t *testing.T) {
 	if len(values) != 2 || values[0].AccessToken != "token-one" || values[1].AccessToken != "token-two" {
 		t.Fatalf("plain values = %#v", values)
 	}
-	values, err = parseImportedCredentials([]byte(`{"provider":"grok_console","accounts":[{"name":"console-a","sso_token":"token-a"}]}`))
+	values, err = parseImportedCredentials([]byte(`{"provider":"grok_console","accounts":[{"name":"console-a","sso_token":"token-a","cloudflare_cookies":"cf_clearance=abc"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(values) != 1 || values[0].Provider != account.ProviderConsole || values[0].AuthType != account.AuthTypeSSO || values[0].Name != "console-a" || values[0].AccessToken != "token-a" {
 		t.Fatalf("json values = %#v", values)
+	}
+	if values[0].CloudflareCookies != "cf_clearance=abc" {
+		t.Fatalf("cloudflare cookies = %q", values[0].CloudflareCookies)
 	}
 }
 
@@ -136,22 +252,87 @@ func TestConsoleRetryAfterParsesCompoundDuration(t *testing.T) {
 	}
 }
 
-func TestApplyChromiumClientHintsMatchesConfiguredUserAgent(t *testing.T) {
-	header := make(http.Header)
-	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36")
-	if header.Get("Sec-Ch-Ua") != `"Google Chrome";v="146", "Chromium";v="146", "Not(A:Brand";v="24"` ||
-		header.Get("Sec-Ch-Ua-Mobile") != "?0" || header.Get("Sec-Ch-Ua-Platform") != `"macOS"` {
-		t.Fatalf("client hints = %#v", header)
+func TestNormalizeRateLimitResponsePrefersRetryAfterHeader(t *testing.T) {
+	response := &http.Response{
+		Header: http.Header{"Retry-After": {"17"}},
+		Body:   io.NopCloser(strings.NewReader("Too many requests for team 00000000-0000-0000-0000-000000000013 and model grok-4.20-multi-agent-0309. Requests per Second (actual/limit): 2/2")),
+	}
+	_, metadata, err := normalizeRateLimitResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata == nil || metadata.RetryAfter != 17*time.Second {
+		t.Fatalf("metadata = %#v", metadata)
 	}
 }
 
-func TestApplyChromiumClientHintsSkipsNonChromiumUserAgent(t *testing.T) {
-	header := make(http.Header)
-	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15")
-	for name := range header {
-		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Sec-Ch-Ua") {
-			t.Fatalf("unexpected client hint %q", name)
-		}
+func TestParseConsoleRateLimitMetadataRPS(t *testing.T) {
+	metadata := parseConsoleRateLimitMetadata([]byte(`{"code":"resource-exhausted","error":"Too many requests for team 00000000-0000-0000-0000-000000000013 and model grok-4.3. Your team's rate limit is — Requests per Second (actual/limit): 2/2."}`))
+	if metadata == nil {
+		t.Fatal("metadata is nil")
+	}
+	if metadata.Scope != provider.RateLimitScopeRPS || metadata.Actual != 2 || metadata.Limit != 2 || metadata.RetryAfter != 2*time.Second {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if metadata.TeamID != "00000000-0000-0000-0000-000000000013" || metadata.Model != "grok-4.3" {
+		t.Fatalf("team/model = %q/%q", metadata.TeamID, metadata.Model)
+	}
+}
+
+func TestParseConsoleRateLimitMetadataRPM(t *testing.T) {
+	body := []byte(`{"error":{"message":"Too many requests for team 00000000-0000-0000-0000-000000000013 and model grok-4.20-multi-agent-0309. Requests per Minute (actual/limit): 101/60. Resets in: 3m 4s"}}`)
+	metadata := parseConsoleRateLimitMetadata(body)
+	if metadata == nil {
+		t.Fatal("metadata is nil")
+	}
+	if metadata.Scope != provider.RateLimitScopeRPM || metadata.Actual != 101 || metadata.Limit != 60 || metadata.RetryAfter != 3*time.Minute+4*time.Second {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+func TestParseConsoleRateLimitMetadataOrdinary429(t *testing.T) {
+	if metadata := parseConsoleRateLimitMetadata([]byte(`Rate limit reached. Resets in: 1h`)); metadata != nil {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+func TestParseConsoleRateLimitMetadataExtractsTeamAndModel(t *testing.T) {
+	metadata := parseConsoleRateLimitMetadata([]byte(`{"message":"Too many requests for team 00000000-0000-0000-0000-000000000013 and model grok-4.20-multi-agent-0309. Requests per Second (actual/limit): 3/2. Resets in: 1s"}`))
+	if metadata == nil {
+		t.Fatal("metadata is nil")
+	}
+	if metadata.TeamID != "00000000-0000-0000-0000-000000000013" || metadata.Model != "grok-4.20-multi-agent-0309" {
+		t.Fatalf("team/model = %q/%q", metadata.TeamID, metadata.Model)
+	}
+	if metadata.RetryAfter != 2*time.Second {
+		t.Fatalf("retry after = %s", metadata.RetryAfter)
+	}
+}
+
+func TestAdapterAttachesConsoleRateLimitMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain")
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, "Too many requests for team 00000000-0000-0000-0000-000000000013 and model grok-4.20-multi-agent-0309. Requests per Second (actual/limit): 2/2")
+	}))
+	defer server.Close()
+	adapter, credential := newConsoleTestAdapter(t, server.URL)
+	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.20-multi-agent-0309",
+		Operation: "responses", NormalizeBody: true, Body: []byte(`{"model":"grok-4.20-multi-agent-0309","input":"hello"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.RateLimit == nil {
+		t.Fatal("rate limit metadata is nil")
+	}
+	if response.RateLimit.Scope != provider.RateLimitScopeRPS || response.RateLimit.TeamID != "00000000-0000-0000-0000-000000000013" || response.RateLimit.Model != "grok-4.20-multi-agent-0309" {
+		t.Fatalf("rate limit metadata = %#v", response.RateLimit)
+	}
+	if response.Header.Get("Retry-After") != "2" {
+		t.Fatalf("retry-after = %q", response.Header.Get("Retry-After"))
 	}
 }
 
@@ -161,11 +342,16 @@ func TestAdapterForwardsConsoleHeadersAndNormalizedBody(t *testing.T) {
 		if request.URL.Path != "/v1/responses" || request.Method != http.MethodPost {
 			t.Errorf("request = %s %s", request.Method, request.URL.Path)
 		}
-		if request.Header.Get("Authorization") != "Bearer anonymous" || request.Header.Get("x-cluster") != "https://us-east-1.api.x.ai" {
+		if request.Header.Get("Authorization") != "Bearer anonymous" || request.Header.Get("x-cluster") != "https://us-east-1.api.x.ai" || request.Header.Get("Accept") != "*/*" || request.Header.Get("Priority") != "u=1, i" {
 			t.Errorf("headers = %#v", request.Header)
 		}
-		if request.Header.Get("Accept") != "*/*" || request.Header.Get("Priority") != "u=1, i" {
-			t.Errorf("browser headers = %#v", request.Header)
+		if request.Header.Get("User-Agent") != infraegress.DefaultUserAgent {
+			t.Errorf("user-agent = %q", request.Header.Get("User-Agent"))
+		}
+		if request.Header.Get("Sec-Ch-Ua") != `"Google Chrome";v="146", "Chromium";v="146", "Not(A:Brand";v="24"` ||
+			request.Header.Get("Sec-Ch-Ua-Mobile") != "?0" || request.Header.Get("Sec-Ch-Ua-Platform") != `"macOS"` ||
+			request.Header.Get("Sec-Ch-Ua-Arch") != "x86" || request.Header.Get("Sec-Ch-Ua-Bitness") != "64" {
+			t.Errorf("client hints = %#v", request.Header)
 		}
 		cookie := request.Header.Get("Cookie")
 		if !strings.Contains(cookie, "sso=test-sso") || !strings.Contains(cookie, "sso-rw=test-sso") {
@@ -200,6 +386,16 @@ func TestAdapterForwardsConsoleHeadersAndNormalizedBody(t *testing.T) {
 	}
 	if received["model"] != "grok-4.3" || received["store"] != false || received["metadata"] != nil {
 		t.Fatalf("received = %#v", received)
+	}
+}
+
+func TestApplyChromiumClientHintsSkipsNonChromiumUserAgent(t *testing.T) {
+	header := make(http.Header)
+	applyChromiumClientHints(header, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/18.0 Safari/605.1.15")
+	for name := range header {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Sec-Ch-Ua") {
+			t.Fatalf("unexpected client hint %q", name)
+		}
 	}
 }
 
@@ -260,7 +456,7 @@ func newConsoleTestAdapter(t *testing.T, baseURL string) (*Adapter, account.Cred
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: baseURL, UserAgent: "console-test", TimeoutSeconds: 5}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher)
+	adapter := NewAdapter(Config{BaseURL: baseURL, TimeoutSeconds: 5}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher)
 	credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
 	return adapter, credential
 }

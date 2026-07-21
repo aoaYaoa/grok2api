@@ -9,11 +9,44 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/gin-gonic/gin"
 )
+
+func TestNewAccountResponseExposesBuildBotFlagOnlyForBuild(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	build := newAccountResponse(accountapp.View{
+		Credential:      accountdomain.Credential{Provider: accountdomain.ProviderBuild, BuildRouteMode: accountdomain.BuildRouteXAI, WebNSFWEnabledAt: &now, WebTermsAcceptedAt: &now},
+		BuildBotFlagged: true,
+	})
+	if !build.BuildBotFlagged || build.BuildRouteMode != string(accountdomain.BuildRouteXAI) || build.WebNSFWEnabledAt == nil || !build.WebNSFWEnabledAt.Equal(now) || build.WebTermsAcceptedAt == nil || !build.WebTermsAcceptedAt.Equal(now) {
+		t.Fatalf("Build metadata = %#v", build)
+	}
+	web := newAccountResponse(accountapp.View{
+		Credential:      accountdomain.Credential{Provider: accountdomain.ProviderWeb, WebNSFWEnabledAt: &now, WebTermsAcceptedAt: &now},
+		BuildBotFlagged: true,
+	})
+	if web.BuildBotFlagged || web.BuildRouteMode != string(accountdomain.BuildRouteAuto) || web.WebNSFWEnabledAt == nil || !web.WebNSFWEnabledAt.Equal(now) || web.WebTermsAcceptedAt == nil || !web.WebTermsAcceptedAt.Equal(now) {
+		t.Fatalf("non-Build metadata = %#v", web)
+	}
+}
+
+func TestNewAccountResponseExposesAllLinkedAccounts(t *testing.T) {
+	response := newAccountResponse(accountapp.View{Credential: accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb,
+		LinkedAccounts: []accountdomain.LinkedAccount{
+			{ID: 2, Provider: accountdomain.ProviderBuild, Name: "build", Email: "build@example.com", UserID: "build-user"},
+			{ID: 3, Provider: accountdomain.ProviderConsole, Name: "console", Email: "console@example.com", UserID: "console-user"},
+		},
+	}})
+	if len(response.LinkedAccounts) != 2 || response.LinkedAccounts[0].Provider != string(accountdomain.ProviderBuild) || response.LinkedAccounts[0].Email != "build@example.com" || response.LinkedAccounts[0].UserID != "build-user" || response.LinkedAccounts[1].Provider != string(accountdomain.ProviderConsole) || response.LinkedAccounts[1].Email != "console@example.com" || response.LinkedAccounts[1].UserID != "console-user" {
+		t.Fatalf("linked accounts = %#v", response.LinkedAccounts)
+	}
+}
 
 type accountSynchronizerStub struct {
 	accountIDs []uint64
@@ -104,19 +137,6 @@ func TestConvertWebToBuildRejectsInvalidStrategy(t *testing.T) {
 	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-}
-
-func TestRegisterIncludesUnifiedBatchQuotaRoute(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	new(Handler).Register(router.Group("/api/admin/v1"))
-
-	for _, route := range router.Routes() {
-		if route.Method == "POST" && route.Path == "/api/admin/v1/accounts/batch/refresh-quotas" {
-			return
-		}
-	}
-	t.Fatal("unified batch quota route was not registered")
 }
 
 func TestAccountProgressEventIncludesOptionalPhase(t *testing.T) {

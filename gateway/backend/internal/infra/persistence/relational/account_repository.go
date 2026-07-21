@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -23,13 +25,19 @@ type quotaBreakdownJSON struct {
 }
 
 const (
-	accountPaidBillingPredicate     = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0 OR billing.credit_usage_percent > 0))`
-	accountFreeSignalPredicate      = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.is_unified_billing_user = TRUE OR billing.usage_period_type <> '' OR billing.top_up_method <> '' OR billing.billing_period_start <> '' OR (billing.history_json <> '' AND billing.history_json <> '[]' AND billing.history_json <> 'null'))))`
-	accountRecoveryPredicate        = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
-	providerQuotaExhaustedPredicate = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
-	accountTypeSortExpression       = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
-	accountStatusSortExpression     = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
-	missingConsoleAccountPredicate  = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
+	accountPaidPlanSignal       = `(LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_code), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('super', 'supergrok', 'supergrokpro', 'supergrokheavy', 'supergroklite', 'grokpro', 'xpremium', 'xpremiumplus', 'apikey') OR LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_name), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('super', 'supergrok', 'supergrokpro', 'supergrokheavy', 'supergroklite', 'grokpro', 'xpremium', 'xpremiumplus', 'apikey'))`
+	accountFreePlanSignal       = `(LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_code), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('free', 'grokfree', 'freetier', 'basic', 'grokbasic', 'xbasic') OR LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_name), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('free', 'grokfree', 'freetier', 'basic', 'grokbasic', 'xbasic'))`
+	accountPaidBillingSignals   = `(` + accountPaidPlanSignal + ` OR billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0)`
+	accountPaidBillingPredicate = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountPaidBillingSignals + `)`
+	// 仅 grok_build 的管理员确认 Super entitlement；与 domain.IsBuildSuper 对齐。
+	accountBuildSuperEntitledPredicate = `(provider_accounts.provider = 'grok_build' AND provider_accounts.build_super_entitled = TRUE)`
+	accountBuildSuperPredicate         = `(` + accountPaidBillingPredicate + ` OR ` + accountBuildSuperEntitledPredicate + `)`
+	accountFreeSignalPredicate         = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountFreePlanSignal + `))`
+	accountRecoveryPredicate           = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
+	providerQuotaExhaustedPredicate    = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
+	accountTypeSortExpression          = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountBuildSuperPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
+	accountStatusSortExpression        = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	missingConsoleAccountPredicate     = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
 )
 
 func (r *AccountRepository) List(ctx context.Context, input repository.AccountListQuery) ([]account.Credential, int64, error) {
@@ -44,34 +52,32 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	}
 	switch input.Filter.QuotaType {
 	case "free":
-		query = query.Where("EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.kind = 'free') OR (NOT " + accountPaidBillingPredicate + " AND " + accountFreeSignalPredicate + ")")
+		// Super（Billing paid 或 BuildSuperEntitled）不得落入 free；与 IsKnownFreeBuild / QuotaView 一致。
+		query = query.Where("NOT " + accountBuildSuperPredicate + " AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.kind = 'free') OR " + accountFreeSignalPredicate + ")")
 	case "paid":
-		query = query.Where(accountPaidBillingPredicate)
+		query = query.Where(accountBuildSuperPredicate)
 	case "unknown":
-		query = query.Where("NOT " + accountRecoveryPredicate + " AND NOT " + accountPaidBillingPredicate + " AND NOT " + accountFreeSignalPredicate)
+		query = query.Where("NOT " + accountRecoveryPredicate + " AND NOT " + accountBuildSuperPredicate + " AND NOT " + accountFreeSignalPredicate)
 	case "auto", "basic", "super", "heavy":
 		query = query.Where("EXISTS (SELECT 1 FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id AND profile.tier = ?)", input.Filter.QuotaType)
 	}
-	switch input.Filter.Status {
-	case "active":
-		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, input.Filter.Now)
-	case "disabled":
-		query = query.Where("enabled = ?", false)
-	case "reauthRequired":
-		query = query.Where("enabled = ? AND auth_status = ?", true, account.AuthStatusReauthRequired)
-	case "cooldown":
-		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND cooldown_until > ?", true, account.AuthStatusActive, input.Filter.Now)
-	case "waitingReset":
-		query = query.Where("enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR "+providerQuotaExhaustedPredicate+")", true, account.AuthStatusActive)
-	case "probing":
-		query = query.Where("enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing')", true, account.AuthStatusActive)
-	}
+	query = applyAccountStatusFilter(query, input.Filter.Status, input.Filter.Now)
 	if input.Filter.Refreshable != nil {
 		if *input.Filter.Refreshable {
 			query = query.Where("EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
 		} else {
 			query = query.Where("NOT EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
 		}
+	}
+	if input.Filter.RestrictIDs {
+		if len(input.Filter.AccountIDs) == 0 {
+			query = query.Where("1 = 0")
+		} else {
+			query = query.Where("provider_accounts.id IN ?", input.Filter.AccountIDs)
+		}
+	}
+	if len(input.Filter.ExcludeIDs) > 0 {
+		query = query.Where("provider_accounts.id NOT IN ?", input.Filter.ExcludeIDs)
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -123,13 +129,16 @@ func (r *AccountRepository) ListProviderAccountBatch(ctx context.Context, provid
 	return out, total, nil
 }
 
-func (r *AccountRepository) ListAccountSourceKeys(ctx context.Context, providerValue account.Provider) ([]string, error) {
-	var values []string
+// CountProviderAccountsByIDs 只校验账号主表归属，不加载额度、关联或审计数据。
+func (r *AccountRepository) CountProviderAccountsByIDs(ctx context.Context, providerValue account.Provider, ids []uint64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var count int64
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).
-		Where("provider = ?", providerValue).
-		Order("id ASC").
-		Pluck("source_key", &values).Error
-	return values, err
+		Where("provider = ? AND id IN ?", providerValue, ids).
+		Count(&count).Error
+	return count, err
 }
 
 func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]repository.AccountSummary, error) {
@@ -242,11 +251,35 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 			modelQuotaBlocks[row.AccountID] = account.ModelQuotaBlock{AccountID: row.AccountID, UpstreamModel: row.UpstreamModel, Reason: row.Reason, CooldownUntil: row.CooldownUntil.UTC(), UpdatedAt: row.UpdatedAt.UTC()}
 		}
 	}
+	sharedSuperBuildModel := false
+	if provider == account.ProviderBuild && len(bound) == 0 {
+		for _, value := range values {
+			if !supported[value.ID] {
+				continue
+			}
+			var billing *account.Billing
+			if snapshot, exists := billings[value.ID]; exists {
+				billing = &snapshot
+			}
+			if account.IsBuildSuper(value, billing) {
+				sharedSuperBuildModel = true
+				break
+			}
+		}
+	}
 	result := make([]account.RoutingCandidate, 0, len(values))
 	for _, value := range values {
 		capabilityKnown, supportsModel := known[value.ID], supported[value.ID]
 		if len(bound) > 0 {
 			capabilityKnown, supportsModel = true, true
+		} else if sharedSuperBuildModel {
+			var billing *account.Billing
+			if snapshot, exists := billings[value.ID]; exists {
+				billing = &snapshot
+			}
+			if account.IsBuildSuper(value, billing) {
+				capabilityKnown, supportsModel = true, true
+			}
 		}
 		candidate := account.RoutingCandidate{Credential: value, ModelCapabilityKnown: capabilityKnown, SupportsModel: supportsModel}
 		if billing, ok := billings[value.ID]; ok {
@@ -275,6 +308,9 @@ func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Pr
 	out := make([]account.Credential, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, toAccountDomain(row))
+	}
+	if err := r.attachRoutingEgressIdentities(ctx, provider, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -347,7 +383,8 @@ func (r *AccountRepository) ListMissingConsoleSyncAccounts(ctx context.Context, 
 		return []account.Credential{}, nil
 	}
 	var existing int64
-	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id IN ?", ids).Count(&existing).Error; err != nil {
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id IN ? AND provider = ?", ids, account.ProviderWeb).Count(&existing).Error; err != nil {
 		return nil, err
 	}
 	if existing != int64(len(ids)) {
@@ -356,8 +393,8 @@ func (r *AccountRepository) ListMissingConsoleSyncAccounts(ctx context.Context, 
 	var rows []accountModel
 	if err := r.db.db.WithContext(ctx).
 		Preload("Credential").Preload("WebProfile").
-		Where("id IN ?", ids).
-		Where("(provider <> ? OR "+missingConsoleAccountPredicate+")", account.ProviderWeb, account.ProviderConsole).
+		Where("id IN ? AND provider = ?", ids, account.ProviderWeb).
+		Where(missingConsoleAccountPredicate, account.ProviderConsole).
 		Order("id ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -463,34 +500,162 @@ func (r *AccountRepository) attachAccountLinks(ctx context.Context, values []acc
 		ids = append(ids, values[index].ID)
 		positions[values[index].ID] = index
 	}
-	var rows []struct {
-		WebAccountID   uint64
-		BuildAccountID uint64
-		WebName        string
-		BuildName      string
+	var buildRows []struct {
+		WebAccountID            uint64
+		BuildAccountID          uint64
+		WebName                 string
+		BuildName               string
+		WebEmail                string
+		BuildEmail              string
+		WebUserID               string
+		BuildUserID             string
+		WebSourceKey            string
+		EgressIdentity          string
+		WebNSFWEnabledAt        *time.Time
+		WebTermsAcceptedAt      *time.Time
+		WebTermsAcceptedVersion int
 	}
 	err := r.db.db.WithContext(ctx).Table("account_provider_links AS link").
-		Select("link.web_account_id, link.build_account_id, web.name AS web_name, build.name AS build_name").
+		Select("link.web_account_id, link.build_account_id, web.name AS web_name, build.name AS build_name, web.email AS web_email, build.email AS build_email, web.user_id AS web_user_id, build.user_id AS build_user_id, web.source_key AS web_source_key, profile.egress_identity, profile.nsfw_enabled_at AS web_nsfw_enabled_at, profile.terms_accepted_at AS web_terms_accepted_at, profile.terms_accepted_version AS web_terms_accepted_version").
 		Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
 		Joins("JOIN provider_accounts AS build ON build.id = link.build_account_id").
+		Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
 		Where("link.web_account_id IN ? OR link.build_account_id IN ?", ids, ids).
-		Scan(&rows).Error
+		Scan(&buildRows).Error
 	if err != nil {
 		return err
 	}
-	for _, row := range rows {
+	for _, row := range buildRows {
+		egressIdentity := linkedWebEgressIdentity(row.EgressIdentity, row.WebSourceKey)
 		if index, ok := positions[row.WebAccountID]; ok {
 			values[index].LinkedAccountID = row.BuildAccountID
 			values[index].LinkedAccountName = row.BuildName
 			values[index].LinkedProvider = account.ProviderBuild
+			values[index].LinkedAccounts = append(values[index].LinkedAccounts, account.LinkedAccount{ID: row.BuildAccountID, Provider: account.ProviderBuild, Name: row.BuildName, Email: row.BuildEmail, UserID: row.BuildUserID})
+			if values[index].EgressIdentity == "" {
+				values[index].EgressIdentity = egressIdentity
+			}
+			values[index].WebNSFWEnabledAt = row.WebNSFWEnabledAt
+			values[index].WebTermsAcceptedVersion = row.WebTermsAcceptedVersion
+			values[index].WebTermsAcceptedAt = currentWebTermsAcceptedAt(row.WebTermsAcceptedAt, row.WebTermsAcceptedVersion)
 		}
 		if index, ok := positions[row.BuildAccountID]; ok {
 			values[index].LinkedAccountID = row.WebAccountID
 			values[index].LinkedAccountName = row.WebName
 			values[index].LinkedProvider = account.ProviderWeb
+			values[index].LinkedAccounts = append(values[index].LinkedAccounts, account.LinkedAccount{ID: row.WebAccountID, Provider: account.ProviderWeb, Name: row.WebName, Email: row.WebEmail, UserID: row.WebUserID})
+			values[index].EgressIdentity = egressIdentity
+			values[index].WebNSFWEnabledAt = row.WebNSFWEnabledAt
+			values[index].WebTermsAcceptedVersion = row.WebTermsAcceptedVersion
+			values[index].WebTermsAcceptedAt = currentWebTermsAcceptedAt(row.WebTermsAcceptedAt, row.WebTermsAcceptedVersion)
+		}
+	}
+	var consoleRows []struct {
+		WebAccountID            uint64
+		ConsoleAccountID        uint64
+		WebName                 string
+		ConsoleName             string
+		WebEmail                string
+		ConsoleEmail            string
+		WebUserID               string
+		ConsoleUserID           string
+		WebSourceKey            string
+		EgressIdentity          string
+		WebNSFWEnabledAt        *time.Time
+		WebTermsAcceptedAt      *time.Time
+		WebTermsAcceptedVersion int
+	}
+	if err := r.db.db.WithContext(ctx).Table("web_console_account_links AS link").
+		Select("link.web_account_id, link.console_account_id, web.name AS web_name, console.name AS console_name, web.email AS web_email, console.email AS console_email, web.user_id AS web_user_id, console.user_id AS console_user_id, web.source_key AS web_source_key, profile.egress_identity, profile.nsfw_enabled_at AS web_nsfw_enabled_at, profile.terms_accepted_at AS web_terms_accepted_at, profile.terms_accepted_version AS web_terms_accepted_version").
+		Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
+		Joins("JOIN provider_accounts AS console ON console.id = link.console_account_id").
+		Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
+		Where("link.web_account_id IN ? OR link.console_account_id IN ?", ids, ids).
+		Scan(&consoleRows).Error; err != nil {
+		return err
+	}
+	for _, row := range consoleRows {
+		egressIdentity := linkedWebEgressIdentity(row.EgressIdentity, row.WebSourceKey)
+		if index, ok := positions[row.WebAccountID]; ok {
+			values[index].LinkedAccounts = append(values[index].LinkedAccounts, account.LinkedAccount{ID: row.ConsoleAccountID, Provider: account.ProviderConsole, Name: row.ConsoleName, Email: row.ConsoleEmail, UserID: row.ConsoleUserID})
+			if values[index].EgressIdentity == "" {
+				values[index].EgressIdentity = egressIdentity
+			}
+			values[index].WebNSFWEnabledAt = row.WebNSFWEnabledAt
+			values[index].WebTermsAcceptedVersion = row.WebTermsAcceptedVersion
+			values[index].WebTermsAcceptedAt = currentWebTermsAcceptedAt(row.WebTermsAcceptedAt, row.WebTermsAcceptedVersion)
+		}
+		if index, ok := positions[row.ConsoleAccountID]; ok {
+			values[index].LinkedAccounts = append(values[index].LinkedAccounts, account.LinkedAccount{ID: row.WebAccountID, Provider: account.ProviderWeb, Name: row.WebName, Email: row.WebEmail, UserID: row.WebUserID})
+			values[index].EgressIdentity = egressIdentity
+			values[index].WebNSFWEnabledAt = row.WebNSFWEnabledAt
+			values[index].WebTermsAcceptedVersion = row.WebTermsAcceptedVersion
+			values[index].WebTermsAcceptedAt = currentWebTermsAcceptedAt(row.WebTermsAcceptedAt, row.WebTermsAcceptedVersion)
 		}
 	}
 	return nil
+}
+
+func currentWebTermsAcceptedAt(value *time.Time, version int) *time.Time {
+	if version < account.CurrentWebTermsVersion {
+		return nil
+	}
+	return value
+}
+
+// attachRoutingEgressIdentities 只补充推理路由需要的稳定出口身份。
+// 管理端展示所需的账号名称和 linkedAccounts 仍由 attachAccountLinks 加载，
+// 避免路由候选缓存刷新时额外查询两类完整关系。
+func (r *AccountRepository) attachRoutingEgressIdentities(ctx context.Context, provider account.Provider, values []account.Credential) error {
+	if len(values) == 0 || provider == account.ProviderWeb {
+		return nil
+	}
+	ids := make([]uint64, 0, len(values))
+	positions := make(map[uint64]int, len(values))
+	for index := range values {
+		ids = append(ids, values[index].ID)
+		positions[values[index].ID] = index
+	}
+	type identityRow struct {
+		AccountID      uint64
+		WebSourceKey   string
+		EgressIdentity string
+	}
+	var rows []identityRow
+	query := r.db.db.WithContext(ctx)
+	switch provider {
+	case account.ProviderBuild:
+		query = query.Table("account_provider_links AS link").
+			Select("link.build_account_id AS account_id, web.source_key AS web_source_key, profile.egress_identity").
+			Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
+			Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
+			Where("link.build_account_id IN ?", ids)
+	case account.ProviderConsole:
+		query = query.Table("web_console_account_links AS link").
+			Select("link.console_account_id AS account_id, web.source_key AS web_source_key, profile.egress_identity").
+			Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
+			Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
+			Where("link.console_account_id IN ?", ids)
+	default:
+		return nil
+	}
+	if err := query.Scan(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if index, ok := positions[row.AccountID]; ok {
+			values[index].EgressIdentity = linkedWebEgressIdentity(row.EgressIdentity, row.WebSourceKey)
+		}
+	}
+	return nil
+}
+
+func linkedWebEgressIdentity(stored, sourceKey string) string {
+	if value := strings.TrimSpace(stored); value != "" {
+		return value
+	}
+	value, _ := egressIdentityFromWebSourceKey(sourceKey)
+	return value
 }
 
 func (r *AccountRepository) UpsertByIdentity(ctx context.Context, value account.Credential) (account.Credential, bool, error) {
@@ -514,8 +679,12 @@ func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []a
 	results := make([]repository.AccountUpsertResult, len(values))
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		identityKeys := make([]string, 0, len(values))
+		sourceKeysByProvider := make(map[account.Provider][]string)
 		for _, value := range values {
 			identityKeys = append(identityKeys, fromAccountDomain(value).IdentityKey)
+			if strings.TrimSpace(value.SourceKey) != "" {
+				sourceKeysByProvider[value.Provider] = append(sourceKeysByProvider[value.Provider], value.SourceKey)
+			}
 		}
 		var existingRows []accountModel
 		if err := tx.Where("identity_key IN ?", identityKeys).Find(&existingRows).Error; err != nil {
@@ -525,11 +694,32 @@ func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []a
 		for _, row := range existingRows {
 			existingByIdentity[row.IdentityKey] = row
 		}
+		existingBySource := make(map[string]accountModel, len(values))
+		for providerValue, sourceKeys := range sourceKeysByProvider {
+			var sourceRows []accountModel
+			if err := tx.Where("provider = ? AND source_key IN ?", providerValue, sourceKeys).Find(&sourceRows).Error; err != nil {
+				return err
+			}
+			for _, row := range sourceRows {
+				key := providerSourceLookupKey(row.Provider, row.SourceKey)
+				if existing, duplicate := existingBySource[key]; duplicate && existing.ID != row.ID {
+					return fmt.Errorf("Provider %s 的来源凭据匹配多个账号", row.Provider)
+				}
+				existingBySource[key] = row
+			}
+		}
 		for index, value := range values {
 			identityKey := fromAccountDomain(value).IdentityKey
-			existing, found := existingByIdentity[identityKey]
+			existing, foundByIdentity := existingByIdentity[identityKey]
+			bySource, foundBySource := existingBySource[providerSourceLookupKey(string(value.Provider), value.SourceKey)]
+			if foundByIdentity && foundBySource && existing.ID != bySource.ID {
+				return fmt.Errorf("账号身份与来源凭据指向不同账号")
+			}
+			if !foundByIdentity && foundBySource {
+				existing = bySource
+			}
 			var current *accountModel
-			if found {
+			if foundByIdentity || foundBySource {
 				current = &existing
 			}
 			result, stored, err := upsertKnownAccountByIdentity(tx, value, current)
@@ -538,6 +728,7 @@ func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []a
 			}
 			results[index] = result
 			existingByIdentity[stored.IdentityKey] = stored
+			existingBySource[providerSourceLookupKey(stored.Provider, stored.SourceKey)] = stored
 		}
 		return nil
 	})
@@ -549,17 +740,37 @@ func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []a
 
 func upsertAccountByIdentity(tx *gorm.DB, value account.Credential) (repository.AccountUpsertResult, error) {
 	row := fromAccountDomain(value)
-	var existing accountModel
-	err := tx.Where("identity_key = ?", row.IdentityKey).First(&existing).Error
-	if err == nil {
-		result, _, err := upsertKnownAccountByIdentity(tx, value, &existing)
+	var byIdentity accountModel
+	identityErr := tx.Where("identity_key = ?", row.IdentityKey).First(&byIdentity).Error
+	if identityErr != nil && !errors.Is(identityErr, gorm.ErrRecordNotFound) {
+		return repository.AccountUpsertResult{}, identityErr
+	}
+	var sourceRows []accountModel
+	if strings.TrimSpace(row.SourceKey) != "" {
+		if err := tx.Where("provider = ? AND source_key = ?", row.Provider, row.SourceKey).Limit(2).Find(&sourceRows).Error; err != nil {
+			return repository.AccountUpsertResult{}, err
+		}
+		if len(sourceRows) > 1 {
+			return repository.AccountUpsertResult{}, fmt.Errorf("Provider %s 的来源凭据匹配多个账号", row.Provider)
+		}
+	}
+	if identityErr == nil && len(sourceRows) == 1 && byIdentity.ID != sourceRows[0].ID {
+		return repository.AccountUpsertResult{}, fmt.Errorf("账号身份与来源凭据指向不同账号")
+	}
+	if identityErr == nil {
+		result, _, err := upsertKnownAccountByIdentity(tx, value, &byIdentity)
 		return result, err
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return repository.AccountUpsertResult{}, err
+	if len(sourceRows) == 1 {
+		result, _, err := upsertKnownAccountByIdentity(tx, value, &sourceRows[0])
+		return result, err
 	}
 	result, _, err := upsertKnownAccountByIdentity(tx, value, nil)
 	return result, err
+}
+
+func providerSourceLookupKey(providerValue, sourceKey string) string {
+	return providerValue + "\x00" + sourceKey
 }
 
 func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existing *accountModel) (repository.AccountUpsertResult, accountModel, error) {
@@ -584,6 +795,12 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		row.LastUsedAt = existing.LastUsedAt
 		row.ObservedModel = existing.ObservedModel
 		row.ObservedModelAt = existing.ObservedModelAt
+		// 账号级 Build 路由、XAI 回退记录与 Super entitlement 在 upsert/转换/刷新路径中保留。
+		row.BuildAPIFallback = existing.BuildAPIFallback
+		row.BuildRouteMode = existing.BuildRouteMode
+		row.BuildSuperEntitled = existing.BuildSuperEntitled
+		// reauth_marked_at 与 Update 路径一致：保持 reauth 时永不被普通 upsert 改写。
+		applyReauthMarkedAtTransition(&row, *existing)
 		if err := tx.Save(&row).Error; err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
@@ -594,6 +811,13 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 	}
 	if row.AuthStatus == "" {
 		row.AuthStatus = string(account.AuthStatusActive)
+	}
+	if row.AuthStatus == string(account.AuthStatusReauthRequired) && row.ReauthMarkedAt == nil {
+		now := time.Now().UTC()
+		row.ReauthMarkedAt = &now
+	}
+	if row.AuthStatus != string(account.AuthStatusReauthRequired) {
+		row.ReauthMarkedAt = nil
 	}
 	if row.Priority == 0 {
 		row.Priority = account.DefaultPriority
@@ -614,6 +838,14 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 func (r *AccountRepository) Update(ctx context.Context, value account.Credential) (account.Credential, error) {
 	row := fromAccountDomain(value)
 	if err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing accountModel
+		if err := tx.Select("identity_key", "created_at", "auth_status", "reauth_marked_at").First(&existing, row.ID).Error; err != nil {
+			return err
+		}
+		// 身份同步补充的 user_id/email 不得让普通编辑重写持久化身份键。
+		row.IdentityKey = existing.IdentityKey
+		row.CreatedAt = existing.CreatedAt
+		applyReauthMarkedAtTransition(&row, existing)
 		if err := tx.Save(&row).Error; err != nil {
 			return err
 		}
@@ -624,6 +856,22 @@ func (r *AccountRepository) Update(ctx context.Context, value account.Credential
 	return r.Get(ctx, row.ID)
 }
 
+// applyReauthMarkedAtTransition 仅在状态切入 reauthRequired 时打锚点；保持 reauth 时保留原锚点；离开 reauth 时清空。
+func applyReauthMarkedAtTransition(row *accountModel, existing accountModel) {
+	if row.AuthStatus == string(account.AuthStatusReauthRequired) {
+		if existing.AuthStatus == string(account.AuthStatusReauthRequired) && existing.ReauthMarkedAt != nil {
+			row.ReauthMarkedAt = existing.ReauthMarkedAt
+			return
+		}
+		if row.ReauthMarkedAt == nil {
+			now := time.Now().UTC()
+			row.ReauthMarkedAt = &now
+		}
+		return
+	}
+	row.ReauthMarkedAt = nil
+}
+
 func saveAccountRelations(tx *gorm.DB, value account.Credential, accountID uint64) error {
 	value.ID = accountID
 	credential := fromAccountCredentialDomain(value)
@@ -631,9 +879,111 @@ func saveAccountRelations(tx *gorm.DB, value account.Credential, accountID uint6
 		return err
 	}
 	if profile := fromWebProfileDomain(value); profile != nil {
-		return tx.Save(profile).Error
+		updates := []string{"tier", "synced_at"}
+		if profile.NSFWEnabledAt != nil {
+			updates = append(updates, "nsfw_enabled_at")
+		}
+		if profile.TermsAcceptedAt != nil {
+			updates = append(updates, "terms_accepted_at")
+		}
+		if profile.TermsAcceptedVersion > 0 {
+			updates = append(updates, "terms_accepted_version")
+		}
+		if profile.BirthDateSetAt != nil {
+			updates = append(updates, "birth_date_set_at")
+		}
+		if strings.TrimSpace(profile.EgressIdentity) != "" {
+			updates = append(updates, "egress_identity")
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "account_id"}},
+			DoUpdates: clause.AssignmentColumns(updates),
+		}).Create(profile).Error
 	}
 	return tx.Where("account_id = ?", accountID).Delete(&webAccountProfileModel{}).Error
+}
+
+// MarkWebNSFWEnabled 幂等保存首次成功开启时间；重复执行不会覆盖已有标记。
+func (r *AccountRepository) MarkWebNSFWEnabled(ctx context.Context, id uint64, enabledAt time.Time) error {
+	if id == 0 || enabledAt.IsZero() {
+		return fmt.Errorf("Web NSFW 标记参数无效")
+	}
+	return r.markWebProfileTimestamp(ctx, id, "nsfw_enabled_at", enabledAt)
+}
+
+// MarkWebTermsAccepted 幂等保存已完整接受的产品协议版本。
+// 协议升级时会同步更新完成时间；相同或更高版本不会被覆盖。
+func (r *AccountRepository) MarkWebTermsAccepted(ctx context.Context, id uint64, version int, acceptedAt time.Time) error {
+	if id == 0 || version <= 0 || acceptedAt.IsZero() {
+		return fmt.Errorf("Web 服务协议标记参数无效")
+	}
+	acceptedAt = acceptedAt.UTC()
+	return mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var accountRow accountModel
+		if err := tx.Select("id", "provider").First(&accountRow, id).Error; err != nil {
+			return err
+		}
+		if account.Provider(accountRow.Provider) != account.ProviderWeb {
+			return fmt.Errorf("仅 Grok Web 账号支持资料状态标记")
+		}
+		profile := webAccountProfileModel{
+			AccountID: id, Tier: string(account.WebTierAuto),
+			TermsAcceptedAt: &acceptedAt, TermsAcceptedVersion: version,
+		}
+		created := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&profile)
+		if created.Error != nil || created.RowsAffected > 0 {
+			return created.Error
+		}
+		return tx.Model(&webAccountProfileModel{}).
+			Where("account_id = ? AND (terms_accepted_version < ? OR terms_accepted_at IS NULL)", id, version).
+			Updates(map[string]any{"terms_accepted_at": acceptedAt, "terms_accepted_version": version}).Error
+	}))
+}
+
+// MarkWebBirthDateSet 幂等保存首次成功设置或确认已有生日的时间。
+func (r *AccountRepository) MarkWebBirthDateSet(ctx context.Context, id uint64, setAt time.Time) error {
+	if id == 0 || setAt.IsZero() {
+		return fmt.Errorf("Web 生日标记参数无效")
+	}
+	return r.markWebProfileTimestamp(ctx, id, "birth_date_set_at", setAt)
+}
+
+func (r *AccountRepository) markWebProfileTimestamp(ctx context.Context, id uint64, column string, value time.Time) error {
+	value = value.UTC()
+	return mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var accountRow accountModel
+		if err := tx.Select("id", "provider").First(&accountRow, id).Error; err != nil {
+			return err
+		}
+		if account.Provider(accountRow.Provider) != account.ProviderWeb {
+			return fmt.Errorf("仅 Grok Web 账号支持资料状态标记")
+		}
+		profile := webAccountProfileModel{AccountID: id, Tier: string(account.WebTierAuto)}
+		switch column {
+		case "nsfw_enabled_at":
+			profile.NSFWEnabledAt = &value
+		case "birth_date_set_at":
+			profile.BirthDateSetAt = &value
+		default:
+			return fmt.Errorf("Web 资料状态字段无效")
+		}
+		created := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&profile)
+		if created.Error != nil || created.RowsAffected > 0 {
+			return created.Error
+		}
+		switch column {
+		case "nsfw_enabled_at":
+			return tx.Model(&webAccountProfileModel{}).
+				Where("account_id = ? AND nsfw_enabled_at IS NULL", id).
+				Update("nsfw_enabled_at", value).Error
+		case "birth_date_set_at":
+			return tx.Model(&webAccountProfileModel{}).
+				Where("account_id = ? AND birth_date_set_at IS NULL", id).
+				Update("birth_date_set_at", value).Error
+		default:
+			return fmt.Errorf("Web 资料状态字段无效")
+		}
+	}))
 }
 
 func (r *AccountRepository) UpdateMany(ctx context.Context, ids []uint64, updates repository.AccountUpdates) (int64, error) {
@@ -661,22 +1011,229 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, ids []uint64, update
 }
 
 func (r *AccountRepository) Delete(ctx context.Context, id uint64) error {
-	result := r.db.db.WithContext(ctx).Delete(&accountModel{}, id)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var lockedID uint64
+		if err := tx.Model(&accountModel{}).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).Pluck("id", &lockedID).Error; err != nil {
+			return err
+		}
+		if lockedID == 0 {
+			return repository.ErrNotFound
+		}
+		if err := rejectAccountsWithMediaJobs(tx, []uint64{id}); err != nil {
+			return err
+		}
+		return mapError(tx.Delete(&accountModel{}, id).Error)
+	})
 }
 
 func (r *AccountRepository) DeleteMany(ctx context.Context, ids []uint64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	result := r.db.db.WithContext(ctx).Where("id IN ?", ids).Delete(&accountModel{})
-	return result.RowsAffected, result.Error
+	var deleted int64
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var lockedIDs []uint64
+		if err := tx.Model(&accountModel{}).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", ids).Pluck("id", &lockedIDs).Error; err != nil {
+			return err
+		}
+		if err := rejectAccountsWithMediaJobs(tx, lockedIDs); err != nil {
+			return err
+		}
+		result := tx.Where("id IN ?", lockedIDs).Delete(&accountModel{})
+		deleted = result.RowsAffected
+		return result.Error
+	})
+	return deleted, err
+}
+
+func (r *AccountRepository) ListAutoCleanReauthCandidates(ctx context.Context, markedBefore time.Time, includeDisabled bool, afterID uint64, limit int) ([]uint64, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	query := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Select("id").
+		Where("auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", account.AuthStatusReauthRequired, markedBefore.UTC()).
+		Where("NOT EXISTS (SELECT 1 FROM media_jobs job WHERE job.account_id = provider_accounts.id AND job.status IN ?)", []string{string(media.StatusQueued), string(media.StatusInProgress)})
+	if afterID > 0 {
+		query = query.Where("id > ?", afterID)
+	}
+	if !includeDisabled {
+		query = query.Where("enabled = ?", true)
+	}
+	var candidates []uint64
+	err := query.Order("id ASC").Limit(limit).Pluck("id", &candidates).Error
+	return candidates, err
+}
+
+func (r *AccountRepository) DeleteAutoCleanReauthCandidates(ctx context.Context, markedBefore time.Time, includeDisabled bool, candidateIDs []uint64) ([]uint64, error) {
+	if len(candidateIDs) == 0 {
+		return []uint64{}, nil
+	}
+	deletedIDs := make([]uint64, 0, len(candidateIDs))
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		deletable, err := excludeAccountsWithActiveMediaJobs(tx, candidateIDs)
+		if err != nil {
+			return err
+		}
+		if len(deletable) == 0 {
+			return nil
+		}
+
+		var lockedIDs []uint64
+		lockQuery := tx.Model(&accountModel{}).Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id IN ? AND auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", deletable, account.AuthStatusReauthRequired, markedBefore.UTC())
+		if !includeDisabled {
+			lockQuery = lockQuery.Where("enabled = ?", true)
+		}
+		if err := lockQuery.Pluck("id", &lockedIDs).Error; err != nil {
+			return err
+		}
+		// lock 后再过滤活动视频任务，避免 list 与 delete 之间的 TOCTOU。
+		lockedIDs, err = excludeAccountsWithActiveMediaJobs(tx, lockedIDs)
+		if err != nil {
+			return err
+		}
+		if len(lockedIDs) == 0 {
+			return nil
+		}
+		deletion := tx.Where("id IN ? AND auth_status = ? AND reauth_marked_at IS NOT NULL AND reauth_marked_at < ?", lockedIDs, account.AuthStatusReauthRequired, markedBefore.UTC())
+		if !includeDisabled {
+			deletion = deletion.Where("enabled = ?", true)
+		}
+		result := deletion.Delete(&accountModel{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == int64(len(lockedIDs)) {
+			deletedIDs = append(deletedIDs, lockedIDs...)
+			return nil
+		}
+		var remaining []uint64
+		if err := tx.Model(&accountModel{}).Where("id IN ?", lockedIDs).Pluck("id", &remaining).Error; err != nil {
+			return err
+		}
+		remainingSet := make(map[uint64]struct{}, len(remaining))
+		for _, id := range remaining {
+			remainingSet[id] = struct{}{}
+		}
+		for _, id := range lockedIDs {
+			if _, exists := remainingSet[id]; !exists {
+				deletedIDs = append(deletedIDs, id)
+			}
+		}
+		return nil
+	})
+	return deletedIDs, err
+}
+
+// excludeAccountsWithActiveMediaJobs 返回无 queued/in_progress 视频任务的账号 ID（顺序保持输入顺序）。
+func excludeAccountsWithActiveMediaJobs(db *gorm.DB, ids []uint64) ([]uint64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var blocked []uint64
+	if err := db.Model(&mediaJobModel{}).
+		Distinct("account_id").
+		Where("account_id IN ? AND status IN ?", ids, []string{string(media.StatusQueued), string(media.StatusInProgress)}).
+		Pluck("account_id", &blocked).Error; err != nil {
+		return nil, err
+	}
+	if len(blocked) == 0 {
+		out := make([]uint64, len(ids))
+		copy(out, ids)
+		return out, nil
+	}
+	blockedSet := make(map[uint64]struct{}, len(blocked))
+	for _, id := range blocked {
+		blockedSet[id] = struct{}{}
+	}
+	out := make([]uint64, 0, len(ids)-len(blocked))
+	for _, id := range ids {
+		if _, skip := blockedSet[id]; skip {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// rejectAccountsWithMediaJobs 仅保护仍需账号继续执行的活动视频任务。
+// completed/failed 已保存账号名称等快照，删除账号后由外键 SET NULL 保留历史。
+func rejectAccountsWithMediaJobs(db *gorm.DB, ids []uint64) error {
+	var count int64
+	if err := db.Model(&mediaJobModel{}).
+		Where("account_id IN ? AND status IN ?", ids, []string{string(media.StatusQueued), string(media.StatusInProgress)}).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("%w: 账号仍关联 %d 条排队中或进行中的视频任务，请等待任务结束后重试", repository.ErrConflict, count)
+	}
+	return nil
+}
+
+func (r *AccountRepository) DeleteAccountStatusBatch(ctx context.Context, providerValue account.Provider, status string, now time.Time, limit int) ([]uint64, int, error) {
+	if limit < 1 {
+		return []uint64{}, 0, nil
+	}
+	if status != "disabled" && status != "reauthRequired" && status != "cooldown" {
+		return nil, 0, fmt.Errorf("不支持清理账号状态 %q", status)
+	}
+	deletedIDs := make([]uint64, 0, limit)
+	candidateCount := 0
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var candidates []uint64
+		selection := applyAccountStatusFilter(tx.Model(&accountModel{}).Where("provider = ?", providerValue), status, now)
+		if err := selection.Order("id ASC").Limit(limit).Pluck("id", &candidates).Error; err != nil || len(candidates) == 0 {
+			return err
+		}
+		candidateCount = len(candidates)
+		if err := rejectAccountsWithMediaJobs(tx, candidates); err != nil {
+			return err
+		}
+		deletion := applyAccountStatusFilter(tx.Where("id IN ?", candidates), status, now).Delete(&accountModel{})
+		if deletion.Error != nil {
+			return deletion.Error
+		}
+		if deletion.RowsAffected == int64(len(candidates)) {
+			deletedIDs = append(deletedIDs, candidates...)
+			return nil
+		}
+		var remaining []uint64
+		if err := tx.Model(&accountModel{}).Where("id IN ?", candidates).Pluck("id", &remaining).Error; err != nil {
+			return err
+		}
+		remainingSet := make(map[uint64]struct{}, len(remaining))
+		for _, id := range remaining {
+			remainingSet[id] = struct{}{}
+		}
+		for _, id := range candidates {
+			if _, exists := remainingSet[id]; !exists {
+				deletedIDs = append(deletedIDs, id)
+			}
+		}
+		return nil
+	})
+	return deletedIDs, candidateCount, err
+}
+
+func applyAccountStatusFilter(query *gorm.DB, status string, now time.Time) *gorm.DB {
+	switch status {
+	case "active":
+		return query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, now)
+	case "disabled":
+		return query.Where("enabled = ?", false)
+	case "reauthRequired":
+		return query.Where("enabled = ? AND auth_status = ?", true, account.AuthStatusReauthRequired)
+	case "cooldown":
+		return query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND cooldown_until > ?", true, account.AuthStatusActive, now)
+	case "waitingReset":
+		return query.Where("enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR "+providerQuotaExhaustedPredicate+")", true, account.AuthStatusActive)
+	case "probing":
+		return query.Where("enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing')", true, account.AuthStatusActive)
+	default:
+		return query
+	}
 }
 
 func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time) (account.Credential, error) {
@@ -693,7 +1250,7 @@ func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessT
 		if err := tx.Model(&accountCredentialModel{}).Where("account_id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
-		return tx.Model(&accountModel{}).Where("id = ?", id).Updates(map[string]any{"auth_status": string(account.AuthStatusActive), "last_error": ""}).Error
+		return tx.Model(&accountModel{}).Where("id = ?", id).Updates(map[string]any{"auth_status": string(account.AuthStatusActive), "last_error": "", "reauth_marked_at": nil}).Error
 	}); err != nil {
 		return account.Credential{}, err
 	}
@@ -797,6 +1354,27 @@ func (r *AccountRepository) UpdateObservedModel(ctx context.Context, id uint64, 
 	return r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Updates(map[string]any{"observed_model": truncate(model, 255), "observed_model_at": observedAt}).Error
 }
 
+// MarkBuildAPIFallback 仅对 grok_build 账号幂等设置/清除 XAI 推理回退标记。
+func (r *AccountRepository) MarkBuildAPIFallback(ctx context.Context, id uint64, enabled bool) error {
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ? AND provider = ?", id, account.ProviderBuild).
+		Update("build_api_fallback", enabled)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return repository.ErrNotFound
+		}
+		return fmt.Errorf("仅 grok_build 账号支持 Build API 降级标记")
+	}
+	return nil
+}
+
 func (r *AccountRepository) UpdateHealth(ctx context.Context, id uint64, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error {
 	updates := map[string]any{"failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": truncate(lastError, 512)}
 	if success {
@@ -853,7 +1431,7 @@ func (r *AccountRepository) SaveBilling(ctx context.Context, value account.Billi
 	if err != nil {
 		return err
 	}
-	row := billingModel{AccountID: value.AccountID, PlanCode: truncate(value.PlanCode, 100), PlanName: truncate(value.PlanName, 160), MonthlyLimit: value.MonthlyLimit, Used: value.Used, OnDemandCap: value.OnDemandCap, OnDemandUsed: value.OnDemandUsed, PrepaidBalance: value.PrepaidBalance, CreditUsagePercent: value.CreditUsagePercent, IsUnifiedBillingUser: value.IsUnifiedBillingUser, TopUpMethod: truncate(value.TopUpMethod, 100), UsagePeriodType: truncate(value.UsagePeriodType, 100), UsagePeriodStart: truncate(value.UsagePeriodStart, 64), UsagePeriodEnd: truncate(value.UsagePeriodEnd, 64), BillingPeriodStart: truncate(value.BillingPeriodStart, 64), BillingPeriodEnd: truncate(value.BillingPeriodEnd, 64), HistoryJSON: string(history), SyncedAt: value.SyncedAt}
+	row := billingModel{AccountID: value.AccountID, PlanCode: truncate(value.PlanCode, 100), PlanName: truncate(value.PlanName, 160), MonthlyLimit: value.MonthlyLimit, Used: value.Used, OnDemandCap: value.OnDemandCap, OnDemandUsed: value.OnDemandUsed, PrepaidBalance: value.PrepaidBalance, CreditUsagePercent: value.CreditUsagePercent, IsUnifiedBillingUser: value.IsUnifiedBillingUser, OnDemandEnabled: value.OnDemandEnabled, TopUpMethod: truncate(value.TopUpMethod, 100), UsagePeriodType: truncate(value.UsagePeriodType, 100), UsagePeriodStart: truncate(value.UsagePeriodStart, 64), UsagePeriodEnd: truncate(value.UsagePeriodEnd, 64), BillingPeriodStart: truncate(value.BillingPeriodStart, 64), BillingPeriodEnd: truncate(value.BillingPeriodEnd, 64), HistoryJSON: string(history), SyncedAt: value.SyncedAt}
 	return r.db.db.WithContext(ctx).Save(&row).Error
 }
 

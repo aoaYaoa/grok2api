@@ -12,6 +12,7 @@ var schemaModels = []any{
 	&accountModel{},
 	&accountCredentialModel{},
 	&accountProviderLinkModel{},
+	&webConsoleAccountLinkModel{},
 	&webAccountProfileModel{},
 	&quotaWindowModel{},
 	&billingModel{},
@@ -31,6 +32,7 @@ var schemaModels = []any{
 	&webResponseStateModel{},
 	&mediaJobModel{},
 	&mediaAssetModel{},
+	&mediaUploadTicketModel{},
 	&runtimeSettingsModel{},
 	&egressNodeModel{},
 }
@@ -43,6 +45,8 @@ var schemaIndexes = []string{
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_accounts_identity_key ON provider_accounts(identity_key)",
 	"CREATE INDEX IF NOT EXISTS idx_accounts_routing ON provider_accounts(provider, enabled, auth_status, priority DESC, id ASC)",
 	"CREATE INDEX IF NOT EXISTS idx_accounts_created_id ON provider_accounts(created_at DESC, id DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_accounts_auto_clean_reauth ON provider_accounts(auth_status, reauth_marked_at, id)",
+	"CREATE INDEX IF NOT EXISTS idx_accounts_auto_clean_reauth_cursor ON provider_accounts(auth_status, enabled, id, reauth_marked_at)",
 	"CREATE INDEX IF NOT EXISTS idx_account_credentials_refresh_due ON account_credentials(refresh_due_at, account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_quota_windows_due ON account_quota_windows(remaining, reset_at, account_id)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_model_routes_public_id ON model_routes(public_id)",
@@ -69,9 +73,13 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_web_response_states_expires ON web_response_states(expires_at)",
 	"CREATE INDEX IF NOT EXISTS idx_web_response_states_account ON web_response_states(account_id, created_at DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_client_created ON media_jobs(client_key_id, created_at DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_media_jobs_account_status ON media_jobs(account_id, status)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_recovery ON media_jobs(status, lease_until, created_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_usage_recovery ON media_jobs(status, usage_recorded_at, completed_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC, id)",
+	"CREATE INDEX IF NOT EXISTS idx_media_assets_kind_created ON media_assets(kind, created_at DESC, id)",
+	"CREATE INDEX IF NOT EXISTS idx_media_upload_tickets_expires ON media_upload_tickets(expires_at, consumed_at)",
+	"CREATE INDEX IF NOT EXISTS idx_media_jobs_result_asset ON media_jobs(result_asset_id) WHERE result_asset_id <> ''",
 }
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。
@@ -83,11 +91,43 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 			return fmt.Errorf("清理旧版所有域出口节点: %w", err)
 		}
 	}
-	if err := db.AutoMigrate(schemaModels...); err != nil {
-		return fmt.Errorf("初始化数据库表: %w", err)
+	autoMigrate := func() error {
+		return d.db.WithContext(ctx).AutoMigrate(schemaModels...)
+	}
+	var migrateErr error
+	if d.dialect == "sqlite" {
+		// SQLite 修改 CHECK 等表级约束时会重建表。provider_accounts 等父表已被多个
+		// 子表引用，必须在固定连接上暂停外键，否则 DROP 旧父表会直接失败。
+		migrateErr = d.withSQLiteForeignKeysDisabled(ctx, autoMigrate)
+	} else {
+		migrateErr = autoMigrate()
+	}
+	if migrateErr != nil {
+		return fmt.Errorf("初始化数据库表: %w", migrateErr)
 	}
 	if err := d.ensureConsoleConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移 Console 数据库约束: %w", err)
+	}
+	if err := d.ensureAuditOperationConstraints(ctx); err != nil {
+		return fmt.Errorf("迁移请求审计操作约束: %w", err)
+	}
+	if err := d.ensureMediaJobConstraints(ctx); err != nil {
+		return fmt.Errorf("迁移 media job 数据库约束: %w", err)
+	}
+	if err := d.ensureMediaJobAccountForeignKey(ctx); err != nil {
+		return fmt.Errorf("迁移 media job 账号外键: %w", err)
+	}
+	if err := d.ensureMediaAssetConstraints(ctx); err != nil {
+		return fmt.Errorf("迁移 media asset 数据库约束: %w", err)
+	}
+	if err := d.ensureClientKeyLimitConstraints(ctx); err != nil {
+		return fmt.Errorf("迁移客户端 Key 限额约束: %w", err)
+	}
+	if err := d.backfillWebEgressIdentities(ctx); err != nil {
+		return fmt.Errorf("迁移 Web 出口身份: %w", err)
+	}
+	if err := d.backfillReauthMarkedAt(ctx); err != nil {
+		return fmt.Errorf("迁移 reauth_marked_at: %w", err)
 	}
 	for _, statement := range schemaIndexes {
 		if err := db.Exec(statement).Error; err != nil {
@@ -100,6 +140,15 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	return nil
 }
 
+// backfillReauthMarkedAt 为历史 reauthRequired 账号补齐清理锚点；优先使用 updated_at。
+func (d *Database) backfillReauthMarkedAt(ctx context.Context) error {
+	return d.db.WithContext(ctx).Exec(`
+UPDATE provider_accounts
+SET reauth_marked_at = updated_at
+WHERE auth_status = ? AND reauth_marked_at IS NULL
+`, "reauthRequired").Error
+}
+
 type consoleConstraint struct {
 	model any
 	table string
@@ -107,12 +156,93 @@ type consoleConstraint struct {
 }
 
 func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
-	constraints := []consoleConstraint{
+	return d.ensureNamedConstraints(ctx, []consoleConstraint{
 		{model: &accountModel{}, table: "provider_accounts", name: "chk_accounts_provider"},
 		{model: &modelRouteModel{}, table: "model_routes", name: "chk_model_routes_provider"},
 		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_provider"},
 		{model: &responseOwnershipModel{}, table: "response_ownership", name: "chk_response_ownership_provider"},
 		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_specific_scope"},
+	}, "grok_console")
+}
+
+// ensureAuditOperationConstraints upgrades existing databases so Codex remote
+// compaction can be recorded separately from ordinary Responses requests.
+func (d *Database) ensureAuditOperationConstraints(ctx context.Context) error {
+	return d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_operation"},
+	}, "compaction")
+}
+
+// ensureMediaJobConstraints 将历史仅允许 grok_web 的 media job CHECK 升级到支持 Build 视频。
+// AutoMigrate 不会可靠替换已有 PostgreSQL CHECK，因此启动时幂等检测并重建。
+func (d *Database) ensureMediaJobConstraints(ctx context.Context) error {
+	return d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &mediaJobModel{}, table: "media_jobs", name: "chk_media_jobs_provider"},
+		{model: &mediaJobModel{}, table: "media_jobs", name: "chk_media_jobs_egress_scope"},
+	}, "grok_build")
+}
+
+// ensureMediaJobAccountForeignKey 让终态视频任务在账号删除后保留快照，
+// 同时由应用层阻止删除仍有关联 queued/in_progress 任务的账号。
+func (d *Database) ensureMediaJobAccountForeignKey(ctx context.Context) error {
+	constraint := consoleConstraint{model: &mediaJobModel{}, table: "media_jobs", name: "fk_media_jobs_account"}
+	definition, err := d.constraintDefinition(ctx, constraint)
+	if err != nil {
+		return err
+	}
+	if d.dialect == "postgres" {
+		db := d.db.WithContext(ctx)
+		if err := db.Exec("ALTER TABLE media_jobs ALTER COLUMN account_id DROP NOT NULL").Error; err != nil {
+			return err
+		}
+		if strings.Contains(strings.ToUpper(definition), "ON DELETE SET NULL") {
+			return nil
+		}
+		if err := db.Exec("ALTER TABLE media_jobs DROP CONSTRAINT IF EXISTS fk_media_jobs_account").Error; err != nil {
+			return err
+		}
+		return db.Exec("ALTER TABLE media_jobs ADD CONSTRAINT fk_media_jobs_account FOREIGN KEY (account_id) REFERENCES provider_accounts(id) ON UPDATE CASCADE ON DELETE SET NULL").Error
+	}
+	if strings.Contains(strings.ToUpper(definition), "ON DELETE SET NULL") {
+		return nil
+	}
+	return d.withSQLiteForeignKeysDisabled(ctx, func() error {
+		migrator := d.db.WithContext(ctx).Migrator()
+		if err := migrator.AlterColumn(&mediaJobModel{}, "AccountID"); err != nil {
+			return err
+		}
+		if definition != "" {
+			if err := migrator.DropConstraint(&mediaJobModel{}, "Account"); err != nil {
+				return err
+			}
+		}
+		return migrator.CreateConstraint(&mediaJobModel{}, "Account")
+	})
+}
+
+// ensureMediaAssetConstraints 升级历史仅允许 image 的媒体资产 CHECK，以支持 video 与更大体积。
+func (d *Database) ensureMediaAssetConstraints(ctx context.Context) error {
+	if err := d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &mediaAssetModel{}, table: "media_assets", name: "chk_media_assets_kind"},
+	}, "video"); err != nil {
+		return err
+	}
+	if err := d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &mediaAssetModel{}, table: "media_assets", name: "chk_media_assets_mime"},
+	}, "video/mp4"); err != nil {
+		return err
+	}
+	return d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &mediaAssetModel{}, table: "media_assets", name: "chk_media_assets_size"},
+	}, "268435456")
+}
+
+// ensureClientKeyLimitConstraints 将历史正数限制升级为允许 0 表示无限制。
+// PostgreSQL 不会由 AutoMigrate 可靠替换同名 CHECK，因此需显式检测并重建。
+func (d *Database) ensureClientKeyLimitConstraints(ctx context.Context) error {
+	constraints := []consoleConstraint{
+		{model: &clientKeyModel{}, table: "client_keys", name: "chk_client_keys_rpm"},
+		{model: &clientKeyModel{}, table: "client_keys", name: "chk_client_keys_max_concurrent"},
 	}
 	migrate := func() error {
 		db := d.db.WithContext(ctx)
@@ -121,7 +251,41 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if strings.Contains(definition, "grok_console") {
+			if clientKeyLimitConstraintAllowsZero(definition) {
+				continue
+			}
+			if definition != "" {
+				if err := db.Migrator().DropConstraint(value.model, value.name); err != nil {
+					return fmt.Errorf("删除旧约束 %s: %w", value.name, err)
+				}
+			}
+			if err := db.Migrator().CreateConstraint(value.model, value.name); err != nil {
+				return fmt.Errorf("创建约束 %s: %w", value.name, err)
+			}
+		}
+		return nil
+	}
+	if d.dialect == "sqlite" {
+		return d.withSQLiteForeignKeysDisabled(ctx, migrate)
+	}
+	return migrate()
+}
+
+func clientKeyLimitConstraintAllowsZero(definition string) bool {
+	normalized := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\"", "", "`", "", "(", "", ")", "").Replace(strings.ToLower(definition))
+	return strings.Contains(normalized, "between0and") || strings.Contains(normalized, ">=0")
+}
+
+// ensureNamedConstraints 在约束定义尚未包含 marker 时 drop/recreate；已升级则跳过。
+func (d *Database) ensureNamedConstraints(ctx context.Context, constraints []consoleConstraint, marker string) error {
+	migrate := func() error {
+		db := d.db.WithContext(ctx)
+		for _, value := range constraints {
+			definition, err := d.constraintDefinition(ctx, value)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(definition, marker) {
 				continue
 			}
 			if definition != "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,54 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
+
+func TestQueueAccountModelSyncDeduplicatesConcurrentETagRefresh(t *testing.T) {
+	resolver := &etagSyncResolver{started: make(chan uint64, 2), release: make(chan struct{})}
+	service := &Service{models: resolver, logger: slog.Default(), modelSyncing: make(map[uint64]struct{})}
+	service.queueAccountModelSync(42)
+	service.queueAccountModelSync(42)
+	select {
+	case accountID := <-resolver.started:
+		if accountID != 42 {
+			t.Fatalf("account id = %d", accountID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("模型 ETag 刷新未启动")
+	}
+	if calls := resolver.calls.Load(); calls != 1 {
+		t.Fatalf("concurrent sync calls = %d", calls)
+	}
+	close(resolver.release)
+}
+
+type etagSyncResolver struct {
+	calls   atomic.Int64
+	started chan uint64
+	release chan struct{}
+}
+
+func (r *etagSyncResolver) SyncAccount(_ context.Context, accountID uint64) (int, error) {
+	r.calls.Add(1)
+	r.started <- accountID
+	<-r.release
+	return 1, nil
+}
+
+func (r *etagSyncResolver) Get(context.Context, uint64) (modeldomain.Route, error) {
+	return modeldomain.Route{}, repository.ErrNotFound
+}
+
+func (r *etagSyncResolver) GetByPublicID(context.Context, string) (modeldomain.Route, error) {
+	return modeldomain.Route{}, repository.ErrNotFound
+}
+
+func (r *etagSyncResolver) GetByPublicIDCandidates(context.Context, string) ([]modeldomain.Route, error) {
+	return nil, repository.ErrNotFound
+}
+
+func (r *etagSyncResolver) GetByProviderUpstream(context.Context, account.Provider, string) (modeldomain.Route, error) {
+	return modeldomain.Route{}, repository.ErrNotFound
+}
 
 func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	ctx := context.Background()
@@ -75,7 +124,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	clientService := clientkeyapp.NewService(nil, nil, nil, 60, 4, nil)
 	selector := NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
-	result, err := service.CreateResponse(ctx, Input{RequestID: "req-1", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`), PromptCacheSeed: "claude-session"})
+	result, err := service.CreateResponse(ctx, Input{RequestID: "req-1", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`), PromptCacheSeed: "claude-session", GrokTurnIndex: "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,9 +140,19 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	if len(adapter.attempts) != 2 || adapter.attempts[0] != first.ID || adapter.attempts[1] != second.ID {
 		t.Fatalf("attempts = %#v", adapter.attempts)
 	}
-	expectedCacheKey := resolvePromptCacheIdentity(clientKey.ID, account.ProviderBuild, "grok-test", audit.OperationResponses, "", "claude-session")
+	identity := resolveBuildSessionIdentity(clientKey.ID, account.ProviderBuild, "grok-test", "", "claude-session", nil)
+	expectedCacheKey := identity.upstreamID
 	if adapter.lastPromptCacheKey != expectedCacheKey {
 		t.Fatalf("prompt cache key = %q, want %q", adapter.lastPromptCacheKey, expectedCacheKey)
+	}
+	if adapter.lastReasoningReplayKey != identity.replayKey {
+		t.Fatalf("reasoning replay key = %q, want %q", adapter.lastReasoningReplayKey, identity.replayKey)
+	}
+	if adapter.lastGrokTurnIndex != "3" {
+		t.Fatalf("Grok turn index = %q, want 3", adapter.lastGrokTurnIndex)
+	}
+	if boundID, ok, err := sticky.Get(ctx, stickySessionKey(identity.affinityKey), time.Now().UTC()); err != nil || !ok || boundID != second.ID {
+		t.Fatalf("failover sticky binding = %d, %v, err = %v; want account %d", boundID, ok, err, second.ID)
 	}
 	observedAccount, err := accountRepo.Get(ctx, second.ID)
 	if err != nil || observedAccount.ObservedModel != "grok-test-build-free" {
@@ -108,8 +167,26 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("audit detail = %#v, err = %v", detail, err)
 	}
 	ownership, err := responseRepo.Get(ctx, "resp-test", clientKey.ID, time.Now().UTC())
-	if err != nil || ownership.AccountID != second.ID {
+	if err != nil || ownership.AccountID != second.ID || ownership.PromptCacheKey != expectedCacheKey || ownership.ReasoningReplayKey != identity.replayKey {
 		t.Fatalf("ownership = %#v, err = %v", ownership, err)
+	}
+
+	compacted, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-compact", ClientKey: clientKey, PublicModel: "grok-test", PromptCacheSeed: "claude-session",
+		Body: []byte(`{"model":"grok-test","stream":true,"input":[{"role":"user","content":"continue"},{"type":"compaction_trigger"}]}`), Streaming: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(compacted.Body)
+	compacted.Finalize(Usage{}, "resp-compact", "")
+	_ = compacted.Body.Close()
+	logs, total, err = auditRepo.List(ctx, 0, 10)
+	if err != nil || total != 2 || logs[0].Operation != audit.OperationCompaction || !logs[0].Streaming {
+		t.Fatalf("compaction audit = %#v, total=%d, err=%v", logs, total, err)
+	}
+	if _, err := responseRepo.Get(ctx, "resp-compact", clientKey.ID, time.Now().UTC()); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("compaction response ownership err = %v", err)
 	}
 
 	adapter.resetAttempts()
@@ -122,6 +199,13 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	_ = continued.Body.Close()
 	if len(adapter.attempts) != 1 || adapter.attempts[0] != second.ID {
 		t.Fatalf("continued attempts = %#v", adapter.attempts)
+	}
+	if adapter.lastPromptCacheKey != expectedCacheKey || adapter.lastReasoningReplayKey != identity.replayKey {
+		t.Fatalf("continued session identity drifted: cache=%q replay=%q", adapter.lastPromptCacheKey, adapter.lastReasoningReplayKey)
+	}
+	nextOwnership, err := responseRepo.Get(ctx, "resp-next", clientKey.ID, time.Now().UTC())
+	if err != nil || nextOwnership.PromptCacheKey != expectedCacheKey || nextOwnership.ReasoningReplayKey != identity.replayKey {
+		t.Fatalf("continued ownership = %#v, err = %v", nextOwnership, err)
 	}
 
 	adapter.resetAttempts()
@@ -156,6 +240,216 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	missing.Finalize(Usage{}, "", "")
 	if _, err := responseRepo.Get(ctx, "resp-next", clientKey.ID, time.Now().UTC()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("stale ownership err = %v", err)
+	}
+
+	adapter.resetAttempts()
+	streamFailed, err := service.CreateResponse(ctx, Input{RequestID: "req-stream-failed", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`), PromptCacheSeed: "stream-failed-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(streamFailed.Body)
+	if streamFailed.RecordStreamFailure == nil {
+		t.Fatal("stream failure recorder is nil")
+	}
+	streamFailed.RecordStreamFailure(StreamFailureDiagnostic{Body: []byte(`{"type":"response.failed","error":{"message":"access_token=secret-token"}}`)})
+	streamFailed.Finalize(Usage{}, "", "upstream_stream_error")
+	_ = streamFailed.Body.Close()
+	logs, _, err = auditRepo.List(ctx, 0, 10)
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("stream failure audits = %#v, err = %v", logs, err)
+	}
+	streamDetail, err := auditRepo.Get(ctx, logs[0].ID)
+	if err != nil || streamDetail.ErrorCode != "upstream_stream_error" || streamDetail.AttemptCount != 1 || len(streamDetail.Attempts) != 1 {
+		t.Fatalf("stream failure detail = %#v, err = %v", streamDetail, err)
+	}
+	streamAttempt := streamDetail.Attempts[0]
+	if streamAttempt.Stage != "response_stream" || streamAttempt.UpstreamStatusCode == nil || *streamAttempt.UpstreamStatusCode != http.StatusOK || string(streamAttempt.ResponseBody) != `{"type":"response.failed","error":{"message":"access_token=[REDACTED]"}}` {
+		t.Fatalf("stream failure attempt = %#v", streamAttempt)
+	}
+
+	adapter.resetAttempts()
+	interrupted, err := service.CreateResponse(ctx, Input{RequestID: "req-stream-cut", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`), PromptCacheSeed: "other-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(interrupted.Body)
+	interrupted.Finalize(Usage{}, "", "upstream_stream_incomplete")
+	_ = interrupted.Body.Close()
+	if len(adapter.attempts) != 1 {
+		t.Fatalf("interrupted attempts = %#v", adapter.attempts)
+	}
+	interruptedAccount, err := accountRepo.Get(ctx, adapter.attempts[0])
+	if err != nil || interruptedAccount.FailureCount != 1 || interruptedAccount.CooldownUntil == nil {
+		t.Fatalf("interrupted account health = %#v, err=%v", interruptedAccount, err)
+	}
+}
+
+func TestGatewaySSOUnauthorizedMarksInvalidAndSwitchesAccount(t *testing.T) {
+	for _, providerValue := range []account.Provider{account.ProviderWeb, account.ProviderConsole} {
+		providerValue := providerValue
+		t.Run(string(providerValue), func(t *testing.T) {
+			ctx := context.Background()
+			database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "sso-401.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			if err := database.InitializeSchema(ctx); err != nil {
+				t.Fatal(err)
+			}
+			accountRepo := relational.NewAccountRepository(database)
+			modelRepo := relational.NewModelRepository(database)
+			auditRepo := relational.NewAuditRepository(database)
+			responseRepo := relational.NewResponseRepository(database)
+			keyRepo := relational.NewClientKeyRepository(database)
+			credentials := make([]account.Credential, 0, 2)
+			for index, name := range []string{"rejected", "healthy"} {
+				credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
+					Provider: providerValue, AuthType: account.AuthTypeSSO, Name: name, SourceKey: string(providerValue) + "-" + name,
+					EncryptedAccessToken: "encrypted-" + name, Enabled: true, AuthStatus: account.AuthStatusActive,
+					Priority: 200 - index*100, MaxConcurrent: 1,
+				})
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				credentials = append(credentials, credential)
+			}
+			modelName := "grok-sso-401"
+			if err := modelRepo.UpsertDiscovered(ctx, providerValue, []string{modelName}); err != nil {
+				t.Fatal(err)
+			}
+			for _, credential := range credentials {
+				if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{modelName}, time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			key, err := keyRepo.Create(ctx, clientkey.Key{
+				Name: "sso-401-key", Prefix: "sso-401", SecretHash: strings.Repeat("e", 64), EncryptedSecret: "encrypted-key",
+				Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapter := &ssoUnauthorizedAdapter{providerValue: providerValue, rejectedID: credentials[0].ID}
+			registry := provider.NewRegistry(adapter)
+			sticky := memory.NewStickyStore()
+			accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+			selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+			service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+
+			result, err := service.CreateResponse(ctx, Input{
+				RequestID: "req-sso-401", ClientKey: key, PublicModel: modelName,
+				Body: []byte(`{"model":"grok-sso-401","input":"hello"}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(result.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Finalize(Usage{}, "", "")
+			_ = result.Body.Close()
+			if string(body) != "ok" {
+				t.Fatalf("body = %q", body)
+			}
+			if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
+				t.Fatalf("attempts = %#v", attempts)
+			}
+			rejected, err := accountRepo.Get(ctx, credentials[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rejected.AuthStatus != account.AuthStatusReauthRequired || !rejected.Enabled {
+				t.Fatalf("rejected account = %#v", rejected)
+			}
+			healthy, err := accountRepo.Get(ctx, credentials[1].ID)
+			if err != nil || healthy.AuthStatus != account.AuthStatusActive {
+				t.Fatalf("healthy account = %#v, err = %v", healthy, err)
+			}
+		})
+	}
+}
+
+func TestGatewayTeamModelRateLimitOnlySkipsMatchingTeam(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "team-model-rate-limit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credentials := make([]account.Credential, 0, 3)
+	for index, seed := range []struct {
+		name   string
+		teamID string
+	}{{"console-team-a-first", "team-a"}, {"console-team-a-second", "team-a"}, {"console-team-b", "team-b"}} {
+		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: seed.name, SourceKey: seed.name, TeamID: seed.teamID,
+			EncryptedAccessToken: "encrypted-" + seed.name, Enabled: true, AuthStatus: account.AuthStatusActive,
+			Priority: 200 - index, MaxConcurrent: 1,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		credentials = append(credentials, credential)
+	}
+	models := []string{"grok-console-team-rate-limit", "grok-console-team-rate-limit-other"}
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderConsole, models); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, credential := range credentials {
+		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, models, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "team-model-key", Prefix: "team-model", SecretHash: strings.Repeat("d", 64), EncryptedSecret: "encrypted-key",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &teamModelRateLimitConsoleAdapter{rateLimitedTeam: "team-a"}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+
+	assertSuccess := func(requestID, publicModel string) {
+		t.Helper()
+		result, err := service.CreateResponse(ctx, Input{
+			RequestID: requestID, ClientKey: key, PublicModel: publicModel,
+			Body: []byte(`{"model":"` + publicModel + `","input":"hello"}`),
+		})
+		if err != nil || result == nil || result.StatusCode != http.StatusOK {
+			t.Fatalf("result = %#v, err = %v", result, err)
+		}
+		_ = result.Body.Close()
+		result.Finalize(Usage{}, "", "")
+	}
+
+	assertSuccess("req-team-model-first", models[0])
+	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0].AccountID != credentials[0].ID || attempts[1].AccountID != credentials[2].ID {
+		t.Fatalf("first attempts = %#v, want first Team A account then Team B account", attempts)
+	}
+	assertSuccess("req-team-model-cached", models[0])
+	if attempts := adapter.Attempts(); len(attempts) != 3 || attempts[2].AccountID != credentials[2].ID {
+		t.Fatalf("cached Team A accounts should be skipped in favor of Team B, attempts = %#v", attempts)
+	}
+	assertSuccess("req-team-model-other", models[1])
+	if attempts := adapter.Attempts(); len(attempts) != 5 || attempts[3].AccountID != credentials[0].ID || attempts[3].Model != models[1] || attempts[4].AccountID != credentials[2].ID {
+		t.Fatalf("different model should have an independent Team limit, attempts = %#v", attempts)
 	}
 }
 
@@ -298,9 +592,13 @@ func TestGatewayDoesNotPersistStatelessConsoleResponses(t *testing.T) {
 	if _, err := responseRepo.Get(ctx, "resp-console", key.ID, time.Now().UTC()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("stateless response ownership err = %v", err)
 	}
-	if _, err := service.CreateResponse(ctx, Input{RequestID: "req-console-next", ClientKey: key, PublicModel: model, PreviousResponseID: "resp-console", Body: []byte(`{"model":"grok-console-stateless","previous_response_id":"resp-console"}`)}); !errors.Is(err, ErrResponseStateUnsupported) {
-		t.Fatalf("previous response error = %v", err)
+	continued, err := service.CreateResponse(ctx, Input{RequestID: "req-console-next", ClientKey: key, PublicModel: model, PreviousResponseID: "resp-console", Body: []byte(`{"model":"grok-console-stateless","previous_response_id":"resp-console","input":"hello again"}`)})
+	if err != nil {
+		t.Fatalf("Console stateless previous response fallback = %v", err)
 	}
+	_, _ = io.ReadAll(continued.Body)
+	continued.Finalize(Usage{}, "resp-console-next", "")
+	_ = continued.Body.Close()
 	if _, err := service.CompactResponse(ctx, Input{RequestID: "req-console-compact", ClientKey: key, PublicModel: model, Body: []byte(`{"model":"grok-console-stateless","input":"hello"}`)}); !errors.Is(err, ErrConversationUnsupported) {
 		t.Fatalf("compact response error = %v", err)
 	}
@@ -320,6 +618,69 @@ func TestGatewayDoesNotPersistStatelessConsoleResponses(t *testing.T) {
 	}
 }
 
+func TestGatewayWebOwnershipDoesNotPersistRawPromptCacheKey(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "web-ownership.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web", SourceKey: "web",
+		EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const model = "grok-web-ownership"
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderWeb, []string{model}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "web-key", Prefix: "web-key", SecretHash: strings.Repeat("d", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := webStoredResponseAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+
+	rawKey := strings.Repeat("raw-session-", 16)
+	result, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-web-ownership", ClientKey: key, PublicModel: model, PromptCacheKey: rawKey,
+		Body: []byte(`{"model":"grok-web-ownership","input":"hello"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(result.Body)
+	result.Finalize(Usage{}, "resp-web-ownership", "")
+	_ = result.Body.Close()
+	ownership, err := responseRepo.Get(ctx, "resp-web-ownership", key.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownership.AccountID != credential.ID || ownership.Provider != account.ProviderWeb || ownership.PromptCacheKey != "" || ownership.ReasoningReplayKey != "" {
+		t.Fatalf("web ownership = %#v", ownership)
+	}
+}
+
 func TestParseFreeQuotaExhaustion(t *testing.T) {
 	body := []byte(`{"error":{"code":"subscription:free-usage-exhausted","message":"tokens (actual/limit): 1065387/1000000; Usage resets over a rolling 24-hour window"}}`)
 	used, limit, exhausted := parseFreeQuotaExhaustion(body)
@@ -331,7 +692,7 @@ func TestParseFreeQuotaExhaustion(t *testing.T) {
 	}
 }
 
-func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *testing.T) {
+func TestGatewayCoolsFreeBuildAccountsAfterForbidden(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "systemic-forbidden.db"))
 	if err != nil {
@@ -389,11 +750,11 @@ func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *test
 	if !errors.As(err, &upstreamFailure) || errors.Is(err, ErrNoAvailableAccount) {
 		t.Fatalf("error = %T %v", err, err)
 	}
-	if upstreamFailure.HTTPStatus != http.StatusForbidden || upstreamFailure.Code != "upstream_forbidden" || upstreamFailure.AccountScoped {
+	if upstreamFailure.HTTPStatus != http.StatusForbidden || upstreamFailure.Code != "upstream_forbidden" || !upstreamFailure.AccountScoped {
 		t.Fatalf("upstream failure = %#v", upstreamFailure)
 	}
 	attempts := adapter.Attempts()
-	if len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
+	if len(attempts) != 3 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID || attempts[2] != credentials[2].ID {
 		t.Fatalf("attempts = %#v", attempts)
 	}
 	for _, credential := range credentials {
@@ -401,12 +762,12 @@ func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *test
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		if observed.FailureCount != 0 || observed.CooldownUntil != nil || observed.AuthStatus != account.AuthStatusActive {
-			t.Fatalf("account %d was incorrectly penalized: %#v", credential.ID, observed)
+		if observed.FailureCount != 1 || observed.CooldownUntil == nil || observed.AuthStatus != account.AuthStatusActive {
+			t.Fatalf("account %d was not cooled after 403: %#v", credential.ID, observed)
 		}
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].StatusCode != http.StatusForbidden || logs[0].ErrorCode != "upstream_forbidden" || logs[0].AccountID == nil || *logs[0].AccountID != credentials[1].ID {
+	if err != nil || total != 1 || logs[0].StatusCode != http.StatusForbidden || logs[0].ErrorCode != "upstream_forbidden" || logs[0].AccountID == nil || *logs[0].AccountID != credentials[2].ID {
 		t.Fatalf("audit = %#v, total=%d, err=%v", logs, total, err)
 	}
 }
@@ -493,6 +854,75 @@ func TestGatewayRefreshesAndRetriesBuildPermissionDenialOnce(t *testing.T) {
 	}
 	if rejected.AuthStatus != account.AuthStatusReauthRequired || adapter.refreshes.Load() != 1 {
 		t.Fatalf("rejected credential = %#v, refreshes = %d", rejected, adapter.refreshes.Load())
+	}
+}
+
+func TestBuildChatPermissionDenialDoesNotInvalidateVideoCredential(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-scoped-denial.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "chat-denied-video-valid", SourceKey: "chat-denied-video-valid",
+		EncryptedAccessToken: "access-old", EncryptedRefreshToken: "refresh-old", ExpiresAt: time.Now().Add(time.Hour),
+		Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accountRepo.SaveBilling(ctx, account.Billing{AccountID: credential.ID, MonthlyLimit: 140, SyncedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-chat-denied"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-chat-denied"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "chat-denied-key", Prefix: "chat-denied", SecretHash: strings.Repeat("c", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &authRescueAdapter{}
+	adapter.denyChat.Store(true)
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+
+	if _, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-chat-denied", ClientKey: clientKey, PublicModel: "grok-chat-denied",
+		Body: []byte(`{"model":"grok-chat-denied","input":"hello"}`),
+	}); err == nil {
+		t.Fatal("chat permission denial unexpectedly succeeded")
+	}
+	updated, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.AuthStatus != account.AuthStatusActive || updated.FailureCount != 0 || updated.CooldownUntil != nil {
+		t.Fatalf("chat denial invalidated the whole credential: %#v", updated)
+	}
+	candidates, err := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, "grok-chat-denied", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ModelQuotaBlock == nil || candidates[0].ModelQuotaBlock.Reason != "model_access_denied" {
+		t.Fatalf("model-scoped denial was not persisted: %#v", candidates)
 	}
 }
 
@@ -619,7 +1049,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 
 	result, err := service.GenerateImage(ctx, ImageGenerationInput{
 		RequestID: "req-image-stream", ClientKey: key, PublicModel: "grok-imagine-image-quality",
-		Prompt: "test", Count: 2, Resolution: "1k", ResponseFormat: "url", Streaming: true,
+		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url", Streaming: true, PartialImages: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -631,8 +1061,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if string(body) != "event: image_generation.completed\ndata: {}\n\ndata: [DONE]\n\n" {
 		t.Fatalf("stream body = %q", body)
 	}
-	if !adapter.Streaming() {
-		t.Fatal("stream flag was not propagated to the Web image adapter")
+	if !adapter.Streaming() || adapter.PartialImages() != 1 {
+		t.Fatalf("image stream options were not propagated: streaming=%t partial_images=%d", adapter.Streaming(), adapter.PartialImages())
 	}
 	if logs, total, err := auditRepo.List(ctx, 0, 10); err != nil || total != 0 || len(logs) != 0 {
 		t.Fatalf("audit persisted before finalization: logs=%#v total=%d err=%v", logs, total, err)
@@ -645,8 +1075,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("audit logs=%#v total=%d err=%v", logs, total, err)
 	}
 	if !logs[0].Streaming || logs[0].Operation != "image" || logs[0].Provider != string(account.ProviderWeb) || logs[0].ErrorCode != "" ||
-		logs[0].MediaInputImages != 0 || logs[0].MediaOutputImages != 2 ||
-		logs[0].PricingModel != "grok-imagine-image-quality-1k" || logs[0].EstimatedCostInUSDTicks != 1_000_000_000 {
+		logs[0].MediaInputImages != 0 || logs[0].MediaOutputImages != 1 ||
+		logs[0].PricingModel != "grok-imagine-image-quality-1k" || logs[0].EstimatedCostInUSDTicks != 500_000_000 {
 		t.Fatalf("audit = %#v", logs[0])
 	}
 	windows, err := accountRepo.GetQuotaWindows(ctx, []uint64{credential.ID})
@@ -714,7 +1144,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	editResult, err := service.EditImage(ctx, ImageEditInput{
 		RequestID: "req-image-edit", ClientKey: key, PublicModel: "grok-imagine-image-edit",
 		Prompt: "edit", ImageURLs: []string{"data:image/png;base64,a", "data:image/png;base64,b"},
-		Count: 3, Resolution: "2k", ResponseFormat: "url",
+		Count: 3, Size: "1024x1024", AspectRatio: "1:1", Resolution: "2k", ResponseFormat: "url",
+		Streaming: true, PartialImages: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -726,8 +1157,9 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if err != nil || total != 4 || logs[0].RequestID != "req-image-edit" || logs[0].MediaInputImages != 2 || logs[0].MediaOutputImages != 3 || logs[0].PricingModel != "grok-imagine-image-edit-2k" || logs[0].EstimatedCostInUSDTicks != 2_300_000_000 {
 		t.Fatalf("image edit pricing audit = %#v, total=%d, err=%v", logs, total, err)
 	}
-	if adapter.EditResolution() != "2k" {
-		t.Fatalf("image edit resolution = %q", adapter.EditResolution())
+	editRequest := adapter.EditRequest()
+	if editRequest.Resolution != "2k" || editRequest.Size != "1024x1024" || editRequest.AspectRatio != "1:1" || !editRequest.Streaming || editRequest.PartialImages != 2 {
+		t.Fatalf("image edit request = %#v", editRequest)
 	}
 
 	beforeForbidden, err := accountRepo.Get(ctx, credential.ID)
@@ -800,9 +1232,9 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	}
 }
 
-func TestImageEditRetriesRetrySafeUploadErrorAcrossAccounts(t *testing.T) {
+func TestWebImageUnauthorizedMarksInvalidAndSwitchesAccount(t *testing.T) {
 	ctx := context.Background()
-	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "image-edit-failover.db"))
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "web-image-401.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,43 +1247,46 @@ func TestImageEditRetriesRetrySafeUploadErrorAcrossAccounts(t *testing.T) {
 	auditRepo := relational.NewAuditRepository(database)
 	responseRepo := relational.NewResponseRepository(database)
 	keyRepo := relational.NewClientKeyRepository(database)
-	now := time.Now().UTC()
-	for _, name := range []string{"image-edit-primary", "image-edit-backup"} {
+	credentials := make([]account.Credential, 0, 2)
+	for index, name := range []string{"rejected-image", "healthy-image"} {
 		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierSuper,
-			Name: name, SourceKey: name, EncryptedAccessToken: "encrypted-" + name, Enabled: true,
-			AuthStatus: account.AuthStatusActive, MaxConcurrent: 2,
+			Name: name, SourceKey: name, EncryptedAccessToken: "encrypted-" + name,
+			Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 200 - index*100, MaxConcurrent: 1,
 		})
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		if createErr = modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-imagine-image-edit"}, now); createErr != nil {
-			t.Fatal(createErr)
-		}
+		credentials = append(credentials, credential)
 	}
+	now := time.Now().UTC()
 	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{{
-		PublicID: "grok-imagine-image-edit", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-image-edit",
-		Capability: modeldomain.CapabilityImageEdit, Enabled: true,
+		PublicID: "grok-image-401", Provider: account.ProviderWeb, UpstreamModel: "grok-image-401",
+		Capability: modeldomain.CapabilityImage, Enabled: true,
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	for _, credential := range credentials {
+		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-image-401"}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	key, err := keyRepo.Create(ctx, clientkey.Key{
-		Name: "image-edit-key", Prefix: "image-edit", SecretHash: strings.Repeat("c", 64), EncryptedSecret: "encrypted",
+		Name: "image-401-key", Prefix: "image-401", SecretHash: strings.Repeat("f", 64), EncryptedSecret: "encrypted-key",
 		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := &imageEditFailoverAdapter{}
+	adapter := &webImageStreamAdapter{synced: make(chan string, 1), unauthorizedID: credentials[0].ID}
 	registry := provider.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
 
-	result, err := service.EditImage(ctx, ImageEditInput{
-		RequestID: "req-image-edit-failover", ClientKey: key, PublicModel: "grok-imagine-image-edit",
-		Prompt: "edit", ImageURLs: []string{"data:image/png;base64,a"}, Count: 1, Resolution: "1k", ResponseFormat: "url",
+	result, err := service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-401", ClientKey: key, PublicModel: "grok-image-401", Prompt: "test", Count: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -859,13 +1294,12 @@ func TestImageEditRetriesRetrySafeUploadErrorAcrossAccounts(t *testing.T) {
 	_, _ = io.ReadAll(result.Body)
 	result.Finalize(Usage{}, "", "")
 	_ = result.Body.Close()
-	attempts := adapter.Attempts()
-	if len(attempts) != 2 || attempts[0] == attempts[1] {
-		t.Fatalf("image edit attempts = %#v", attempts)
+	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
+		t.Fatalf("attempts = %#v", attempts)
 	}
-	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].RequestID != "req-image-edit-failover" || logs[0].StatusCode != http.StatusOK || logs[0].AccountID == nil || *logs[0].AccountID != attempts[1] {
-		t.Fatalf("image edit audit = %#v, total=%d, err=%v", logs, total, err)
+	rejected, err := accountRepo.Get(ctx, credentials[0].ID)
+	if err != nil || rejected.AuthStatus != account.AuthStatusReauthRequired || !rejected.Enabled {
+		t.Fatalf("rejected account = %#v, err = %v", rejected, err)
 	}
 }
 
@@ -979,16 +1413,58 @@ func runQuotaRefreshWorkers(t *testing.T, service *accountapp.Service) {
 }
 
 type failoverAdapter struct {
-	mu                 sync.Mutex
-	firstID            uint64
-	attempts           []uint64
-	lastMethod         string
-	lastPath           string
-	lastPromptCacheKey string
-	resourceStatus     int
+	mu                     sync.Mutex
+	firstID                uint64
+	attempts               []uint64
+	lastMethod             string
+	lastPath               string
+	lastPromptCacheKey     string
+	lastReasoningReplayKey string
+	lastGrokTurnIndex      string
+	resourceStatus         int
+}
+
+type ssoUnauthorizedAdapter struct {
+	mu            sync.Mutex
+	providerValue account.Provider
+	rejectedID    uint64
+	attempts      []uint64
+}
+
+func (a *ssoUnauthorizedAdapter) Provider() account.Provider { return a.providerValue }
+func (a *ssoUnauthorizedAdapter) Definition() provider.Definition {
+	return testConversationDefinition(a.providerValue)
+}
+func (a *ssoUnauthorizedAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.mu.Lock()
+	a.attempts = append(a.attempts, request.Credential.ID)
+	a.mu.Unlock()
+	if request.Credential.ID == a.rejectedID {
+		return &provider.Response{
+			StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"credential rejected"}}`)),
+		}, nil
+	}
+	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
+}
+func (a *ssoUnauthorizedAdapter) Attempts() []uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]uint64(nil), a.attempts...)
 }
 
 type statelessConsoleAdapter struct{}
+
+type teamModelRateLimitConsoleAttempt struct {
+	AccountID uint64
+	Model     string
+}
+
+type teamModelRateLimitConsoleAdapter struct {
+	mu              sync.Mutex
+	attempts        []teamModelRateLimitConsoleAttempt
+	rateLimitedTeam string
+}
 
 func (statelessConsoleAdapter) Provider() account.Provider { return account.ProviderConsole }
 func (statelessConsoleAdapter) Definition() provider.Definition {
@@ -1006,6 +1482,37 @@ func (statelessConsoleAdapter) ForwardResponse(context.Context, provider.Respons
 	}, nil
 }
 
+func (a *teamModelRateLimitConsoleAdapter) Provider() account.Provider {
+	return account.ProviderConsole
+}
+func (a *teamModelRateLimitConsoleAdapter) Definition() provider.Definition {
+	return testConversationDefinition(account.ProviderConsole)
+}
+func (a *teamModelRateLimitConsoleAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.mu.Lock()
+	a.attempts = append(a.attempts, teamModelRateLimitConsoleAttempt{AccountID: request.Credential.ID, Model: request.Model})
+	a.mu.Unlock()
+	if request.Credential.TeamID != a.rateLimitedTeam {
+		return &provider.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"id":"resp-team-success","object":"response","status":"completed"}`)),
+		}, nil
+	}
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"error":"team model rate limited"}`)),
+		RateLimit: &provider.RateLimitMetadata{
+			Scope: provider.RateLimitScopeRPM, TeamID: request.Credential.TeamID, Model: request.Model,
+			Actual: 61, Limit: 60, RetryAfter: time.Hour,
+		},
+	}, nil
+}
+func (a *teamModelRateLimitConsoleAdapter) Attempts() []teamModelRateLimitConsoleAttempt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]teamModelRateLimitConsoleAttempt(nil), a.attempts...)
+}
+
 type systemicForbiddenAdapter struct {
 	mu       sync.Mutex
 	attempts []uint64
@@ -1015,6 +1522,7 @@ type authRescueAdapter struct {
 	attempts  atomic.Int64
 	refreshes atomic.Int64
 	rejectAll atomic.Bool
+	denyChat  atomic.Bool
 }
 
 func (a *authRescueAdapter) Provider() account.Provider { return account.ProviderBuild }
@@ -1023,6 +1531,12 @@ func (a *authRescueAdapter) Definition() provider.Definition {
 }
 func (a *authRescueAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 	a.attempts.Add(1)
+	if a.denyChat.Load() {
+		return &provider.Response{
+			StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"error":{"code":"permission_denied","message":"Access to the chat endpoint is denied"}}`)),
+		}, nil
+	}
 	if a.rejectAll.Load() {
 		return &provider.Response{
 			StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Header: make(http.Header),
@@ -1061,16 +1575,37 @@ func (a *systemicForbiddenAdapter) Attempts() []uint64 {
 	return append([]uint64(nil), a.attempts...)
 }
 
+type webStoredResponseAdapter struct{}
+
+func (webStoredResponseAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (webStoredResponseAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider: account.ProviderWeb,
+		Conversation: provider.ConversationSurface{
+			Responses: true, StoredResponses: true,
+		},
+		Inference: provider.InferencePolicy{Usage: provider.UsageEstimated},
+	}
+}
+func (webStoredResponseAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"id":"resp-web-ownership"}`)),
+	}, nil
+}
+
 type webRateLimitAdapter struct{}
 
 type webImageStreamAdapter struct {
 	mu             sync.Mutex
 	streaming      bool
-	editResolution string
+	partialImages  int
+	editRequest    provider.ImageEditRequest
 	synced         chan string
 	failureEgress  *infraegress.Manager
 	failureErr     error
 	attempts       []uint64
+	unauthorizedID uint64
 }
 
 type retrySafeImageStatusError struct{ status int }
@@ -1172,12 +1707,20 @@ func (a *webImageStreamAdapter) TierOrder(string) []account.WebTier {
 func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provider.ImageGenerationRequest) (*provider.Response, error) {
 	a.mu.Lock()
 	a.streaming = request.Streaming
+	a.partialImages = request.PartialImages
 	failureEgress := a.failureEgress
 	failureErr := a.failureErr
 	a.attempts = append(a.attempts, request.Credential.ID)
+	unauthorizedID := a.unauthorizedID
 	a.mu.Unlock()
 	if failureErr != nil {
 		return nil, failureErr
+	}
+	if request.Credential.ID == unauthorizedID {
+		return &provider.Response{
+			StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized"}}`)),
+		}, nil
 	}
 	if failureEgress != nil {
 		lease, err := failureEgress.Acquire(ctx, egressdomain.ScopeWeb, "image-failure")
@@ -1198,7 +1741,7 @@ func (a *webImageStreamAdapter) ForwardResponse(context.Context, provider.Respon
 }
 func (a *webImageStreamAdapter) EditImage(_ context.Context, request provider.ImageEditRequest) (*provider.Response, error) {
 	a.mu.Lock()
-	a.editResolution = request.Resolution
+	a.editRequest = request
 	a.mu.Unlock()
 	return &provider.Response{
 		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
@@ -1210,10 +1753,15 @@ func (a *webImageStreamAdapter) Streaming() bool {
 	defer a.mu.Unlock()
 	return a.streaming
 }
-func (a *webImageStreamAdapter) EditResolution() string {
+func (a *webImageStreamAdapter) PartialImages() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.editResolution
+	return a.partialImages
+}
+func (a *webImageStreamAdapter) EditRequest() provider.ImageEditRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.editRequest
 }
 func (a *webImageStreamAdapter) FailWithEgress(manager *infraegress.Manager) {
 	a.mu.Lock()
@@ -1270,7 +1818,7 @@ func (a *failoverAdapter) Definition() provider.Definition {
 	return provider.Definition{
 		Provider: account.ProviderBuild,
 		Conversation: provider.ConversationSurface{
-			Responses: true, StoredResponses: true,
+			Responses: true, Compact: true, StoredResponses: true,
 		},
 	}
 }
@@ -1280,6 +1828,8 @@ func (a *failoverAdapter) ForwardResponse(_ context.Context, request provider.Re
 	a.lastMethod = request.Method
 	a.lastPath = request.Path
 	a.lastPromptCacheKey = request.PromptCacheKey
+	a.lastReasoningReplayKey = request.ReasoningReplayKey
+	a.lastGrokTurnIndex = request.GrokTurnIndex
 	resourceStatus := a.resourceStatus
 	a.mu.Unlock()
 	status, body := http.StatusOK, "ok"
@@ -1304,6 +1854,8 @@ func (a *failoverAdapter) resetAttempts() {
 	a.lastMethod = ""
 	a.lastPath = ""
 	a.lastPromptCacheKey = ""
+	a.lastReasoningReplayKey = ""
+	a.lastGrokTurnIndex = ""
 }
 func (a *failoverAdapter) ListModels(context.Context, account.Credential) ([]string, error) {
 	return nil, nil

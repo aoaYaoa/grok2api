@@ -406,6 +406,52 @@ func TestCredentialRefreshFailureDistinguishesTransientAndPermanent(t *testing.T
 	}
 }
 
+func TestCredentialDecryptFailedAllowsRetryAfterKeyRecovery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	service, credential, adapter := newCredentialRefreshTestService(t, now)
+	service.now = func() time.Time { return now }
+
+	// 旧行为会把 decrypt_failed 标 permanent；模拟已落库的 permanent 状态。
+	if err := service.accounts.UpdateCredentialRefreshFailure(ctx, credential.ID, 1, now.Add(time.Hour), "credential_decrypt_failed", true); err != nil {
+		t.Fatal(err)
+	}
+	stuck, err := service.accounts.Get(ctx, credential.ID)
+	if err != nil || !stuck.RefreshPermanent || stuck.LastRefreshErrorCode != "credential_decrypt_failed" {
+		t.Fatalf("setup stuck state = %#v err=%v", stuck, err)
+	}
+
+	// 密钥恢复后：手动 force 必须能再次发起刷新。
+	adapter.refreshErr = nil
+	service.clearRefreshState(credential.ID)
+	recovered, err := service.EnsureCredential(ctx, stuck, true)
+	if err != nil {
+		t.Fatalf("force refresh after decrypt_failed should retry: %v", err)
+	}
+	if recovered.RefreshPermanent || recovered.LastRefreshErrorCode != "" || adapter.refreshCount.Load() < 1 {
+		t.Fatalf("decrypt_failed was not cleared after successful refresh: %#v count=%d", recovered, adapter.refreshCount.Load())
+	}
+
+	// invalid_grant 仍须保持永久阻断。
+	service.clearRefreshState(credential.ID)
+	adapter.refreshErr = &provider.CredentialRefreshError{Status: 400, Code: "invalid_grant", Permanent: true}
+	if _, err := service.EnsureCredential(ctx, recovered, true); err == nil {
+		t.Fatal("invalid_grant should fail")
+	}
+	blocked, err := service.accounts.Get(ctx, credential.ID)
+	if err != nil || !blocked.RefreshPermanent || blocked.LastRefreshErrorCode != "invalid_grant" {
+		t.Fatalf("invalid_grant permanent state = %#v err=%v", blocked, err)
+	}
+	// force 也不得再打 OAuth（真正永久）
+	count := adapter.refreshCount.Load()
+	if _, err := service.EnsureCredential(ctx, blocked, true); err == nil {
+		t.Fatal("invalid_grant force should still be blocked")
+	}
+	if adapter.refreshCount.Load() != count {
+		t.Fatalf("invalid_grant forced another oauth call: before=%d after=%d", count, adapter.refreshCount.Load())
+	}
+}
+
 func TestRefreshAllTokensSkipsUnrefreshableAccounts(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
@@ -433,6 +479,55 @@ func TestRefreshAllTokensSkipsUnrefreshableAccounts(t *testing.T) {
 	}
 	if len(progress) != 3 || progress[0] != [2]int{0, 2} || progress[1] != [2]int{1, 2} || progress[2] != [2]int{2, 2} {
 		t.Fatalf("progress = %#v", progress)
+	}
+}
+
+func TestBatchRefreshTokensRefreshesOnlySelectedEligibleAccounts(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	service, refreshable, adapter := newCredentialRefreshTestService(t, now)
+	service.now = func() time.Time { return now }
+	selected := []uint64{refreshable.ID}
+	for _, value := range []accountdomain.Credential{
+		{Provider: accountdomain.ProviderBuild, Name: "missing-refresh", SourceKey: "missing-refresh", EncryptedAccessToken: "access", Enabled: true, AuthStatus: accountdomain.AuthStatusActive},
+		{Provider: accountdomain.ProviderBuild, Name: "disabled", SourceKey: "disabled", EncryptedAccessToken: "access", EncryptedRefreshToken: "refresh", Enabled: true, AuthStatus: accountdomain.AuthStatusActive},
+		{Provider: accountdomain.ProviderBuild, Name: "invalid", SourceKey: "invalid", EncryptedAccessToken: "access", EncryptedRefreshToken: "refresh", Enabled: true, AuthStatus: accountdomain.AuthStatusActive},
+	} {
+		created, _, err := service.accounts.UpsertByIdentity(ctx, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		needsUpdate := false
+		if value.Name == "disabled" {
+			created.Enabled = false
+			needsUpdate = true
+		}
+		if value.Name == "invalid" {
+			created.AuthStatus = accountdomain.AuthStatusReauthRequired
+			needsUpdate = true
+		}
+		if needsUpdate {
+			created, err = service.accounts.Update(ctx, created)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		selected = append(selected, created.ID)
+	}
+
+	succeeded, failed, skipped, err := service.BatchRefreshTokens(ctx, append(selected, refreshable.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded != 1 || failed != 0 || skipped != 3 || adapter.refreshCount.Load() != 1 {
+		t.Fatalf("result = %d/%d/%d, refresh count = %d", succeeded, failed, skipped, adapter.refreshCount.Load())
+	}
+	updated, err := service.accounts.Get(ctx, refreshable.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.EncryptedAccessToken != "access-1" {
+		t.Fatalf("refreshed access token = %q", updated.EncryptedAccessToken)
 	}
 }
 

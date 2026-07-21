@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -22,6 +24,7 @@ import (
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -55,57 +58,21 @@ func TestCatalogMatchesSupportedSurface(t *testing.T) {
 	}
 }
 
-func TestSummarizeUploadResponseHidesCloudflareChallengeHTML(t *testing.T) {
-	body := []byte(`<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>challenge-platform</body></html>`)
-	_, err := parseUploadResponse(http.StatusForbidden, body)
-	status, ok := provider.ErrorHTTPStatus(err)
-	if !ok || status != http.StatusForbidden {
-		t.Fatalf("status = %d, classified = %v, error = %v", status, ok, err)
+func TestParseMediaPostResponsePreservesStatusAndPostID(t *testing.T) {
+	postID, err := parseMediaPostResponse(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"post":{"id":"post_1","videos":[{"id":"post_1"}]}}`)),
+	})
+	if err != nil || postID != "post_1" {
+		t.Fatalf("postID=%q err=%v", postID, err)
 	}
-	if !provider.IsMediaJobRetrySafe(err) {
-		t.Fatal("upload rejection must be safe for a whole-job retry")
-	}
-	message := summarizeUploadResponse(body)
-	if message != "Cloudflare 安全验证未通过" {
-		t.Fatalf("message = %q", message)
-	}
-	if strings.Contains(strings.ToLower(message), "doctype") || strings.Contains(strings.ToLower(message), "html") {
-		t.Fatalf("raw HTML leaked: %q", message)
-	}
-}
-
-func TestSummarizeUploadResponseRedactsSensitiveUpstreamText(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-		want []string
-	}{
-		{name: "obvious credentials", body: `{"error":{"message":"token=sso-secret-for-user@example.com","request_url":"https://grok.com/upload?signature=private"}}`, want: []string{"sso-secret", "user@example.com", "signature=private", "request_url"}},
-		{name: "opaque access key", body: `{"error":{"message":"sk-proj-AbCd123456"}}`, want: []string{"sk-proj-AbCd123456"}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			message := summarizeUploadResponse([]byte(test.body))
-			for _, sensitive := range test.want {
-				if strings.Contains(message, sensitive) {
-					t.Fatalf("sensitive upstream detail leaked in %q", message)
-				}
-			}
-			if message == "" {
-				t.Fatal("redacted upload error must retain a public explanation")
-			}
-		})
-	}
-}
-
-func TestParseMediaPostResponsePreservesForbiddenWithoutRetryingWholeJob(t *testing.T) {
-	_, err := parseMediaPostResponse(http.StatusForbidden, []byte(`<!DOCTYPE html><title>Just a moment...</title>`))
-	status, ok := provider.ErrorHTTPStatus(err)
-	if !ok || status != http.StatusForbidden {
-		t.Fatalf("status = %d, classified = %v, error = %v", status, ok, err)
-	}
-	if provider.IsMediaJobRetrySafe(err) {
-		t.Fatal("media Post rejection is not idempotent enough for a whole-job retry")
+	_, err = parseMediaPostResponse(&http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"challenge"}`)),
+	})
+	var upstreamErr *webMediaUpstreamError
+	if !errors.As(err, &upstreamErr) || upstreamErr.status != http.StatusForbidden || !strings.Contains(upstreamErr.body, "challenge") {
+		t.Fatalf("error = %#v", err)
 	}
 }
 
@@ -162,7 +129,7 @@ func TestNormalizeOpenAIInputSeparatesTextAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Prompt != "[user]\n描述这张图" || !slices.Equal(value.Images, []string{dataURI}) {
+	if value.Prompt != "[user]\n描述这张图" || !slices.Equal(value.Attachments, []chatAttachmentInput{{Source: dataURI, Image: true}}) {
 		t.Fatalf("normalized input = %#v", value)
 	}
 }
@@ -179,20 +146,39 @@ func TestNormalizeResponsesInputImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Prompt != "[user]\nwhat is this" || !slices.Equal(value.Images, []string{dataURI}) {
+	if value.Prompt != "[user]\nwhat is this" || !slices.Equal(value.Attachments, []chatAttachmentInput{{Source: dataURI, Image: true}}) {
 		t.Fatalf("normalized responses input = %#v", value)
 	}
 }
 
-func TestNormalizeResponsesInputFileFailsExplicitly(t *testing.T) {
+func TestNormalizeResponsesInputFile(t *testing.T) {
 	input, _ := json.Marshal([]any{map[string]any{
 		"type": "message", "role": "user", "content": []any{
-			map[string]any{"type": "input_file", "file_url": "https://example.com/a.pdf"},
+			map[string]any{"type": "input_file", "file_url": "https://example.com/a.pdf", "filename": "report.pdf"},
 		},
 	}})
-	_, err := normalizeOpenAIInput(openAIRequest{Input: input}, "responses")
-	if err == nil || !strings.Contains(err.Error(), "input_file") {
-		t.Fatalf("error = %v", err)
+	value, err := normalizeOpenAIInput(openAIRequest{Input: input}, "responses")
+	if err != nil || !slices.Equal(value.Attachments, []chatAttachmentInput{{Source: "https://example.com/a.pdf", Filename: "report.pdf"}}) {
+		t.Fatalf("normalized=%#v error=%v", value, err)
+	}
+}
+
+func TestNormalizeChatNestedFileData(t *testing.T) {
+	content, _ := json.Marshal([]any{map[string]any{
+		"type": "file", "file": map[string]any{
+			"filename": "notes.txt", "file_data": "data:text/plain;base64,aGVsbG8=",
+		},
+	}})
+	value, err := normalizeOpenAIInput(openAIRequest{Messages: []chatMessage{{Role: "user", Content: content}}}, "chat")
+	if err != nil || !slices.Equal(value.Attachments, []chatAttachmentInput{{Source: "data:text/plain;base64,aGVsbG8=", Filename: "notes.txt"}}) {
+		t.Fatalf("normalized=%#v error=%v", value, err)
+	}
+	if _, err := parseChatFileDataURI(value.Attachments[0].Source, value.Attachments[0].Filename, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	badContent, _ := json.Marshal([]any{map[string]any{"type": "input_file", "file_id": "file_external"}})
+	if _, err := normalizeOpenAIInput(openAIRequest{Messages: []chatMessage{{Role: "user", Content: badContent}}}, "chat"); err == nil || !strings.Contains(err.Error(), "file_id") {
+		t.Fatalf("file_id error=%v", err)
 	}
 }
 
@@ -210,13 +196,24 @@ func TestParseChatImageDataURIValidatesContent(t *testing.T) {
 	}
 }
 
+func TestParseChatFileDataURIValidatesAndSanitizesFile(t *testing.T) {
+	pdf := "data:application/pdf;base64,JVBERi0xLjQKJSVFT0Y="
+	file, err := parseChatFileDataURI(pdf, "../report.pdf", 1<<20)
+	if err != nil || file.MIMEType != "application/pdf" || file.Filename != "report.pdf" || len(file.Data) == 0 {
+		t.Fatalf("file=%#v err=%v", file, err)
+	}
+	if _, err := parseChatFileDataURI("data:application/octet-stream;base64,AAEC", "payload.bin", 1<<20); err == nil {
+		t.Fatal("unsupported binary file was accepted")
+	}
+}
+
 func TestRemoteChatImageURLBlocksPrivateNetworks(t *testing.T) {
 	for _, value := range []string{"http://example.com/image.png", "https://127.0.0.1/image.png", "https://169.254.169.254/latest/meta-data", "https://[::1]/image.png", "https://[::ffff:127.0.0.1]/image.png"} {
 		if _, err := validateRemoteImageURL(context.Background(), value); err == nil {
 			t.Fatalf("unsafe image URL accepted: %s", value)
 		}
 	}
-	if value, err := validateRemoteImageURL(context.Background(), "https://8.8.8.8/image.png"); err != nil || value.Hostname() != "8.8.8.8" {
+	if value, err := validateRemoteImageURL(context.Background(), "https://8.8.8.8/image.png"); err != nil || value.originalURL.Hostname() != "8.8.8.8" || value.fetchURL.Hostname() != "8.8.8.8" {
 		t.Fatalf("public image URL rejected: value=%v err=%v", value, err)
 	}
 }
@@ -225,6 +222,10 @@ func TestRemoteChatImageHeadersNeverLeakCredentials(t *testing.T) {
 	headers := remoteImageHeaders("test-agent")
 	if headers.Get("User-Agent") != "test-agent" || headers.Get("Cookie") != "" || headers.Get("Authorization") != "" {
 		t.Fatalf("remote image headers = %#v", headers)
+	}
+	fileHeaders := remoteFileHeaders("test-agent")
+	if fileHeaders.Get("User-Agent") != "test-agent" || fileHeaders.Get("Cookie") != "" || fileHeaders.Get("Authorization") != "" {
+		t.Fatalf("remote file headers = %#v", fileHeaders)
 	}
 }
 
@@ -329,95 +330,102 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 	}
 }
 
-func TestImageUploadFallsBackWhenV2EndpointIsUnsupported(t *testing.T) {
-	v2Called := false
-	legacyCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/http/upload-file-v2/direct":
-			v2Called = true
-			writer.WriteHeader(http.StatusNotFound)
-		case "/rest/app-chat/upload-file":
-			legacyCalled = true
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"fileMetadataId":"legacy_1","fileUri":"users/test/legacy_1/content"}`)
-		default:
-			http.NotFound(writer, request)
+func TestForwardMessagesWebSearchEndToEnd(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non_stream"
+		if streaming {
+			name = "stream"
 		}
-	}))
-	defer server.Close()
+		t.Run(name, func(t *testing.T) {
+			var upstreamMessage string
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/rest/app-chat/conversations/new" {
+					http.NotFound(writer, request)
+					return
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Errorf("upstream payload: %v", err)
+					writer.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				upstreamMessage, _ = payload["message"].(string)
+				writer.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(writer, "data: {\"result\":{\"conversation\":{\"conversationId\":\"conv_1\"}}}\n")
+				_, _ = io.WriteString(writer, "data: {\"result\":{\"response\":{\"rolloutId\":\"search_1\",\"messageStepId\":1,\"messageTag\":\"tool_usage_card\"}}}\n")
+				_, _ = io.WriteString(writer, "data: {\"result\":{\"response\":{\"token\":\"Here you go.\",\"isThinking\":false,\"messageTag\":\"final\",\"webSearchResults\":{\"results\":[{\"url\":\"https://doc.rust-lang.org\",\"title\":\"The Rust Book\"}]}}}}\n")
+				_, _ = io.WriteString(writer, "data: [DONE]\n")
+			}))
+			defer server.Close()
 
-	adapter, lease := newUploadTestAdapter(t, server.URL)
-	defer lease.Release()
-	uploaded, directAvailable, err := adapter.uploadFileWithFallback(context.Background(), adapter.config(), lease, "test-sso", provider.ImageInput{
-		Filename: "reference.png", MIMEType: "image/png", Data: []byte("png"),
-	}, server.URL+"/imagine", imagineSelfUploadSource, true)
-	if err != nil || uploaded.ID != "legacy_1" || directAvailable || !v2Called || !legacyCalled {
-		t.Fatalf("uploaded=%#v direct=%v v2=%v legacy=%v err=%v", uploaded, directAvailable, v2Called, legacyCalled, err)
-	}
-}
+			cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			encrypted, err := cipher.Encrypt("test-sso")
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual"}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+			body, _ := json.Marshal(map[string]any{
+				"model": "public", "max_tokens": 256, "stream": streaming,
+				"messages":    []any{map[string]any{"role": "user", "content": "Perform a web search for the query: rust tutorials"}},
+				"tools":       []any{map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}},
+				"tool_choice": map[string]any{"type": "tool", "name": "web_search"},
+			})
+			response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+				Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Method: http.MethodPost,
+				Path: "/responses", Body: body, Model: "grok-chat-fast", Operation: conversation.OperationMessages,
+				Streaming: streaming,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			result, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(upstreamMessage, "rust tutorials") || strings.Contains(upstreamMessage, "You MUST call at least one available tool") {
+				t.Fatalf("upstream message = %q", upstreamMessage)
+			}
 
-func TestImageUploadDoesNotHideV2ForbiddenBehindLegacyFallback(t *testing.T) {
-	v2Called := false
-	legacyCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/http/upload-file-v2/direct":
-			v2Called = true
-			writer.WriteHeader(http.StatusForbidden)
-			_, _ = io.WriteString(writer, `<!DOCTYPE html><title>Just a moment...</title>`)
-		case "/rest/app-chat/upload-file":
-			legacyCalled = true
-			writer.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(writer, `{"fileMetadataId":"legacy_1"}`)
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
+			if streaming {
+				text := string(result)
+				useAt := strings.Index(text, `"type":"server_tool_use"`)
+				resultAt := strings.Index(text, `"type":"web_search_tool_result"`)
+				textAt := strings.Index(text, `"content_block":{"text":"","type":"text"}`)
+				if response.StatusCode != http.StatusOK || useAt < 0 || resultAt < 0 || textAt < 0 || !(useAt < resultAt && resultAt < textAt) {
+					t.Fatalf("stream status=%d body=%s", response.StatusCode, text)
+				}
+				if !strings.Contains(text, "rust tutorials") || !strings.Contains(text, `"web_search_requests":1`) || !strings.Contains(text, "The Rust Book") {
+					t.Fatalf("stream missing query, usage, or hit: %s", text)
+				}
+				return
+			}
 
-	adapter, lease := newUploadTestAdapter(t, server.URL)
-	defer lease.Release()
-	_, _, err := adapter.uploadFileWithFallback(context.Background(), adapter.config(), lease, "test-sso", provider.ImageInput{
-		Filename: "reference.png", MIMEType: "image/png", Data: []byte("png"),
-	}, server.URL+"/imagine", imagineSelfUploadSource, true)
-	status, classified := provider.ErrorHTTPStatus(err)
-	if !v2Called || legacyCalled || !classified || status != http.StatusForbidden {
-		t.Fatalf("v2=%v legacy=%v status=%d classified=%v err=%v", v2Called, legacyCalled, status, classified, err)
-	}
-}
-
-func TestDecodeDirectFileUploadResponseSupportsAlternateMetadataShapes(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{name: "top-level camel case", body: `{"fileMetadataId":"metadata-1","fileUri":"users/test/reference/content"}`},
-		{name: "nested snake case", body: `{"file_metadata":{"id":"metadata-1","file_uri":"users/test/reference/content"}}`},
-		{name: "nested data pair", body: `{"data":{"id":"metadata-1","uri":"users/test/reference/content"}}`},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			uploaded, err := decodeDirectFileUploadResponse(strings.NewReader(test.body))
-			if err != nil || uploaded.ID != "metadata-1" || uploaded.URI != "https://assets.grok.com/users/test/reference/content" {
-				t.Fatalf("uploaded=%#v err=%v", uploaded, err)
+			var payload map[string]any
+			if err := json.Unmarshal(result, &payload); err != nil {
+				t.Fatal(err)
+			}
+			content := payload["content"].([]any)
+			if response.StatusCode != http.StatusOK || len(content) != 3 || content[0].(map[string]any)["type"] != "server_tool_use" || content[1].(map[string]any)["type"] != "web_search_tool_result" || content[2].(map[string]any)["text"] != "Here you go." {
+				t.Fatalf("non-stream status=%d payload=%#v", response.StatusCode, payload)
+			}
+			use := content[0].(map[string]any)
+			if use["input"].(map[string]any)["query"] != "rust tutorials" || content[1].(map[string]any)["tool_use_id"] != use["id"] {
+				t.Fatalf("web search linkage = %#v", content)
+			}
+			hits := content[1].(map[string]any)["content"].([]any)
+			if len(hits) != 1 || hits[0].(map[string]any)["title"] != "The Rust Book" || payload["stop_reason"] != "end_turn" {
+				t.Fatalf("web search result = %#v", payload)
+			}
+			usage := payload["usage"].(map[string]any)["server_tool_use"].(map[string]any)
+			if usage["web_search_requests"] != float64(1) {
+				t.Fatalf("web search usage = %#v", usage)
 			}
 		})
 	}
-}
-
-func newUploadTestAdapter(t *testing.T, baseURL string) (*Adapter, *infraegress.Lease) {
-	t.Helper()
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
-	lease, err := manager.AcquireCredential(context.Background(), egressdomain.ScopeWeb, account.Credential{ID: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return NewAdapter(Config{BaseURL: baseURL}, manager, cipher, nil, nil), lease
 }
 
 type egressRepositoryStub struct{}
@@ -531,6 +539,120 @@ func TestConsumeUpstreamHandlesConcatenatedImageEditFrames(t *testing.T) {
 	}
 }
 
+func TestStreamingImageEditRejectsModeratedFinalImage(t *testing.T) {
+	parsed := &parsedChat{}
+	frame := []byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/moderated/image.jpg","progress":100,"moderated":true}}}}`)
+	kind, delta, err := parseUpstreamFrame(frame, parsed)
+	if err != nil || kind != "" || delta != "" || len(parsed.Images) != 0 {
+		t.Fatalf("kind=%q delta=%q images=%#v err=%v", kind, delta, parsed.Images, err)
+	}
+	final := []byte(`{"result":{"response":{"modelResponse":{"generatedImageUrls":["users/test/generated/moderated/image.jpg"]}}}}`)
+	if kind, delta, err := parseUpstreamFrame(final, parsed); err != nil || kind != "" || delta != "" || len(parsed.Images) != 0 {
+		t.Fatalf("fallback kind=%q delta=%q images=%#v err=%v", kind, delta, parsed.Images, err)
+	}
+	capture := append(append([]byte(nil), frame...), final...)
+	if urls := imageEditResultURLs(parsed, capture); len(urls) != 0 {
+		t.Fatalf("moderated capture leaked images: %#v", urls)
+	}
+}
+
+func TestImageEditRejectsUnconfirmedCountAndResolution(t *testing.T) {
+	adapter := &Adapter{}
+	for _, request := range []provider.ImageEditRequest{
+		{ImageURLs: []string{"data:image/png;base64,AA=="}, Count: 2, Resolution: "1k"},
+		{ImageURLs: []string{"data:image/png;base64,AA=="}, Count: 1, Resolution: "2k"},
+		{ImageURLs: []string{"data:image/png;base64,AA=="}, Count: 1, Resolution: "1k", PartialImages: 1},
+		{ImageURLs: []string{"data:image/png;base64,AA=="}, Count: 1, Resolution: "1k", Streaming: true, PartialImages: 4},
+	} {
+		response, err := adapter.EditImage(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte(`"error"`)) {
+			t.Fatalf("status=%d body=%s", response.StatusCode, body)
+		}
+	}
+}
+
+func TestBuildImageEditPayloadMatchesCapturedAspectRatioShape(t *testing.T) {
+	payload := buildImageEditPayload("改成兔子", []string{"https://assets.grok.com/users/test/reference/content"}, "post_1", "1:1")
+	metadata, _ := payload["responseMetadata"].(map[string]any)
+	override, _ := metadata["modelConfigOverride"].(map[string]any)
+	modelMap, _ := override["modelMap"].(map[string]any)
+	config, _ := modelMap["imageEditModelConfig"].(map[string]any)
+	if payload["modelName"] != "imagine-image-edit" || payload["imageGenerationCount"] != 2 || modelMap["imageEditModel"] != "imagine" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if config["aspectRatio"] != "1:1" || config["parentPostId"] != "post_1" || !slices.Equal(config["imageReferences"].([]string), []string{"https://assets.grok.com/users/test/reference/content"}) {
+		t.Fatalf("image edit config = %#v", config)
+	}
+	withoutRatio := buildImageEditPayload("edit", []string{"reference"}, "post_2", "")
+	metadata = withoutRatio["responseMetadata"].(map[string]any)
+	override = metadata["modelConfigOverride"].(map[string]any)
+	modelMap = override["modelMap"].(map[string]any)
+	config = modelMap["imageEditModelConfig"].(map[string]any)
+	if _, exists := config["aspectRatio"]; exists {
+		t.Fatalf("empty aspect ratio leaked into payload: %#v", config)
+	}
+}
+
+func TestImageEditAspectRatioSupportsOpenAISize(t *testing.T) {
+	for _, test := range []struct {
+		aspectRatio string
+		size        string
+		want        string
+	}{
+		{aspectRatio: "1:1", size: "1536x1024", want: "1:1"},
+		{size: "1024x1024", want: "1:1"},
+		{size: "1024x1536", want: "2:3"},
+		{size: "1536x1024", want: "3:2"},
+		{size: "auto", want: "auto"},
+		{want: ""},
+	} {
+		got, err := resolveImageEditAspectRatio(test.aspectRatio, test.size)
+		if err != nil || got != test.want {
+			t.Fatalf("aspect=%q size=%q got=%q err=%v", test.aspectRatio, test.size, got, err)
+		}
+	}
+}
+
+func TestParseImageEditStreamFrame(t *testing.T) {
+	frame, ok := parseImageEditStreamFrame([]byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/edit-part-0/image.jpg","progress":50}}}}`))
+	if !ok || frame.URL != "https://assets.grok.com/users/test/generated/edit-part-0/image.jpg" || frame.Progress != 50 || frame.Moderated {
+		t.Fatalf("partial frame = %#v ok=%t", frame, ok)
+	}
+	frame, ok = parseImageEditStreamFrame([]byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/edit/image.jpg","isFinal":true,"moderated":true}}}}`))
+	if !ok || frame.Progress != 100 || !frame.Moderated {
+		t.Fatalf("final frame = %#v ok=%t", frame, ok)
+	}
+}
+
+func TestImageEditStreamUsesOfficialOpenAIEvents(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 'I', 'H', 'D', 'R'}
+	partial := openAIImageEditStreamEvent("image_edit.partial_image", png, 123, "1024x1024", 0)
+	if partial["type"] != "image_edit.partial_image" || partial["partial_image_index"] != 0 || partial["usage"] != nil || partial["output_format"] != "png" {
+		t.Fatalf("partial event = %#v", partial)
+	}
+	completed := openAIImageEditStreamEvent("image_edit.completed", []byte("jpeg"), 123, "auto", 0)
+	usage, _ := completed["usage"].(map[string]any)
+	if completed["type"] != "image_edit.completed" || completed["partial_image_index"] != nil || usage["total_tokens"] != 0 {
+		t.Fatalf("completed event = %#v", completed)
+	}
+	var output bytes.Buffer
+	if err := writeSSE(&output, "image_edit.partial_image", partial); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSSE(&output, "image_edit.completed", completed); err != nil {
+		t.Fatal(err)
+	}
+	value := output.String()
+	if !strings.Contains(value, "event: image_edit.partial_image") || !strings.Contains(value, "event: image_edit.completed") || strings.Contains(value, "image_generation.") {
+		t.Fatalf("stream = %q", value)
+	}
+}
+
 func TestExtractCapturedImageURLsPrefersFinalImage(t *testing.T) {
 	fixture := []byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/id-part-0/image.jpg","progress":50}}}}` +
 		`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/id/image.jpg","progress":100}}}}` +
@@ -562,6 +684,88 @@ func TestLiteModelResponseCardAttachmentsFallback(t *testing.T) {
 	kind, delta, err := parseUpstreamFrame(data, parsed)
 	if err != nil || kind != "image" || delta != "https://assets.grok.com/users/user_1/generated/fallback/image.jpg" {
 		t.Fatalf("kind=%q delta=%q images=%#v err=%v", kind, delta, parsed.Images, err)
+	}
+}
+
+func TestBuildDirectFileUploadBodyMatchesImagineMultipartProtocol(t *testing.T) {
+	raw := []byte("png-binary")
+	body, contentType, err := buildDirectFileUploadBody(provider.ImageInput{
+		Filename: "reference.png", MIMEType: "image/png", Data: raw,
+	}, imagineSelfUploadSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaType, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "multipart/form-data" || parameters["boundary"] == "" {
+		t.Fatalf("content type=%q parameters=%#v err=%v", contentType, parameters, err)
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), parameters["boundary"])
+	filePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileData, err := io.ReadAll(filePart)
+	if err != nil || filePart.FormName() != "file" || filePart.FileName() != "reference.png" || filePart.Header.Get("Content-Type") != "image/png" || !bytes.Equal(fileData, raw) {
+		t.Fatalf("file name=%q filename=%q content-type=%q data=%q err=%v", filePart.FormName(), filePart.FileName(), filePart.Header.Get("Content-Type"), fileData, err)
+	}
+	sourcePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := io.ReadAll(sourcePart)
+	if err != nil || sourcePart.FormName() != "file_source" || string(source) != imagineSelfUploadSource {
+		t.Fatalf("source name=%q value=%q err=%v", sourcePart.FormName(), source, err)
+	}
+	if part, err := reader.NextPart(); !errors.Is(err, io.EOF) || part != nil {
+		t.Fatalf("unexpected trailing part=%v err=%v", part, err)
+	}
+}
+
+func TestBuildDirectFileUploadBodyOmitsSourceForChat(t *testing.T) {
+	body, contentType, err := buildDirectFileUploadBody(provider.ImageInput{Filename: "chat.png", MIMEType: "image/png", Data: []byte("png")}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), parameters["boundary"])
+	part, err := reader.NextPart()
+	if err != nil || part.FormName() != "file" {
+		t.Fatalf("file part=%v err=%v", part, err)
+	}
+	if _, err := io.Copy(io.Discard, part); err != nil {
+		t.Fatal(err)
+	}
+	if part, err := reader.NextPart(); !errors.Is(err, io.EOF) || part != nil {
+		t.Fatalf("chat upload unexpectedly contains another form field: part=%v err=%v", part, err)
+	}
+}
+
+func TestDecodeDirectFileUploadResponse(t *testing.T) {
+	uploaded, err := decodeDirectFileUploadResponse(strings.NewReader(`{
+		"uploadId":"upload-1",
+		"fileMetadata":{"fileMetadataId":"metadata-1","fileUri":"users/test/reference/content"}
+	}`))
+	if err != nil || uploaded.ID != "metadata-1" || uploaded.URI != "https://assets.grok.com/users/test/reference/content" {
+		t.Fatalf("uploaded=%#v err=%v", uploaded, err)
+	}
+	if _, err := decodeDirectFileUploadResponse(strings.NewReader(`{"uploadId":"upload-1","fileMetadata":{}}`)); err == nil {
+		t.Fatal("incomplete V2 upload response was accepted")
+	}
+}
+
+func TestDirectFileUploadFallbackOnlyForUnsupportedEndpoint(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusNotImplemented} {
+		if !directFileUploadFallbackStatus(status) {
+			t.Fatalf("status %d must allow legacy fallback", status)
+		}
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusUnsupportedMediaType, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		if directFileUploadFallbackStatus(status) {
+			t.Fatalf("status %d must not allow ambiguous legacy fallback", status)
+		}
 	}
 }
 
@@ -667,6 +871,32 @@ func TestImagineResolutionAndBatchMapping(t *testing.T) {
 			t.Fatalf("resolution=%s count=%d config=%#v", test.resolution, test.count, config)
 		}
 	}
+	config, _ := resolveImagineModel("imagine", "1k", 1)
+	if got := imagineUpstreamGenerationCount(true, 1, config); got != 1 {
+		t.Fatalf("streaming upstream count = %d, want 1", got)
+	}
+	if got := imagineUpstreamGenerationCount(false, 1, config); got != 4 {
+		t.Fatalf("non-streaming upstream count = %d, want 4", got)
+	}
+}
+
+func TestImageStreamingRejectsMultipleOutputs(t *testing.T) {
+	response, err := (&Adapter{}).GenerateImage(context.Background(), provider.ImageGenerationRequest{
+		Model: "grok-imagine-image-quality", Prompt: "cat", Count: 2, Streaming: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		t.Fatalf("body=%s", body)
+	}
+	errorValue, _ := payload["error"].(map[string]any)
+	if response.StatusCode != http.StatusBadRequest || errorValue["message"] != "Streaming is only supported with n=1." || errorValue["type"] != "image_generation_user_error" || errorValue["param"] != "input" || errorValue["code"] != "unsupported_parameter" {
+		t.Fatalf("status=%d error=%#v", response.StatusCode, errorValue)
+	}
 }
 
 func TestImageAspectRatioFollowsXAIContractAndSizeAlias(t *testing.T) {
@@ -706,6 +936,91 @@ func TestImagineCollectorHandlesOutOfOrderFrames(t *testing.T) {
 	}
 }
 
+func TestImagineCollectorIgnoresWebSocketPreviewFrames(t *testing.T) {
+	collector := newImagineCollector()
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-a", "order": 0.0,
+		"percentage_complete": 50.0,
+		"url":                 "https://imagine-public.x.ai/imagine-public/images/image-a.png",
+		"blob":                "preview",
+	})
+	previews := collector.ReadyPreviews()
+	if len(previews) != 1 || previews[0].ID != "image-a" || previews[0].Blob != "preview" || len(collector.ReadyPreviews()) != 0 {
+		t.Fatalf("previews = %#v", previews)
+	}
+	collector.Accept(map[string]any{
+		"type": "json", "current_status": "completed", "image_id": "image-a",
+		"order": 0.0, "moderated": false,
+	})
+	if collector.Done(1) || collector.UsableCount() != 0 || len(collector.Images()) != 0 {
+		t.Fatalf("preview became final: %#v", collector)
+	}
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-a", "order": 0.0,
+		"percentage_complete": 100.0,
+		"url":                 "https://imagine-public.x.ai/imagine-public/images/image-a.jpg",
+		"blob":                "final",
+	})
+	if !collector.Done(1) || collector.UsableCount() != 1 {
+		t.Fatalf("final image not recognized: %#v", collector)
+	}
+	images := collector.Images()
+	if len(images) != 1 || images[0].URL != "https://imagine-public.x.ai/imagine-public/images/image-a.jpg" || images[0].Blob != "final" {
+		t.Fatalf("images = %#v", images)
+	}
+}
+
+func TestImagineCollectorKeepsInterleavedJobsIsolated(t *testing.T) {
+	collector := newImagineCollector()
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-a", "order": 0.0, "percentage_complete": 50.0, "blob": "a-preview",
+	})
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-b", "order": 1.0, "percentage_complete": 50.0, "blob": "b-preview",
+	})
+	previews := collector.ReadyPreviews()
+	if len(previews) != 2 || previews[0].ID != "image-a" || previews[0].Blob != "a-preview" || previews[1].ID != "image-b" || previews[1].Blob != "b-preview" {
+		t.Fatalf("previews = %#v", previews)
+	}
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-b", "order": 1.0, "percentage_complete": 100.0, "blob": "b-final",
+	})
+	collector.Accept(map[string]any{"type": "json", "current_status": "completed", "image_id": "image-b", "order": 1.0, "moderated": false})
+	ready := collector.ReadyImages()
+	if len(ready) != 1 || ready[0].ID != "image-b" || ready[0].Blob != "b-final" {
+		t.Fatalf("first ready = %#v", ready)
+	}
+	collector.Accept(map[string]any{
+		"type": "image", "id": "image-a", "order": 0.0, "percentage_complete": 100.0, "blob": "a-final",
+	})
+	collector.Accept(map[string]any{"type": "json", "current_status": "completed", "image_id": "image-a", "order": 0.0, "moderated": false})
+	ready = collector.ReadyImages()
+	if len(ready) != 1 || ready[0].ID != "image-a" || ready[0].Blob != "a-final" {
+		t.Fatalf("second ready = %#v", ready)
+	}
+}
+
+func TestImagineCollectorCanReturnRequestedSubsetBeforeNativeBatchCompletes(t *testing.T) {
+	collector := newImagineCollector()
+	for index := 0; index < 3; index++ {
+		id := fmt.Sprintf("image-%d", index)
+		collector.Accept(map[string]any{
+			"type": "image", "id": id, "order": float64(index), "percentage_complete": 100.0,
+			"url": "https://imagine-public.x.ai/imagine-public/images/" + id + ".jpg",
+		})
+		collector.Accept(map[string]any{
+			"type": "json", "current_status": "completed", "image_id": id,
+			"order": float64(index), "moderated": false,
+		})
+	}
+	if collector.Done(4) || collector.UsableCount() != 3 {
+		t.Fatalf("collector=%#v usable=%d", collector, collector.UsableCount())
+	}
+	if collector.UsableCount() < 2 {
+		t.Fatal("a request for two images should already be satisfiable")
+	}
+}
+
 func TestImagineCollectorSettlesModeratedSlots(t *testing.T) {
 	collector := newImagineCollector()
 	collector.Accept(map[string]any{"type": "json", "current_status": "completed", "image_id": "blocked", "moderated": true})
@@ -720,16 +1035,7 @@ func TestGeneratedImageAssetHostsRemainStrict(t *testing.T) {
 	}
 }
 
-func TestLoadStoredVideoReferenceReadsMediaAssetWithoutHTTP(t *testing.T) {
-	raw, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-	adapter := &Adapter{assets: readableImageAssetStoreStub{data: raw}}
-	image, err := adapter.loadStoredVideoReference(context.Background(), "img_test", 20<<20)
-	if err != nil || image.MIMEType != "image/png" || !bytes.Equal(image.Data, raw) {
-		t.Fatalf("image=%#v err=%v", image, err)
-	}
-}
-
-func TestImageStreamExtensionEventsAndPayloads(t *testing.T) {
+func TestImageStreamUsesOfficialOpenAIEventsWithoutTokenUsage(t *testing.T) {
 	adapter := &Adapter{assets: imageAssetStoreStub{}}
 	urlItem, err := adapter.imageDataItem(context.Background(), account.Credential{}, imagineImageValue{URL: "https://imgen.x.ai/image.jpg", Blob: "aW1hZ2U="}, "url")
 	if err != nil || urlItem["url"] != "https://api.example/v1/media/images/img_test" || urlItem["mime_type"] != "image/jpeg" || urlItem["revised_prompt"] != "" {
@@ -739,11 +1045,22 @@ func TestImageStreamExtensionEventsAndPayloads(t *testing.T) {
 	if err != nil || b64Item["b64_json"] != "aW1hZ2U=" || b64Item["mime_type"] != "image/jpeg" {
 		t.Fatalf("base64 item = %#v, err=%v", b64Item, err)
 	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 'I', 'H', 'D', 'R'}
+	partial := openAIImageStreamEvent("image_generation.partial_image", imagineImageValue{ID: "image-a", Width: 960, Height: 960}, png, 0)
+	if partial["type"] != "image_generation.partial_image" || partial["partial_image_index"] != 0 || partial["size"] != "960x960" || partial["output_format"] != "png" || partial["usage"] != nil {
+		t.Fatalf("partial event = %#v", partial)
+	}
+	completed := openAIImageStreamEvent("image_generation.completed", imagineImageValue{ID: "image-a", Width: 960, Height: 960}, []byte("jpeg"), 0)
+	if completed["type"] != "image_generation.completed" || completed["partial_image_index"] != nil || completed["quality"] != "auto" || completed["usage"] != nil {
+		t.Fatalf("completed event = %#v", completed)
+	}
 	var output bytes.Buffer
-	writeImagineStreamFailure(&output, "imggen_test", "upstream_error", "generation failed")
+	if err := writeSSE(&output, "image_generation.partial_image", partial); err != nil {
+		t.Fatal(err)
+	}
 	value := output.String()
-	if !strings.Contains(value, "event: image_generation.failed") || !strings.Contains(value, `"id":"imggen_test"`) || !strings.Contains(value, `"code":"upstream_error"`) {
-		t.Fatalf("failure event = %q", value)
+	if !strings.Contains(value, "event: image_generation.partial_image") || strings.Contains(value, "image_generation.started") || strings.Contains(value, "image_generation.image.completed") || strings.Contains(value, `"usage"`) {
+		t.Fatalf("stream event = %q", value)
 	}
 }
 
@@ -1061,269 +1378,16 @@ func TestParseVideoConcatenatedJSONFixture(t *testing.T) {
 	}
 }
 
-func TestGenerateVideoDoesNotReturnProtectedUpstreamURLWithoutStorage(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/rest/media/post/create":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
-		case "/rest/app-chat/conversations/new":
-			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/generated/video.mp4"}}}}`+"\n")
-		case "/generated/video.mp4":
-			writer.Header().Set("Content-Type", "video/mp4")
-			_, _ = writer.Write([]byte("video-bytes"))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+func TestParseVideoStreamUsesModelResponseAttachment(t *testing.T) {
+	fixture := `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1"},"modelResponse":{"fileAttachments":["users/user_1/generated/video_1/generated_video.mp4"]}}}}` + "\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	result, postID, err := parseVideoStream(response, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
+	if postID != "post_1" || result.URL != "https://assets.grok.com/users/user_1/generated/video_1/generated_video.mp4" || result.ContentType != "video/mp4" {
+		t.Fatalf("result = %#v, post = %q", result, postID)
 	}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	_, err = adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
-	})
-	if err == nil || !provider.IsMediaPostProcessingError(err) {
-		t.Fatalf("protected upstream video was returned without local storage: %v", err)
-	}
-}
-
-func TestGenerateVideoRecoversCompletedPostWithoutStreamURL(t *testing.T) {
-	var lookupIDs []string
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/rest/media/post/create":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"post":{"id":"container_1"}}`)
-		case "/rest/app-chat/conversations/new":
-			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoId":"video_1","assetId":"asset_1","videoPostId":"image_parent"}}}}`+"\n")
-		case "/rest/media/post/get":
-			var body map[string]any
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Errorf("lookup body = %#v, err = %v", body, err)
-			}
-			lookupIDs = append(lookupIDs, fmt.Sprint(body["id"]))
-			writer.Header().Set("Content-Type", "application/json")
-			if body["id"] == "video_1" {
-				_, _ = io.WriteString(writer, `{"post":{"id":"video_1","mediaType":"MEDIA_POST_TYPE_VIDEO"}}`)
-				return
-			}
-			_, _ = io.WriteString(writer, `{"post":{"id":"asset_1","mediaType":"MEDIA_POST_TYPE_VIDEO","mediaUrl":"`+server.URL+`/generated/video.mp4","thumbnailImageUrl":"`+server.URL+`/generated/poster.jpg"}}`)
-		case "/generated/video.mp4":
-			writer.Header().Set("Content-Type", "video/mp4")
-			_, _ = writer.Write([]byte("recovered-video"))
-		case "/generated/poster.jpg":
-			writer.Header().Set("Content-Type", "image/jpeg")
-			_, _ = writer.Write([]byte("recovered-poster"))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := &videoAssetStoreStub{}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	adapter.SetVideoAssetStore(store)
-	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(lookupIDs, []string{"video_1", "asset_1"}) || result.URL != "/v1/files/video/generated_video.mp4" || result.PosterURL != "/v1/files/image/preview_image.jpg" || string(store.data) != "recovered-video" || string(store.poster) != "recovered-poster" {
-		t.Fatalf("lookups=%#v result=%#v stored=%q poster=%q", lookupIDs, result, store.data, store.poster)
-	}
-}
-
-func TestGenerateVideoPreservesUnauthorizedRecoveryFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/rest/media/post/create":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"post":{"id":"container_1"}}`)
-		case "/rest/app-chat/conversations/new":
-			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoId":"video_1","videoPostId":"image_parent"}}}}`+"\n")
-		case "/rest/media/post/get":
-			writer.WriteHeader(http.StatusUnauthorized)
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	_, err = adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
-	})
-	if !errors.Is(err, provider.ErrUnauthorized) {
-		t.Fatalf("recovery error = %T %v", err, err)
-	}
-}
-
-func TestGenerateVideoRetriesModeratedStreamBeforePublishingProgress(t *testing.T) {
-	streamCalls := 0
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/rest/media/post/create":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
-		case "/rest/app-chat/conversations/new":
-			streamCalls++
-			writer.Header().Set("Content-Type", "text/event-stream")
-			if streamCalls == 1 {
-				_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoId":"video_1","videoPostId":"post_1","moderated":true}}}}`+"\n")
-				return
-			}
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoId":"video_1","videoPostId":"post_1","videoUrl":"`+server.URL+`/generated/video.mp4"}}}}`+"\n")
-		case "/generated/video.mp4":
-			writer.Header().Set("Content-Type", "video/mp4")
-			_, _ = writer.Write([]byte("video-after-moderation-retry"))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := &videoAssetStoreStub{}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	adapter.SetVideoAssetStore(store)
-	var progress []int
-	_, err = adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
-		Progress: func(value int) { progress = append(progress, value) },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if streamCalls != 2 || !slices.Equal(progress, []int{100}) || string(store.data) != "video-after-moderation-retry" {
-		t.Fatalf("streamCalls=%d progress=%#v stored=%q", streamCalls, progress, store.data)
-	}
-}
-
-func TestGenerateVideoArchivesProtectedOutputWithAccountSession(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/rest/media/post/create":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
-		case "/rest/app-chat/conversations/new":
-			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"`+server.URL+`/users/test/generated/video/generated_video.mp4","thumbnailImageUrl":"`+server.URL+`/users/test/generated/video/preview_image.jpg"}}}}`+"\n")
-		case "/users/test/generated/video/generated_video.mp4":
-			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") || request.Header.Get("Range") != "bytes=0-" {
-				t.Errorf("video download headers = %#v", request.Header)
-			}
-			writer.Header().Set("Content-Type", "video/mp4")
-			_, _ = writer.Write([]byte("video-bytes"))
-		case "/users/test/generated/video/preview_image.jpg":
-			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") {
-				t.Errorf("poster download headers = %#v", request.Header)
-			}
-			writer.Header().Set("Content-Type", "image/jpeg")
-			_, _ = writer.Write([]byte("poster-bytes"))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := &videoAssetStoreStub{}
-	adapter := NewAdapter(Config{BaseURL: server.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	adapter.SetVideoAssetStore(store)
-	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: account.Credential{ID: 1, EncryptedAccessToken: encrypted}, Prompt: "move", Duration: 6, AspectRatio: "3:2", Resolution: "480p",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.URL != "/v1/files/video/generated_video.mp4" || result.PosterURL != "/v1/files/image/preview_image.jpg" || result.ContentType != "video/mp4" || string(store.data) != "video-bytes" || string(store.poster) != "poster-bytes" {
-		t.Fatalf("result=%#v stored=%q", result, store.data)
-	}
-}
-
-func TestArchiveVideoRejectsHTTPDowngradeAgainstHTTPSBaseURL(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "video/mp4")
-		_, _ = io.WriteString(writer, "must not be fetched")
-	}))
-	defer server.Close()
-
-	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := cipher.Encrypt("test-sso")
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseURL := strings.Replace(server.URL, "http://", "https://", 1)
-	adapter := NewAdapter(Config{BaseURL: baseURL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	adapter.SetVideoAssetStore(&videoAssetStoreStub{})
-	_, err = adapter.ArchiveVideo(context.Background(), account.Credential{ID: 1, EncryptedAccessToken: encrypted}, provider.VideoResult{URL: server.URL + "/video.mp4", ContentType: "video/mp4"})
-	if err == nil || !provider.IsMediaPostProcessingError(err) {
-		t.Fatalf("HTTP downgrade was accepted: %v", err)
-	}
-}
-
-type videoAssetStoreStub struct {
-	data   []byte
-	poster []byte
-}
-
-func (s *videoAssetStoreStub) SaveVideo(_ context.Context, _ string, _ string, body io.Reader) (string, error) {
-	s.data, _ = io.ReadAll(body)
-	return "/v1/files/video/generated_video.mp4", nil
-}
-
-func (s *videoAssetStoreStub) SaveVideoPoster(_ context.Context, _ string, body []byte) (string, error) {
-	s.poster = append([]byte(nil), body...)
-	return "/v1/files/image/preview_image.jpg", nil
 }
 
 func MarshalJSONBytes(value any) []byte {

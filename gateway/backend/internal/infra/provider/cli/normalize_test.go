@@ -11,7 +11,7 @@ import (
 )
 
 func TestNormalizeResponsesRequest(t *testing.T) {
-	body := []byte(`{"model":"public-model","input":[{"type":"reasoning","id":"old","encrypted_content":"cipher"},{"role":"user","content":"hello"}],"prompt_cache_key":"official-key","response_format":{"type":"json_object"}}`)
+	body := []byte(`{"model":"public-model","input":[{"type":"reasoning","id":"old","encrypted_content":"cipher","content":[{"text":"thought"}]},{"role":"user","content":"hello"}],"prompt_cache_key":"official-key","response_format":{"type":"json_object"}}`)
 	normalized, _, err := normalizeResponsesRequest(body, "grok-4.5")
 	if err != nil {
 		t.Fatal(err)
@@ -24,8 +24,12 @@ func TestNormalizeResponsesRequest(t *testing.T) {
 		t.Fatalf("模型或缓存键未正确改写: %#v", payload)
 	}
 	input := payload["input"].([]any)
-	if len(input) != 2 || input[0].(map[string]any)["encrypted_content"] != "cipher" {
+	if len(input) != 2 || input[0].(map[string]any)["type"] != "reasoning" || input[0].(map[string]any)["encrypted_content"] != "cipher" {
 		t.Fatalf("reasoning 回放项未保留: %#v", input)
+	}
+	reasoningContent := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if reasoningContent["type"] != "reasoning_text" || reasoningContent["text"] != "thought" {
+		t.Fatalf("reasoning content discriminator 未修补: %#v", reasoningContent)
 	}
 	text := payload["text"].(map[string]any)
 	if text["format"] == nil || payload["response_format"] != nil {
@@ -58,6 +62,23 @@ func TestNormalizeResponsesRequestDoesNotInventPromptCacheKey(t *testing.T) {
 	}
 	if _, exists := payload["prompt_cache_key"]; exists {
 		t.Fatalf("unexpected prompt_cache_key: %#v", payload)
+	}
+}
+
+func TestNormalizeResponsesRequestAddsEmptySummaryToEncryptedReasoning(t *testing.T) {
+	normalized, _, err := normalizeResponsesRequest([]byte(`{"model":"public","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`), "grok-4.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Input []map[string]any `json:"input"`
+	}
+	if json.Unmarshal(normalized, &payload) != nil || len(payload.Input) != 2 {
+		t.Fatalf("normalized = %s", normalized)
+	}
+	summary, ok := payload.Input[0]["summary"].([]any)
+	if !ok || len(summary) != 0 || payload.Input[0]["encrypted_content"] != "opaque" {
+		t.Fatalf("reasoning = %#v", payload.Input[0])
 	}
 }
 

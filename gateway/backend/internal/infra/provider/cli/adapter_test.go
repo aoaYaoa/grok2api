@@ -8,13 +8,19 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -23,28 +29,84 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
+func TestCredentialMetadataMarksOnlyNumericBotFlagOne(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{}, cipher)
+	tests := []struct {
+		name     string
+		provider account.Provider
+		claims   map[string]any
+		token    string
+		want     bool
+	}{
+		{name: "numeric one", provider: account.ProviderBuild, claims: map[string]any{"bot_flag_source": 1}, want: true},
+		{name: "numeric zero", provider: account.ProviderBuild, claims: map[string]any{"bot_flag_source": 0}},
+		{name: "numeric two", provider: account.ProviderBuild, claims: map[string]any{"bot_flag_source": 2}},
+		{name: "string one", provider: account.ProviderBuild, claims: map[string]any{"bot_flag_source": "1"}},
+		{name: "missing claim", provider: account.ProviderBuild, claims: map[string]any{"sub": "user"}},
+		{name: "malformed jwt", provider: account.ProviderBuild, token: "not-a-jwt"},
+		{name: "non build", provider: account.ProviderWeb, claims: map[string]any{"bot_flag_source": 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			token := test.token
+			if test.claims != nil {
+				payload, marshalErr := json.Marshal(test.claims)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				token = "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+			}
+			encrypted, encryptErr := cipher.Encrypt(token)
+			if encryptErr != nil {
+				t.Fatal(encryptErr)
+			}
+			metadata := adapter.CredentialMetadata(account.Credential{Provider: test.provider, EncryptedAccessToken: encrypted})
+			if metadata.BuildBotFlagged != test.want {
+				t.Fatalf("flagged = %t, want %t", metadata.BuildBotFlagged, test.want)
+			}
+		})
+	}
+
+	metadata := adapter.CredentialMetadata(account.Credential{Provider: account.ProviderBuild, EncryptedAccessToken: "invalid-ciphertext"})
+	if metadata.BuildBotFlagged {
+		t.Fatal("decrypt failure must not mark the account")
+	}
+}
+
 func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.T) {
 	var captured map[string]any
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("x-grok-client-version") != "0.2.103" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("User-Agent") != "grok-shell/0.2.103 (linux; x86_64)" || r.Header.Get("x-grok-conv-id") != "isolated-key" {
+		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || r.Header.Get("x-authenticateresponse") != "authenticate-response" || r.Header.Get("x-grok-client-version") != "0.2.102" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("x-grok-client-mode") != "headless" || r.Header.Get("User-Agent") != "grok-shell/0.2.102 (linux; x86_64)" {
 			t.Fatalf("headers = %#v", r.Header)
 		}
 		requestID := r.Header.Get("x-grok-req-id")
 		sessionID := r.Header.Get("x-grok-session-id")
-		if r.Header.Get("x-grok-client-surface") != "tui" || r.Header.Get("x-grok-client-name") != "grok-shell" || len(r.Header.Get("x-grok-agent-id")) != 32 || len(sessionID) != 36 {
+		expectedSessionID, err := grokSessionID("isolated-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestUUID, requestErr := uuid.Parse(requestID)
+		agentUUID, agentErr := uuid.Parse(r.Header.Get("x-grok-agent-id"))
+		if requestErr != nil || requestUUID.Version() != uuid.Version(4) || agentErr != nil || agentUUID.Version() != uuid.Version(4) || sessionID != expectedSessionID || r.Header.Get("x-grok-conv-id") != sessionID {
 			t.Fatalf("client identity headers = %#v", r.Header)
 		}
-		if r.Header.Get("x-grok-conversation-id") != "isolated-key" || len(requestID) != 32 || r.Header.Get("x-grok-request-id") != requestID || r.Header.Get("x-grok-session-id-legacy") != sessionID {
-			t.Fatalf("request identity headers = %#v", r.Header)
+		for _, legacy := range []string{"x-grok-client-surface", "x-grok-client-name", "x-grok-conversation-id", "x-grok-session-id-legacy", "x-grok-request-id"} {
+			if r.Header.Get(legacy) != "" {
+				t.Fatalf("legacy header %s = %q", legacy, r.Header.Get(legacy))
+			}
 		}
-		if r.Header.Get("x-userid") != "user-123" || r.Header.Get("Accept-Encoding") != "gzip" || len(r.Header.Get("traceparent")) != 55 {
+		if r.Header.Get("x-grok-user-id") != "user-123" || r.Header.Get("x-grok-turn-idx") != "7" || r.Header.Get("x-userid") != "" || r.Header.Get("Accept-Encoding") != "gzip" || len(r.Header.Get("traceparent")) != 55 {
 			t.Fatalf("protocol headers = %#v", r.Header)
 		}
-		if values, ok := r.Header["Tracestate"]; !ok || len(values) != 1 || values[0] != "" {
-			t.Fatalf("tracestate = %#v", values)
+		if _, ok := r.Header["Tracestate"]; ok {
+			t.Fatalf("tracestate = %#v", r.Header["Tracestate"])
 		}
 		body, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(body, &captured); err != nil {
@@ -67,11 +129,11 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: "https://api.x.ai/v1", ClientVersion: "0.2.103", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.103 (linux; x86_64)"}, cipher)
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "0.2.102", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.102 (linux; x86_64)"}, cipher)
 	adapter.http.Transport = transport
 	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
 		Credential: account.Credential{ID: 7, UserID: "user-123", EncryptedAccessToken: encrypted}, Method: http.MethodPost, Path: "/responses",
-		Model: "grok-4.5", PromptCacheKey: "isolated-key", NormalizeBody: true,
+		Model: "grok-4.5", PromptCacheKey: "isolated-key", GrokTurnIndex: "7", NormalizeBody: true,
 		Body: []byte(`{"model":"public","prompt_cache_key":"client-key","input":[{"type":"reasoning","id":"rs_1","encrypted_content":"cipher"}]}`),
 	})
 	if err != nil {
@@ -79,8 +141,369 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 	}
 	_ = response.Body.Close()
 	input := captured["input"].([]any)
-	if captured["model"] != "grok-4.5" || captured["prompt_cache_key"] != "isolated-key" || len(input) != 1 || input[0].(map[string]any)["encrypted_content"] != "cipher" {
+	if captured["model"] != "grok-4.5" || captured["prompt_cache_key"] != "isolated-key" || len(input) != 1 || input[0].(map[string]any)["type"] != "reasoning" || input[0].(map[string]any)["encrypted_content"] != "cipher" {
 		t.Fatalf("captured = %#v", captured)
+	}
+}
+
+func TestNormalizeGrokTurnIndex(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "missing"},
+		{name: "zero", value: "0", want: "0"},
+		{name: "positive", value: "42", want: "42"},
+		{name: "trimmed", value: " 7 ", want: "7"},
+		{name: "max uint64", value: "18446744073709551615", want: "18446744073709551615"},
+		{name: "negative", value: "-1"},
+		{name: "explicit positive", value: "+1"},
+		{name: "decimal", value: "1.0"},
+		{name: "overflow", value: "18446744073709551616"},
+		{name: "too long", value: "000000000000000000001"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeGrokTurnIndex(test.value); got != test.want {
+				t.Fatalf("turn index = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGrokTurnIndexRequiresStableSession(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
+	applyGrokTurnIndexHeader(request, "7")
+	if got := request.Header.Get("x-grok-turn-idx"); got != "" {
+		t.Fatalf("turn index without session = %q", got)
+	}
+
+	request.Header.Set("x-grok-session-id", "session-1")
+	applyGrokTurnIndexHeader(request, "7")
+	if got := request.Header.Get("x-grok-turn-idx"); got != "7" {
+		t.Fatalf("turn index with session = %q, want 7", got)
+	}
+}
+
+func TestForwardResponseReplaysReasoningAcrossMessagesTurns(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rawEncrypted := make([]byte, 64)
+	for index := range rawEncrypted {
+		rawEncrypted[index] = byte(index)
+	}
+	replayEncrypted := base64.RawStdEncoding.EncodeToString(rawEncrypted)
+	requestCount := 0
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
+	adapter.SetReasoningReplay(reasoningreplay.New(
+		memory.NewReasoningReplayStore(16),
+		reasoningreplay.Config{Enabled: true, TTL: time.Hour},
+		nil,
+	))
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		var payload struct {
+			Input []map[string]any `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if requestCount == 2 {
+			if len(payload.Input) != 4 || payload.Input[0]["role"] != "user" || payload.Input[1]["type"] != "reasoning" || payload.Input[1]["encrypted_content"] != replayEncrypted || payload.Input[2]["role"] != "assistant" || payload.Input[3]["role"] != "user" {
+				t.Fatalf("second turn replay order = %#v", payload.Input)
+			}
+		}
+		body := `{"id":"resp_2","model":"grok-4.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}]}`
+		if requestCount == 1 {
+			body = `{"id":"resp_1","model":"grok-4.5","status":"completed","output":[{"type":"reasoning","encrypted_content":"` + replayEncrypted + `"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}]}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+
+	credential := account.Credential{ID: 7, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted}
+	first, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		NormalizeBody: true, Operation: conversation.OperationMessages, PromptCacheKey: "messages-cache-key", ReasoningReplayKey: "messages-replay-key",
+		Body: []byte(`{"model":"public","max_tokens":128,"messages":[{"role":"user","content":"first"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(first.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: credential, Method: http.MethodPost, Path: "/responses", Model: "grok-4.5",
+		NormalizeBody: true, Operation: conversation.OperationMessages, PromptCacheKey: "messages-cache-key", ReasoningReplayKey: "messages-replay-key",
+		Body: []byte(`{"model":"public","max_tokens":128,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"first"},{"role":"user","content":"second"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Body.Close()
+	if _, err := io.ReadAll(second.Body); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d", requestCount)
+	}
+}
+
+func TestReasoningReplayScopeSeparatesAccountAndPlane(t *testing.T) {
+	adapter := NewAdapter(Config{
+		BaseURL:         "https://build.example/v1",
+		FallbackBaseURL: "https://xai.example/v1",
+	}, nil)
+	request := provider.ResponseResourceRequest{
+		Credential:         account.Credential{ID: 7},
+		ReasoningReplayKey: "explicit-session",
+	}
+	buildKey := adapter.scopedReasoningReplayKey(request, "https://build.example/v1")
+	if buildKey == "" {
+		t.Fatal("explicit session did not produce replay scope")
+	}
+	otherAccount := request
+	otherAccount.Credential.ID = 8
+	if got := adapter.scopedReasoningReplayKey(otherAccount, "https://build.example/v1"); got == buildKey {
+		t.Fatal("reasoning replay scope was shared across accounts")
+	}
+	if got := adapter.scopedReasoningReplayKey(request, "https://xai.example/v1"); got == buildKey {
+		t.Fatal("reasoning replay scope was shared across Build and XAI")
+	}
+	request.ReasoningReplayKey = ""
+	if got := adapter.scopedReasoningReplayKey(request, "https://build.example/v1"); got != "" {
+		t.Fatalf("soft/empty session unexpectedly enabled replay: %q", got)
+	}
+}
+
+func TestListModelsUsesOfficialMetadataHeaders(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "0.2.102", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.102 (linux; x86_64)"}, cipher)
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/v1/models" || request.Header.Get("Authorization") != "Bearer access-token" || request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("x-grok-client-version") != "0.2.102" || request.Header.Get("x-grok-client-identifier") != "grok-shell" || request.Header.Get("x-grok-client-mode") != "headless" || request.Header.Get("User-Agent") != "grok-shell/0.2.102 (linux; x86_64)" {
+			t.Fatalf("headers = %#v", request.Header)
+		}
+		if request.Header.Get("x-userid") != "user-123" || request.Header.Get("x-email") != "user@example.com" || request.Header.Get("x-grok-user-id") != "" || request.Header.Get("x-authenticateresponse") != "" || request.Header.Get("x-grok-session-id") != "" {
+			t.Fatalf("metadata headers = %#v", request.Header)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"grok-4.5"}]}`)), Request: request}, nil
+	})
+	models, err := adapter.ListModels(context.Background(), account.Credential{UserID: "user-123", Email: "user@example.com", EncryptedAccessToken: encrypted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0] != "grok-4.5" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestModelCatalogETagSignalsMissingOrChangedCatalogBaseline(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelETag := `"catalog-v1"`
+	responseETag := modelETag
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		body := `{"id":"resp_1","status":"completed","output":[]}`
+		if request.URL.Path == "/v1/models" {
+			header.Set("ETag", modelETag)
+			body = `{"data":[{"id":"grok-4.5"}]}`
+		} else {
+			header.Set("x-models-etag", responseETag)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	credential := account.Credential{ID: 42, EncryptedAccessToken: encrypted}
+	if !adapter.modelCatalogChanged(43, `"catalog-v1"`) {
+		t.Fatal("缺少进程内目录基线时应补一次账号模型同步")
+	}
+	if _, err := adapter.ListModels(context.Background(), credential); err != nil {
+		t.Fatal(err)
+	}
+	forward := func() *provider.Response {
+		response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+			Credential: credential, Method: http.MethodPost, Path: "/responses", Body: []byte(`{}`), Operation: conversation.OperationResponses,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		return response
+	}
+	if response := forward(); response.ModelCatalogChanged {
+		t.Fatal("与最近模型同步相同的 ETag 不应触发刷新")
+	}
+	responseETag = `"catalog-v2"`
+	if response := forward(); !response.ModelCatalogChanged {
+		t.Fatal("推理响应报告新 ETag 时应触发账号模型刷新")
+	}
+	modelETag = responseETag
+	if _, err := adapter.ListModels(context.Background(), credential); err != nil {
+		t.Fatal(err)
+	}
+	if response := forward(); response.ModelCatalogChanged {
+		t.Fatal("成功同步新目录后不应继续重复触发刷新")
+	}
+}
+
+func TestGetBillingUsesCreditsAndLiveSubscriptionTier(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "0.2.102", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.102 (linux; x86_64)"}, cipher)
+	calls := 0
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		var body string
+		switch request.URL.Path {
+		case "/v1/billing":
+			if request.URL.Query().Get("format") != "credits" {
+				t.Fatalf("billing request = %s", request.URL.String())
+			}
+			body = `{"config":{"creditUsagePercent":0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-01T00:00:00Z","end":"2026-07-08T00:00:00Z"}}}`
+		case "/v1/user":
+			if request.URL.Query().Get("include") != "subscription" {
+				t.Fatalf("subscription request = %s", request.URL.String())
+			}
+			body = `{"subscriptionTier":"SuperGrokPro"}`
+		default:
+			t.Fatalf("unexpected request = %s", request.URL.String())
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	billing, err := adapter.GetBilling(context.Background(), account.Credential{ID: 7, EncryptedAccessToken: encrypted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || billing.AccountID != 7 || billing.CreditUsagePercent != 0 || billing.UsagePeriodType != "USAGE_PERIOD_TYPE_WEEKLY" || billing.PlanName != "SuperGrokPro" || !billing.IsPaid() || billing.SyncedAt.IsZero() {
+		t.Fatalf("calls=%d billing=%#v", calls, billing)
+	}
+}
+
+func TestNormalizeAccountModelCapabilitiesSuperAddsVideo15(t *testing.T) {
+	adapter := &Adapter{}
+	build := account.Credential{Provider: account.ProviderBuild}
+	// Super / paid：主 Build 仅返回 grok-4.5 时也必须补齐 1.5。
+	got := adapter.NormalizeAccountModelCapabilities([]string{"grok-4.5", "  ", "grok-4.5"}, &account.Billing{MonthlyLimit: 100}, build)
+	if len(got) != 2 || got[0] != "grok-4.5" || got[1] != buildVideoModel {
+		t.Fatalf("super primary catalog = %#v", got)
+	}
+	// Super + 目录已含 1.5：幂等去重，其它模型不变。
+	got = adapter.NormalizeAccountModelCapabilities(
+		[]string{"grok-4.5", buildVideoModel, "grok-code-fast-1", buildVideoModel},
+		&account.Billing{OnDemandCap: 10},
+		build,
+	)
+	if len(got) != 3 || got[0] != "grok-4.5" || got[1] != buildVideoModel || got[2] != "grok-code-fast-1" {
+		t.Fatalf("super catalog = %#v", got)
+	}
+	// Free：即使目录暴露 1.5 也必须移除。
+	got = adapter.NormalizeAccountModelCapabilities([]string{"grok-4.5", buildVideoModel}, &account.Billing{Used: 1, PlanName: "free"}, build)
+	if len(got) != 1 || got[0] != "grok-4.5" {
+		t.Fatalf("free catalog = %#v", got)
+	}
+	// Unknown（无 Billing）：与 Free 相同，移除 1.5。
+	got = adapter.NormalizeAccountModelCapabilities([]string{buildVideoModel, "grok-4.5"}, nil, build)
+	if len(got) != 1 || got[0] != "grok-4.5" {
+		t.Fatalf("unknown catalog = %#v", got)
+	}
+	// 不得依赖 BuildAPIFallback；空目录 + Billing Super 仅补 1.5。
+	got = adapter.NormalizeAccountModelCapabilities(nil, &account.Billing{PlanName: "SuperGrok", CreditUsagePercent: 1}, build)
+	if len(got) != 1 || got[0] != buildVideoModel {
+		t.Fatalf("super empty catalog = %#v", got)
+	}
+	// 零 Billing + BuildSuperEntitled：补齐 1.5。
+	entitled := account.Credential{Provider: account.ProviderBuild, BuildSuperEntitled: true}
+	got = adapter.NormalizeAccountModelCapabilities([]string{"grok-4.5"}, &account.Billing{IsUnifiedBillingUser: true}, entitled)
+	if len(got) != 2 || got[0] != "grok-4.5" || got[1] != buildVideoModel {
+		t.Fatalf("entitled catalog = %#v", got)
+	}
+}
+
+func TestGrokSessionIDFollowsConversationIdentity(t *testing.T) {
+	explicit := "019f6b02-5bae-7cf3-b26e-73e85c861749"
+	if value, err := grokSessionID(explicit); err != nil || value != explicit {
+		t.Fatalf("explicit session = %q, %v", value, err)
+	}
+	first, err := grokSessionID("client-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := grokSessionID("client-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := uuid.Parse(first)
+	if err != nil || parsed.Version() != uuid.Version(8) || first != second {
+		t.Fatalf("derived sessions = %q %q, %v", first, second, err)
+	}
+	// 对齐 CPA：无会话键时不得伪造随机 conv-id，否则会打散 xAI 服务器亲和导致 cached_tokens=0。
+	generated, err := grokSessionID("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generated != "" {
+		t.Fatalf("empty session key must not invent conv-id, got %q", generated)
+	}
+}
+
+func TestInferenceIdentityIsConversationScopedNotAccountScoped(t *testing.T) {
+	adapter := NewAdapter(Config{ClientVersion: "0.2.102", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.102 (linux; x86_64)"}, nil)
+	build := func(accountID uint64, conversation string) http.Header {
+		request := httptest.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
+		if err := adapter.applyHeaders(request, account.Credential{ID: accountID}, "token", "grok-4.5", conversation, true); err != nil {
+			t.Fatal(err)
+		}
+		return request.Header
+	}
+	first := build(1, "conversation-a")
+	second := build(2, "conversation-a")
+	third := build(1, "conversation-b")
+	if first.Get("x-grok-agent-id") != second.Get("x-grok-agent-id") || first.Get("x-grok-session-id") != second.Get("x-grok-session-id") {
+		t.Fatalf("same conversation identity changed across accounts: first=%#v second=%#v", first, second)
+	}
+	if first.Get("x-grok-req-id") == second.Get("x-grok-req-id") {
+		t.Fatalf("request ID was reused: %q", first.Get("x-grok-req-id"))
+	}
+	if first.Get("x-grok-session-id") == third.Get("x-grok-session-id") {
+		t.Fatalf("different conversations shared session ID: %q", first.Get("x-grok-session-id"))
 	}
 }
 
@@ -93,7 +516,7 @@ func TestForwardResponseSupportsResourceMethodsAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "0.2.103", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.103 (linux; x86_64)"}, cipher)
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: "0.2.102", ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli", UserAgent: "grok-shell/0.2.102 (linux; x86_64)"}, cipher)
 	methods := []string{http.MethodGet, http.MethodDelete}
 	next := 0
 	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -171,7 +594,7 @@ func TestForwardResponseDecodesExplicitGzipResponse(t *testing.T) {
 	}
 }
 
-func TestForwardResponseRejectsHostedToolSearchBeforeUpstream(t *testing.T) {
+func TestForwardResponseDowngradesServerToolSearchBeforeUpstream(t *testing.T) {
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
 		t.Fatal(err)
@@ -182,8 +605,19 @@ func TestForwardResponseRejectsHostedToolSearchBeforeUpstream(t *testing.T) {
 	}
 	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
 	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		t.Fatalf("不支持的服务端 Tool Search 不应请求上游: %s", request.URL)
-		return nil, nil
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := payload["tools"]; exists {
+			t.Fatalf("server tool_search 未从上游请求移除: %#v", payload)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK",
+			Header:  http.Header{"Content-Type": []string{"application/json"}},
+			Body:    io.NopCloser(strings.NewReader(`{"id":"resp_search"}`)),
+			Request: request,
+		}, nil
 	})
 
 	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
@@ -196,21 +630,18 @@ func TestForwardResponseRejectsHostedToolSearchBeforeUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
+	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
-	var payload struct {
-		Error struct {
-			Type  string `json:"type"`
-			Param string `json:"param"`
-			Code  string `json:"code"`
-		} `json:"error"`
+	if !strings.Contains(response.Header.Get("X-Grok2API-Compatibility-Warnings"), "server_tool_search_eager_loaded") {
+		t.Fatalf("compatibility warnings = %q", response.Header.Get("X-Grok2API-Compatibility-Warnings"))
 	}
+	var payload map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Error.Type != "invalid_request_error" || payload.Error.Param != "tools[0].execution" || payload.Error.Code != "unsupported_parameter" {
-		t.Fatalf("error = %#v", payload.Error)
+	if payload["id"] != "resp_search" {
+		t.Fatalf("response = %#v", payload)
 	}
 }
 
@@ -293,7 +724,11 @@ func TestForwardResponsePreservesClaudeCodeMessagesOptions(t *testing.T) {
 		if payload["instructions"] != "legacy system" || payload["store"] != false || payload["reasoning"].(map[string]any)["effort"] != "high" || payload["prompt_cache_key"] != "messages-cache-key" {
 			t.Fatalf("upstream payload = %#v", payload)
 		}
-		if request.Header.Get("x-grok-conv-id") != "messages-cache-key" {
+		expectedSessionID, err := grokSessionID("messages-cache-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.Header.Get("x-grok-conv-id") != expectedSessionID || request.Header.Get("x-grok-session-id") != expectedSessionID {
 			t.Fatalf("prompt cache headers = %#v", request.Header)
 		}
 		return &http.Response{
@@ -333,6 +768,84 @@ func TestForwardResponsePreservesClaudeCodeMessagesOptions(t *testing.T) {
 	}
 }
 
+func TestForwardResponseMapsClaudeCodeWebSearchEndToEnd(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		tools, _ := payload["tools"].([]any)
+		if len(tools) != 1 || tools[0].(map[string]any)["type"] != "web_search" || payload["tool_choice"] != "required" {
+			t.Fatalf("upstream web search payload = %#v", payload)
+		}
+		domains := tools[0].(map[string]any)["filters"].(map[string]any)["allowed_domains"].([]any)
+		if len(domains) != 1 || domains[0] != "doc.rust-lang.org" {
+			t.Fatalf("upstream web search filters = %#v", tools[0])
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"resp_search","model":"grok-4.5","status":"completed",
+				"output":[
+					{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"rust tutorials","sources":[{"url":"https://doc.rust-lang.org"}]}},
+					{"type":"message","content":[{"type":"output_text","text":"Here you go.","annotations":[{"type":"url_citation","url":"https://doc.rust-lang.org","title":"The Rust Book"}]}]}
+				],
+					"usage":{"input_tokens":7,"output_tokens":5,"total_tokens":12,"cost_in_usd_ticks":12000,"context_details":{"input_tokens":6,"output_tokens":4}}
+			}`)),
+			Request: request,
+		}, nil
+	})
+
+	response, err := adapter.ForwardResponse(context.Background(), provider.ResponseResourceRequest{
+		Credential: account.Credential{EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", NormalizeBody: true,
+		Operation: conversation.OperationMessages,
+		Body: []byte(`{
+			"model":"public","max_tokens":256,
+			"messages":[{"role":"user","content":"Perform a web search for the query: rust tutorials"}],
+			"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8,"allowed_domains":["doc.rust-lang.org"]}],
+			"tool_choice":{"type":"tool","name":"web_search"}
+		}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	content := payload["content"].([]any)
+	if len(content) != 3 || content[0].(map[string]any)["type"] != "server_tool_use" || content[1].(map[string]any)["type"] != "web_search_tool_result" || content[2].(map[string]any)["text"] != "Here you go." {
+		t.Fatalf("messages web search response = %#v", payload)
+	}
+	use := content[0].(map[string]any)
+	if use["input"].(map[string]any)["query"] != "rust tutorials" || content[1].(map[string]any)["tool_use_id"] != use["id"] {
+		t.Fatalf("web search block linkage = %#v", content)
+	}
+	hits := content[1].(map[string]any)["content"].([]any)
+	if len(hits) != 1 || hits[0].(map[string]any)["title"] != "The Rust Book" {
+		t.Fatalf("web search hits = %#v", hits)
+	}
+	serverUsage := payload["usage"].(map[string]any)["server_tool_use"].(map[string]any)
+	if serverUsage["web_search_requests"] != float64(1) || payload["stop_reason"] != "end_turn" {
+		t.Fatalf("messages web search usage = %#v", payload)
+	}
+	usage := payload["usage"].(map[string]any)
+	if usage["cost_in_usd_ticks"] != float64(12000) || usage["context_details"].(map[string]any)["input_tokens"] != float64(6) {
+		t.Fatalf("messages upstream usage = %#v", usage)
+	}
+}
+
 func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
@@ -348,12 +861,20 @@ func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["prompt_cache_key"] != "chat-cache-key" || request.Header.Get("x-grok-conv-id") != "chat-cache-key" {
+		expectedSessionID, err := grokSessionID("chat-cache-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload["prompt_cache_key"] != "chat-cache-key" || request.Header.Get("x-grok-conv-id") != expectedSessionID || request.Header.Get("x-grok-session-id") != expectedSessionID {
 			t.Fatalf("prompt cache request: payload=%#v headers=%#v", payload, request.Header)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"application/json"}},
-			Body:    io.NopCloser(strings.NewReader(`{"id":"resp_1","model":"grok-4.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`)),
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"resp_1","model":"grok-4.5","status":"completed",
+				"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+				"usage":{"input_tokens":11,"output_tokens":2,"cost_in_usd_ticks":7000,"context_details":{"input_tokens":10,"output_tokens":2}}
+			}`)),
 			Request: request,
 		}, nil
 	})
@@ -370,5 +891,13 @@ func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	usage := payload["usage"].(map[string]any)
+	if payload["object"] != "chat.completion" || usage["prompt_tokens"] != float64(11) || usage["cost_in_usd_ticks"] != float64(7000) || usage["context_details"].(map[string]any)["input_tokens"] != float64(10) {
+		t.Fatalf("chat response = %#v", payload)
 	}
 }

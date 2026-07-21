@@ -19,6 +19,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -70,6 +71,7 @@ type Dependencies struct {
 	Media        *mediaapp.Service
 	Settings     *settingsapp.Service
 	Egress       *egressapp.Service
+	Updates      *updatecheckapp.Service
 }
 
 type ReadinessComponent struct {
@@ -173,12 +175,11 @@ func New(deps Dependencies) *gin.Engine {
 			return deps.Settings.PublicAPIBaseURL()
 		}
 		return deps.PublicAPIBaseURL
-	}).Register(adminProtected)
+	}, deps.Updates).Register(adminProtected)
 	if cacheHandler != nil {
 		cacheHandler.RegisterAdmin(adminProtected)
 	}
 
-	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
 	v1 := router.Group("/v1")
 	v1.Use(deps.ConcurrencyGate.Middleware())
 	if deps.TrafficReady != nil {
@@ -193,6 +194,10 @@ func New(deps Dependencies) *gin.Engine {
 		})
 	}
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
+	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes, deps.PublicAPIBaseURL)
+	if deps.Settings != nil {
+		inferenceHandler.SetPublicAPIBaseURLResolver(deps.Settings.PublicAPIBaseURL)
+	}
 	inferenceHandler.Register(v1)
 	legacyhttp.NewHandler(legacyhttp.Options{
 		PublicEnabled:       deps.LegacyPublicEnabled,

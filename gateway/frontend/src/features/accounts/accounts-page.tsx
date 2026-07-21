@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link2, MoreHorizontal, Pencil, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
+import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -28,13 +28,17 @@ import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
 import { Pagination } from "@/shared/components/pagination";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
+import { VirtualTableBody } from "@/shared/components/virtual-table-body";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 import {
+  acceptWebAccountTerms,
+  cleanupAccounts,
   deleteAccount,
   deleteAccounts,
+  enableWebAccountNSFW,
   convertWebAccountsToBuild,
   exportAccounts,
   getAccountSummary,
@@ -45,27 +49,37 @@ import {
   pollDeviceAuthorization,
   refreshAccountBilling,
   refreshAccountsQuota,
+  refreshAccountsTokens,
   refreshAccountToken,
   refreshAccountQuota,
   refreshAllAccountBilling,
   refreshAllAccountTokens,
   refreshAllConsoleAccountQuotas,
   refreshAllWebAccountQuotas,
+  runWebAccountScripts,
+  setWebAccountBirthDate,
   startDeviceAuthorization,
   syncWebAccountsToConsole,
   updateAccount,
   updateAccountsEnabled,
   type AccountDTO,
+  type AccountCleanupStatus,
   type AccountProvider,
   type AccountUpdateInput,
+  type BuildRouteMode,
   type AccountTaskProgressDTO,
   type BuildConversionInput,
   type BuildConversionStrategy,
   type WebConsoleSyncInput,
+  type WebAccountScriptActions,
+  type WebAccountScriptsInput,
   type DeviceSessionDTO,
   type QuotaDTO,
 } from "@/features/accounts/accounts-api";
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
+import { AccountNameCell } from "@/features/accounts/account-name-cell";
+import { WebAccountScriptsDialog } from "@/features/accounts/web-account-scripts";
+import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "@/features/accounts/web-account-settings";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -76,14 +90,23 @@ type BuildConversionProgressState = {
   syncing?: AccountTaskProgressDTO;
 };
 
+type WebConversionTarget = "build" | "console";
+
+type AccountSelection = {
+  provider: AccountProvider;
+  ids: Set<string>;
+};
+
 export function AccountsPage() {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const quickImportFileInputRef = useRef<HTMLInputElement>(null);
   const quotaSyncAbortRef = useRef<AbortController | null>(null);
   const renewalAbortRef = useRef<AbortController | null>(null);
   const conversionAbortRef = useRef<AbortController | null>(null);
   const webConsoleSyncAbortRef = useRef<AbortController | null>(null);
+  const webAccountScriptsAbortRef = useRef<AbortController | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const importToastRef = useRef<string | number | null>(null);
   const [provider, setProvider] = useState<AccountProvider>("grok_build");
@@ -93,18 +116,22 @@ export function AccountsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState("");
+  const [riskFilter, setRiskFilter] = useState("");
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [selection, setSelection] = useState<AccountSelection>(() => ({ provider: "grok_build", ids: new Set() }));
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupStatuses, setCleanupStatuses] = useState<Set<AccountCleanupStatus>>(() => new Set());
   const [exportOpen, setExportOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
-  const [conversionTargets, setConversionTargets] = useState<string[] | "all" | null>(null);
-  const [conversionStrategy, setConversionStrategy] = useState<BuildConversionStrategy>("missing");
+  const [webConversionTargets, setWebConversionTargets] = useState<string[] | "all" | null>(null);
+  const [webConversionTarget, setWebConversionTarget] = useState<WebConversionTarget>("build");
+  const [webConversionStrategy, setWebConversionStrategy] = useState<BuildConversionStrategy>("missing");
   const [conversionProgress, setConversionProgress] = useState<BuildConversionProgressState | null>(null);
-  const [webConsoleSyncTargets, setWebConsoleSyncTargets] = useState<string[] | "all" | null>(null);
-  const [webConsoleSyncStrategy, setWebConsoleSyncStrategy] = useState<"missing" | "all">("missing");
   const [webConsoleSyncProgress, setWebConsoleSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
+  const [webAccountScriptsTargets, setWebAccountScriptsTargets] = useState<string[] | "all" | null>(null);
+  const [webAccountScriptsProgress, setWebAccountScriptsProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [renewAllOpen, setRenewAllOpen] = useState(false);
   const [renewalProgress, setRenewalProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [editing, setEditing] = useState<AccountDTO | null>(null);
@@ -114,6 +141,7 @@ export function AccountsPage() {
   const [deviceStatus, setDeviceStatus] = useState<"starting" | "pending" | "failed">("starting");
   const [quickImportOpen, setQuickImportOpen] = useState(false);
   const [quickImportTokens, setQuickImportTokens] = useState("");
+  const [webConfirmationTarget, setWebConfirmationTarget] = useState<WebAccountConfirmationTarget | null>(null);
   const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => () => {
@@ -121,6 +149,7 @@ export function AccountsPage() {
     renewalAbortRef.current?.abort();
     conversionAbortRef.current?.abort();
     webConsoleSyncAbortRef.current?.abort();
+    webAccountScriptsAbortRef.current?.abort();
     importAbortRef.current?.abort();
     if (importToastRef.current !== null) toast.dismiss(importToastRef.current);
   }, []);
@@ -133,18 +162,26 @@ export function AccountsPage() {
     minimumRemaining: z.number().min(0),
     cloudflareCookies: z.string().max(16 << 10, t("settings.invalidValue")),
     clearCloudflareCookies: z.boolean(),
+    buildSuperEntitled: z.boolean(),
+    buildRouteMode: z.enum(["auto", "build", "xai"]),
   });
   type AccountForm = z.infer<typeof accountSchema>;
   const form = useForm<AccountForm>({
     resolver: zodResolver(accountSchema),
-    defaultValues: { name: "", enabled: true, priority: 1, maxConcurrent: 8, minimumRemaining: 0, cloudflareCookies: "", clearCloudflareCookies: false },
+    defaultValues: {
+      name: "", enabled: true, priority: 1, maxConcurrent: 8, minimumRemaining: 0,
+      cloudflareCookies: "", clearCloudflareCookies: false, buildSuperEntitled: false, buildRouteMode: "auto",
+    },
   });
   const accountEnabled = useWatch({ control: form.control, name: "enabled" });
   const clearCloudflareCookies = useWatch({ control: form.control, name: "clearCloudflareCookies" });
+  const buildSuperEntitled = useWatch({ control: form.control, name: "buildSuperEntitled" });
+  const buildRouteMode = useWatch({ control: form.control, name: "buildRouteMode" });
+  const selected = selection.provider === provider ? selection.ids : new Set<string>();
 
   const accountsQuery = useQuery({
-    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, sort.field, sort.order],
-    queryFn: () => listAccounts({ provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, renewal: provider === "grok_build" ? renewalFilter : undefined, sortBy: sort.field, sortOrder: sort.order }),
+    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, riskFilter, sort.field, sort.order],
+    queryFn: () => listAccounts({ provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, renewal: provider === "grok_build" ? renewalFilter : undefined, risk: provider === "grok_build" ? riskFilter : undefined, sortBy: sort.field, sortOrder: sort.order }),
   });
 
   const summaryQuery = useQuery({
@@ -170,13 +207,19 @@ export function AccountsPage() {
       if (editing.provider !== "grok_build") {
         if (values.clearCloudflareCookies) input.clearCloudflareCookies = true;
         else if (values.cloudflareCookies.trim()) input.cloudflareCookies = values.cloudflareCookies;
+      } else {
+        input.buildRouteMode = values.buildRouteMode;
+        if (values.buildSuperEntitled !== editing.buildSuperEntitled) input.buildSuperEntitled = values.buildSuperEntitled;
       }
       return updateAccount(editing.id, input);
     },
-    onSuccess: () => {
+    onSuccess: (account, values) => {
+      const entitlementChanged = editing?.provider === "grok_build" && values.buildSuperEntitled !== editing.buildSuperEntitled;
       invalidateAccountData();
+      if (entitlementChanged) void queryClient.invalidateQueries({ queryKey: ["models"] });
       setEditing(null);
-      toast.success(t("accounts.updated"));
+      if (account.modelSyncFailed) toast.warning(t("accounts.updatedWithModelSyncFailure"));
+      else toast.success(t("accounts.updated"));
     },
     onError: showError,
   });
@@ -218,6 +261,25 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const webConfirmationMutation = useMutation({
+    mutationFn: ({ account, action }: WebAccountConfirmationTarget) => {
+      if (action === "acceptTerms") return acceptWebAccountTerms(account.id);
+      if (action === "setBirthDate") return setWebAccountBirthDate(account.id);
+      return enableWebAccountNSFW(account.id);
+    },
+    onSuccess: (_, target) => {
+      setWebConfirmationTarget(null);
+      const messageKey = target.action === "acceptTerms"
+        ? "webAccountSettings.termsAccepted"
+        : target.action === "setBirthDate"
+          ? "webAccountSettings.birthDateSaved"
+          : "webAccountSettings.nsfwEnabled";
+      toast.success(t(messageKey));
+    },
+    onError: showError,
+    onSettled: invalidateAccountData,
+  });
+
   const allTokenMutation = useMutation({
     mutationFn: () => {
       const controller = new AbortController();
@@ -253,7 +315,7 @@ export function AccountsPage() {
     mutationFn: (input: BuildConversionInput) => {
       const controller = new AbortController();
       conversionAbortRef.current = controller;
-      setConversionProgress(Array.isArray(conversionTargets) ? { converting: { completed: 0, total: conversionTargets.length, phase: "converting" } } : null);
+      setConversionProgress(null);
       return convertWebAccountsToBuild(input, (progress) => {
         const phase = progress.phase === "syncing" ? "syncing" : "converting";
         setConversionProgress((current) => ({ ...(current ?? {}), [phase]: progress }));
@@ -261,8 +323,8 @@ export function AccountsPage() {
     },
     onSuccess: (conversion) => {
       setConversionProgress(null);
-      setConversionTargets(null);
-      setSelected(new Set());
+      setWebConversionTargets(null);
+      clearSelection();
       toast.success(t("accounts.conversionCompleted", conversion));
     },
     onError: (error) => { if (!isAbortError(error)) showError(error); },
@@ -282,8 +344,8 @@ export function AccountsPage() {
       return syncWebAccountsToConsole(input, setWebConsoleSyncProgress, controller.signal);
     },
     onSuccess: (result) => {
-      setWebConsoleSyncTargets(null);
-      setSelected(new Set());
+      setWebConversionTargets(null);
+      clearSelection();
       toast.success(t("webConsoleSync.completed", result));
     },
     onError: (error) => { if (!isAbortError(error)) showError(error); },
@@ -292,6 +354,30 @@ export function AccountsPage() {
       setWebConsoleSyncProgress(null);
       invalidateAccountData();
       void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+
+  const webAccountScriptsMutation = useMutation({
+    mutationFn: (input: WebAccountScriptsInput) => {
+      const controller = new AbortController();
+      webAccountScriptsAbortRef.current = controller;
+      setWebAccountScriptsProgress(null);
+      return runWebAccountScripts(input, setWebAccountScriptsProgress, controller.signal);
+    },
+    onSuccess: (result) => {
+      setWebAccountScriptsTargets(null);
+      clearSelection();
+      if (result.failed > 0) {
+        toast.warning(t("webAccountScripts.completedWithFailures", result));
+      } else {
+        toast.success(t("webAccountScripts.completed", result));
+      }
+    },
+    onError: (error) => { if (!isAbortError(error)) showError(error); },
+    onSettled: () => {
+      webAccountScriptsAbortRef.current = null;
+      setWebAccountScriptsProgress(null);
+      invalidateAccountData();
     },
   });
 
@@ -333,9 +419,9 @@ export function AccountsPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: exportAccounts,
+    mutationFn: () => exportAccounts(provider),
     onSuccess: (blob) => {
-      downloadAccountExport(blob);
+      downloadAccountExport(blob, provider);
       setExportOpen(false);
       toast.success(t("accounts.exported"));
     },
@@ -345,7 +431,7 @@ export function AccountsPage() {
   const batchUpdateMutation = useMutation({
     mutationFn: (enabled: boolean) => updateAccountsEnabled([...selected], enabled, provider),
     onSuccess: () => {
-      setSelected(new Set());
+      clearSelection();
       invalidateAccountData();
       toast.success(t("accounts.batchUpdated"));
     },
@@ -355,9 +441,19 @@ export function AccountsPage() {
   const batchBillingMutation = useMutation({
     mutationFn: () => refreshAccountsQuota([...selected], provider),
     onSuccess: (result) => {
-      setSelected(new Set());
+      clearSelection();
       invalidateAccountData();
       toast.success(t("accounts.batchBillingRefreshed", result));
+    },
+    onError: showError,
+  });
+
+  const batchTokenMutation = useMutation({
+    mutationFn: () => refreshAccountsTokens([...selected], provider),
+    onSuccess: (result) => {
+      clearSelection();
+      invalidateAccountData();
+      toast.success(t("accounts.allTokensRefreshed", result));
     },
     onError: showError,
   });
@@ -365,10 +461,21 @@ export function AccountsPage() {
   const batchDeleteMutation = useMutation({
     mutationFn: () => deleteAccounts([...selected], provider),
     onSuccess: () => {
-      setSelected(new Set());
+      clearSelection();
       setBatchDeleteOpen(false);
       invalidateAccountData();
       toast.success(t("accounts.deleted"));
+    },
+    onError: showError,
+  });
+
+  const cleanupMutation = useMutation({
+    mutationFn: () => cleanupAccounts(provider, [...cleanupStatuses]),
+    onSuccess: (result) => {
+      setCleanupOpen(false);
+      setCleanupStatuses(new Set());
+      invalidateAccountData();
+      toast.success(t("accounts.cleanupCompleted", result));
     },
     onError: showError,
   });
@@ -417,10 +524,11 @@ export function AccountsPage() {
   function changeProvider(value: AccountProvider) {
     setProvider(value);
     setPage(1);
-    setSelected(new Set());
+    setSelection({ provider: value, ids: new Set() });
     setTypeFilter("");
     setStatusFilter("");
     setRenewalFilter("");
+    setRiskFilter("");
     setQuickImportOpen(false);
     setQuickImportTokens("");
   }
@@ -432,14 +540,52 @@ export function AccountsPage() {
     importMutation.mutate([new File([value], filename, { type: "text/plain" })]);
   }
 
-  function openWebConsoleSync(targets: string[] | "all"): void {
-    setWebConsoleSyncStrategy("missing");
-    setWebConsoleSyncTargets(targets);
+  async function loadQuickImportFile(file: File | undefined): Promise<void> {
+    if (!file) return;
+    if (file.size > 30 * 1024 * 1024) {
+      toast.error(t("apiErrors.accountImportFileTooLarge"));
+      return;
+    }
+    try {
+      setQuickImportTokens(await file.text());
+    } catch {
+      toast.error(t("errors.generic"));
+    }
   }
 
-  function openBuildConversion(targets: string[] | "all"): void {
-    setConversionStrategy("missing");
-    setConversionTargets(targets);
+  function openWebConversion(targets: string[] | "all"): void {
+    setWebConversionTarget("build");
+    setWebConversionStrategy("missing");
+    setWebConversionTargets(targets);
+  }
+
+  function closeWebConversion(): void {
+    conversionAbortRef.current?.abort();
+    webConsoleSyncAbortRef.current?.abort();
+    setWebConversionTargets(null);
+  }
+
+  function runWebConversion(): void {
+    if (webConversionTargets === null) return;
+    if (webConversionTarget === "build") {
+      const input: BuildConversionInput = webConversionTargets === "all"
+        ? { all: true, strategy: webConversionStrategy }
+        : { ids: webConversionTargets, strategy: webConversionStrategy };
+      conversionMutation.mutate(input);
+      return;
+    }
+    const input: WebConsoleSyncInput = webConversionTargets === "all"
+      ? { all: true, strategy: webConversionStrategy }
+      : { ids: webConversionTargets, strategy: webConversionStrategy };
+    webConsoleSyncMutation.mutate(input);
+  }
+
+  function runSelectedWebAccountScripts(actions: WebAccountScriptActions): void {
+    if (webAccountScriptsTargets === "all") {
+      webAccountScriptsMutation.mutate({ all: true, actions });
+    } else if (webAccountScriptsTargets) {
+      webAccountScriptsMutation.mutate({ ids: webAccountScriptsTargets, actions });
+    }
   }
 
   async function startDeviceLogin(): Promise<void> {
@@ -466,6 +612,8 @@ export function AccountsPage() {
       minimumRemaining: account.minimumRemaining,
       cloudflareCookies: "",
       clearCloudflareCookies: false,
+      buildSuperEntitled: account.buildSuperEntitled,
+      buildRouteMode: account.buildRouteMode,
     });
   }
 
@@ -474,6 +622,7 @@ export function AccountsPage() {
   const activeConversionProgress = convertingProgress?.completed === convertingProgress?.total && syncingProgress
     ? syncingProgress
     : convertingProgress ?? syncingProgress;
+  const webConversionPending = conversionMutation.isPending || webConsoleSyncMutation.isPending;
 
   function showError(error: unknown): void {
     toast.error(error instanceof Error ? error.message : t("errors.generic"));
@@ -484,23 +633,27 @@ export function AccountsPage() {
   const selectedOnPage = pageIDs.filter((id) => selected.has(id));
   const allPageSelected = pageIDs.length > 0 && selectedOnPage.length === pageIDs.length;
 
+  function clearSelection(): void {
+    setSelection((current) => ({ provider: current.provider, ids: new Set() }));
+  }
+
   function togglePage(checked: boolean): void {
-    setSelected((current) => {
-      const next = new Set(current);
+    setSelection((current) => {
+      const next = new Set(current.provider === provider ? current.ids : []);
       for (const id of pageIDs) {
         if (checked) next.add(id);
         else next.delete(id);
       }
-      return next;
+      return { provider, ids: next };
     });
   }
 
   function toggleAccount(id: string, checked: boolean): void {
-    setSelected((current) => {
-      const next = new Set(current);
+    setSelection((current) => {
+      const next = new Set(current.provider === provider ? current.ids : []);
       if (checked) next.add(id);
       else next.delete(id);
-      return next;
+      return { provider, ids: next };
     });
   }
 
@@ -511,8 +664,10 @@ export function AccountsPage() {
 
   const summary = summaryQuery.data;
   const recoveringAccounts = summary?.recovering ?? 0;
-  const attentionAccounts = summary?.attention ?? 0;
-  const abnormalAccounts = recoveringAccounts + attentionAccounts;
+  const disabledAccounts = summary?.issues.disabled ?? 0;
+  const invalidAccounts = summary?.issues.reauthRequired ?? 0;
+  const riskAccounts = summary?.risk ?? 0;
+  const abnormalAccounts = recoveringAccounts + disabledAccounts + invalidAccounts;
   const buildSummary = summary?.providers.grok_build ?? { total: 0, available: 0 };
   const webSummary = summary?.providers.grok_web ?? { total: 0, available: 0 };
   const consoleSummary = summary?.providers.grok_console ?? { total: 0, available: 0 };
@@ -527,28 +682,69 @@ export function AccountsPage() {
     || importMutation.isPending
     || batchUpdateMutation.isPending
     || batchBillingMutation.isPending
-    || batchDeleteMutation.isPending;
+    || batchTokenMutation.isPending
+    || batchDeleteMutation.isPending
+    || cleanupMutation.isPending
+    || webConfirmationMutation.isPending
+    || webAccountScriptsMutation.isPending;
 
   return (
-    <div className="space-y-8">
-      <header>
+    <div className="space-y-5">
+      <header className="flex min-h-8 items-center">
         <h1 className="text-xl font-medium">{t("accounts.title")}</h1>
         <p className="sr-only">{t("console.accountsDescription")}</p>
       </header>
       <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <AccountMetricPanel icon={<SquareTerminal />} loading={summaryLoading} label={t("accounts.buildAccountCount")} value={summaryUnavailable ? "-" : formatNumber(buildSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(buildSummary.available, i18n.language, 0) })} />
-        <AccountMetricPanel icon={<Compass />} loading={summaryLoading} label={t("accounts.webAccountCount")} value={summaryUnavailable ? "-" : formatNumber(webSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(webSummary.available, i18n.language, 0) })} />
-        <AccountMetricPanel icon={<Webhook />} loading={summaryLoading} label={t("accounts.consoleAccountCount")} value={summaryUnavailable ? "-" : formatNumber(consoleSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(consoleSummary.available, i18n.language, 0) })} />
-        <AccountMetricPanel icon={<TriangleAlert />} loading={summaryLoading} label={t("accounts.abnormalAccountCount")} value={summaryUnavailable ? "-" : formatNumber(abnormalAccounts, i18n.language, 0)} detail={t("accounts.abnormalAccountBreakdown", { recovering: formatNumber(recoveringAccounts, i18n.language, 0), attention: formatNumber(attentionAccounts, i18n.language, 0) })} />
+        <AccountMetricPanel tone="text-quota-product-1" icon={<SquareTerminal />} loading={summaryLoading} label={t("accounts.buildAccountCount")} value={summaryUnavailable ? "-" : formatNumber(buildSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(buildSummary.available, i18n.language, 0) })} />
+        <AccountMetricPanel tone="text-quota-product-2" icon={<Compass />} loading={summaryLoading} label={t("accounts.webAccountCount")} value={summaryUnavailable ? "-" : formatNumber(webSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(webSummary.available, i18n.language, 0) })} />
+        <AccountMetricPanel tone="text-quota-product-4" icon={<Webhook />} loading={summaryLoading} label={t("accounts.consoleAccountCount")} value={summaryUnavailable ? "-" : formatNumber(consoleSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(consoleSummary.available, i18n.language, 0) })} />
+        <AccountMetricPanel
+          tone={abnormalAccounts > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}
+          icon={<TriangleAlert />}
+          loading={summaryLoading}
+          label={t("accounts.abnormalAccountCount")}
+          value={summaryUnavailable ? "-" : formatNumber(abnormalAccounts, i18n.language, 0)}
+          detail={[
+            `${t("accounts.statusCooldown")} ${formatNumber(recoveringAccounts, i18n.language, 0)}`,
+            `${t("accounts.riskAccountCount", { count: formatNumber(riskAccounts, i18n.language, 0) })}`,
+            `${t("accounts.statusDisabled")} ${formatNumber(disabledAccounts, i18n.language, 0)}`,
+            `${t("accounts.statusReauthRequired")} ${formatNumber(invalidAccounts, i18n.language, 0)}`,
+          ].join(" · ")}
+        />
       </section>
-      <div className="space-y-6">
-        <Tabs value={provider} onValueChange={(value) => changeProvider(value as AccountProvider)}>
-          <TabsList>
-            <TabsTrigger value="grok_build">Grok Build</TabsTrigger>
-            <TabsTrigger value="grok_web">Grok Web</TabsTrigger>
-            <TabsTrigger value="grok_console">Grok Console</TabsTrigger>
-          </TabsList>
-        </Tabs>
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Tabs value={provider} onValueChange={(value) => changeProvider(value as AccountProvider)}>
+            <TabsList>
+              <TabsTrigger value="grok_build" className="gap-1.5">
+                <SquareTerminal className="size-3.5 text-quota-product-1" />
+                <span>Grok Build</span>
+              </TabsTrigger>
+              <TabsTrigger value="grok_web" className="gap-1.5">
+                <Compass className="size-3.5 text-quota-product-2" />
+                <span>Grok Web</span>
+              </TabsTrigger>
+              <TabsTrigger value="grok_console" className="gap-1.5">
+                <Webhook className="size-3.5 text-quota-product-4" />
+                <span>Grok Console</span>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button size="sm"><Plus />{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {provider === "grok_build" ? <DropdownMenuItem onClick={() => void startDeviceLogin()}><ExternalLink />{t("accounts.deviceLogin")}</DropdownMenuItem> : null}
+              {provider !== "grok_build" ? <DropdownMenuItem disabled={bulkTaskPending} onClick={() => setQuickImportOpen(true)}><ClipboardPaste />{t("accounts.quickImportSSO")}</DropdownMenuItem> : null}
+              <DropdownMenuItem disabled={bulkTaskPending} onClick={() => fileInputRef.current?.click()}><FileUp />{provider === "grok_build" ? t("accounts.importAuth") : provider === "grok_console" ? t("console.importFile") : t("accounts.importWebFile")}</DropdownMenuItem>
+              {hasProviderAccounts ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -573,15 +769,15 @@ export function AccountsPage() {
                 <Input className="h-8 pl-9 text-xs" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("accounts.search")} aria-label={t("accounts.search")} />
               </div>
               <DataTableFilters filters={[
-                ...(provider === "grok_console" ? [] : [{ id: "type", label: t("accounts.type"), value: typeFilter, onChange: (value: string) => { setTypeFilter(value); setPage(1); }, options: provider === "grok_web" ? [
-                  { value: "auto", label: "Auto" },
-                  { value: "basic", label: "Basic" },
-                  { value: "super", label: "Super" },
-                  { value: "heavy", label: "Heavy" },
+                ...(provider === "grok_console" ? [] : [{ id: "type", label: t("accountType.label"), value: typeFilter, onChange: (value: string) => { setTypeFilter(value); setPage(1); }, options: provider === "grok_web" ? [
+                  { value: "auto", label: t("accountType.auto") },
+                  { value: "basic", label: t("accountType.free") },
+                  { value: "super", label: t("accountType.super") },
+                  { value: "heavy", label: t("accountType.heavy") },
                 ] : [
-                  { value: "free", label: t("accounts.quotaFree") },
-                  { value: "paid", label: t("accounts.quotaSuper") },
-                  { value: "unknown", label: t("dashboard.unknown") },
+                  { value: "free", label: t("accountType.free") },
+                  { value: "paid", label: t("accountType.paid") },
+                  { value: "unknown", label: t("accountType.pending") },
                 ] }]),
                 { id: "status", label: t("accounts.status"), value: statusFilter, onChange: (value) => { setStatusFilter(value); setPage(1); }, options: [
                   { value: "active", label: t("accounts.statusActive") },
@@ -595,6 +791,10 @@ export function AccountsPage() {
                   { value: "refreshable", label: t("accountCredential.autoRefresh") },
                   { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                 ] }] : []),
+                ...(provider === "grok_build" ? [{ id: "risk", label: t("accounts.riskFilter"), value: riskFilter, onChange: (value: string) => { setRiskFilter(value); setPage(1); }, options: [
+                  { value: "flagged", label: t("accounts.botRisk") },
+                  { value: "normal", label: t("accounts.riskNormal") },
+                ] }] : []),
               ]} />
             </div>
             {selected.size > 0 ? (
@@ -602,31 +802,19 @@ export function AccountsPage() {
                 <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
-                {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openBuildConversion([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
-                {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConsoleSync([...selected])}>{t("webConsoleSync.action")}</Button> : null}
+                {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion([...selected])}>{t("accountConversion.action")}</Button> : null}
+                {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchBillingMutation.mutate()}>{t("accountCredential.quotaSyncAction")}</Button>
-                <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={bulkTaskPending} onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
+                {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchTokenMutation.mutate()}>{t("accountCredential.refreshAction")}</Button> : null}
+                <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
               </div>
             ) : (
-              <div className="flex items-center gap-1.5">
-                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openBuildConversion("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
-                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConsoleSync("all")}>{t("webConsoleSync.allAction")}</Button> : null}
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion("all")}>{t("accountConversion.action")}</Button> : null}
+                {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button size="sm">{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    {provider === "grok_build" ? <DropdownMenuItem onClick={() => void startDeviceLogin()}><ExternalLink />{t("accounts.deviceLogin")}</DropdownMenuItem> : null}
-                    {provider !== "grok_build" ? <DropdownMenuItem disabled={bulkTaskPending} onClick={() => setQuickImportOpen(true)}><ClipboardPaste />{t("accounts.quickImportSSO")}</DropdownMenuItem> : null}
-                    <DropdownMenuItem disabled={bulkTaskPending} onClick={() => fileInputRef.current?.click()}><FileUp />{provider === "grok_build" ? t("accounts.importAuth") : provider === "grok_console" ? t("console.importFile") : t("accounts.importWebFile")}</DropdownMenuItem>
-                    {hasProviderAccounts && provider === "grok_build" ? (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
-                      </>
-                    ) : null}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                {hasProviderAccounts ? <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => { setCleanupStatuses(new Set()); setCleanupOpen(true); }}><Trash2 />{t("accounts.cleanupAction")}</Button> : null}
               </div>
             )}
           </>
@@ -636,13 +824,13 @@ export function AccountsPage() {
         {accountsQuery.isError ? <ErrorState message={accountsQuery.error.message} onRetry={() => void accountsQuery.refetch()} /> : null}
         {result && result.items.length === 0 ? <EmptyState /> : null}
         {accountsQuery.isPending || (result && result.items.length > 0) ? (
-          <Table className="table-fixed border-collapse min-w-[780px] xl:min-w-[960px] 2xl:min-w-[1080px]">
+          <Table viewportRows={20} rowHeight={56} className="table-fixed border-collapse min-w-[780px] xl:min-w-[960px] 2xl:min-w-[1080px]">
             <colgroup>
               <col style={{ width: "3%" }} />
-              <col style={{ width: "15%" }} />
+              <col style={{ width: "18%" }} />
               <col style={{ width: "7%" }} />
               <col style={{ width: "7%" }} />
-              <col style={{ width: provider === "grok_build" ? "30%" : "46%" }} />
+              <col style={{ width: provider === "grok_build" ? "27%" : "43%" }} />
               {provider === "grok_build" ? <col style={{ width: "16%" }} /> : null}
               <col style={{ width: "18%" }} />
               <col style={{ width: "4%" }} />
@@ -651,45 +839,28 @@ export function AccountsPage() {
               <TableRow className="hover:bg-transparent">
                 <TableHead className="px-2"><Checkbox checked={allPageSelected ? true : selectedOnPage.length > 0 ? "indeterminate" : false} onCheckedChange={(checked) => togglePage(checked === true)} aria-label={t("common.selectPage")} /></TableHead>
                 <SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("accounts.account")}</SortableTableHead>
-                <SortableTableHead field="type" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort} className="whitespace-nowrap">{t("accounts.type")}</SortableTableHead>
+                <SortableTableHead field="type" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort} className="whitespace-nowrap">{t("accountType.label")}</SortableTableHead>
                 <SortableTableHead field="status" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort} className="whitespace-nowrap">{t("accounts.status")}</SortableTableHead>
-                <TableHead className="whitespace-nowrap">{t("accounts.quota")}</TableHead>
+                <TableHead className={cn("whitespace-nowrap", provider !== "grok_build" && "px-6")}>{t("accounts.quota")}</TableHead>
                 {provider === "grok_build" ? <TableHead className="whitespace-nowrap pl-4">{t("accountCredential.label")}</TableHead> : null}
                 <SortableTableHead field="createdAt" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" onSort={changeSort} className="whitespace-nowrap">{t("accounts.createdAt")}</SortableTableHead>
                 <TableActionHead />
               </TableRow>
             </TableHeader>
-            <TableBody>
-              {accountsQuery.isPending ? <TableLoadingRow colSpan={provider === "grok_build" ? 8 : 7} /> : result?.items.map((account) => {
-                const accountDetail = account.email ?? account.userId ?? account.teamId;
-                const showAccountDetail = accountDetail?.trim().toLocaleLowerCase() !== account.name.trim().toLocaleLowerCase();
-                const linkedProviderLabel = account.linkedProvider === "grok_build" ? t("models.providerGrokBuild") : account.linkedProvider === "grok_web" ? t("models.providerGrokWeb") : t("console.name");
-                return (
-                  <TableRow className="group" key={account.id} data-state={selected.has(account.id) ? "selected" : undefined}>
+            {accountsQuery.isPending ? (
+              <TableBody><TableLoadingRow colSpan={provider === "grok_build" ? 8 : 7} /></TableBody>
+            ) : (
+              <VirtualTableBody
+                items={result?.items ?? []}
+                colSpan={provider === "grok_build" ? 8 : 7}
+                rowHeight={56}
+                renderRow={(account) => (
+	                  <TableRow className="group h-14 [&>td]:py-1.5" key={account.id} data-state={selected.has(account.id) ? "selected" : undefined}>
                     <TableCell className="px-2"><Checkbox checked={selected.has(account.id)} onCheckedChange={(checked) => toggleAccount(account.id, checked === true)} aria-label={t("common.selectItem", { name: account.name })} /></TableCell>
-                    <TableCell className="min-w-0">
-                      <div className="truncate text-xs font-medium" title={account.name}>{account.name}</div>
-                      {showAccountDetail || account.linkedAccountId ? (
-                        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                          {showAccountDetail ? <span className="truncate" title={accountDetail}>{accountDetail}</span> : null}
-                          {showAccountDetail && account.linkedAccountId ? <span className="shrink-0 text-border" aria-hidden="true">·</span> : null}
-                          {account.linkedAccountId ? (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-muted-foreground/80">
-                                  <Link2 className="size-3" />
-                                  {linkedProviderLabel}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent>{t("accounts.linkedAccountTooltip", { name: account.linkedAccountName || linkedProviderLabel })}</TooltipContent>
-                            </Tooltip>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell className="text-center whitespace-nowrap">{provider === "grok_web" ? <WebAccountType tier={account.webTier} /> : provider === "grok_console" ? <AccountTypeText label={t("console.type")} variant="free" /> : <AccountType quota={account.quota} />}</TableCell>
+	                    <TableCell className="min-w-0"><AccountNameCell account={account} /></TableCell>
+                    <TableCell className="text-center whitespace-nowrap">{provider === "grok_web" ? <WebAccountType tier={account.webTier} /> : provider === "grok_console" ? <AccountTypeText label={t("accountType.console")} variant="free" /> : <AccountType quota={account.quota} />}</TableCell>
                     <TableCell className="text-center whitespace-nowrap"><AccountStatus account={account} /></TableCell>
-                    <TableCell>{provider === "grok_web" ? <WebQuota windows={account.quotaWindows ?? []} locale={i18n.language} tier={account.webTier} /> : provider === "grok_console" ? <ConsoleQuota windows={account.quotaWindows ?? []} locale={i18n.language} /> : <AccountQuota quota={account.quota} billing={account.billing} locale={i18n.language} />}</TableCell>
+                    <TableCell className={provider === "grok_build" ? undefined : "px-6"}>{provider === "grok_web" ? <WebQuota windows={account.quotaWindows ?? []} locale={i18n.language} tier={account.webTier} /> : provider === "grok_console" ? <ConsoleQuota windows={account.quotaWindows ?? []} locale={i18n.language} /> : <AccountQuota quota={account.quota} billing={account.billing} locale={i18n.language} />}</TableCell>
                     {provider === "grok_build" ? <TableCell className="whitespace-nowrap pl-4 text-xs">
                       {account.refreshable ? (
                         <Tooltip>
@@ -697,15 +868,21 @@ export function AccountsPage() {
                           <TooltipContent>{account.expiresAt ? t("accountCredential.expiresAt", { time: formatDateTime(account.expiresAt, i18n.language) }) : t("accountCredential.expiryUnknown")}</TooltipContent>
                         </Tooltip>
                       ) : <span className="font-medium text-amber-700 dark:text-amber-300">{t("accountCredential.noAutoRefresh")}</span>}
-                    </TableCell> : null}
+	                    </TableCell> : null}
                     <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{formatDateTime(account.createdAt, i18n.language)}</TableCell>
                     <TableActionCell>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => beginEdit(account)}><Pencil />{t("common.edit")}</DropdownMenuItem>
-                          {provider === "grok_web" ? <DropdownMenuItem onClick={() => openBuildConversion([account.id])}><ArrowRight />{t("accounts.convertToBuild")}</DropdownMenuItem> : null}
-                          {provider === "grok_web" ? <DropdownMenuItem onClick={() => openWebConsoleSync([account.id])}><ArrowRight />{t("webConsoleSync.action")}</DropdownMenuItem> : null}
+                          {provider === "grok_web" ? <DropdownMenuItem onClick={() => openWebConversion([account.id])}><ArrowRight />{t("accountConversion.action")}</DropdownMenuItem> : null}
+                          {provider === "grok_web" ? (
+                            <WebAccountSettingsMenu
+                              account={account}
+                              disabled={bulkTaskPending}
+                              onConfirm={setWebConfirmationTarget}
+                            />
+                          ) : null}
                           {provider === "grok_build" ? <DropdownMenuItem onClick={() => tokenMutation.mutate(account.id)}><RotateCw />{t("accounts.refreshToken")}</DropdownMenuItem> : null}
                           <DropdownMenuItem onClick={() => provider === "grok_build" ? billingMutation.mutate(account.id) : quotaMutation.mutate(account.id)}><RefreshCw />{provider === "grok_build" ? t("accounts.refreshBilling") : t("accounts.refreshModeQuota")}</DropdownMenuItem>
                           <DropdownMenuSeparator />
@@ -714,62 +891,72 @@ export function AccountsPage() {
                       </DropdownMenu>
                     </TableActionCell>
                   </TableRow>
-                );
-              })}
-            </TableBody>
+                )}
+              />
+            )}
           </Table>
         ) : null}
         </DataTableShell>
       </div>
 
+      <WebAccountSettingsDialogs
+        confirmationTarget={webConfirmationTarget}
+        confirmationPending={webConfirmationMutation.isPending}
+        onConfirmationClose={() => setWebConfirmationTarget(null)}
+        onConfirm={(target) => webConfirmationMutation.mutate(target)}
+      />
+
+      {webAccountScriptsTargets !== null ? (
+        <WebAccountScriptsDialog
+          targets={webAccountScriptsTargets}
+          pending={webAccountScriptsMutation.isPending}
+          progress={webAccountScriptsProgress}
+          onClose={() => {
+            webAccountScriptsAbortRef.current?.abort();
+            setWebAccountScriptsTargets(null);
+          }}
+          onRun={runSelectedWebAccountScripts}
+        />
+      ) : null}
+
       <AlertDialog open={syncAllOpen} onOpenChange={(open) => { if (!open) quotaSyncAbortRef.current?.abort(); setSyncAllOpen(open); }}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.syncAllTitle")}</AlertDialogTitle><AlertDialogDescription>{t(provider === "grok_web" ? "accounts.syncAllWebDescription" : provider === "grok_console" ? "console.syncAllDescription" : "accounts.syncAllDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={quotaSyncMutation.isPending} onClick={() => quotaSyncMutation.mutate(provider)}>{quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : t("accounts.syncAll")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={quotaSyncMutation.isPending} onClick={(event) => { event.preventDefault(); quotaSyncMutation.mutate(provider); }}>{quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : t("accounts.syncAll")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={webConsoleSyncTargets !== null} onOpenChange={(open) => { if (!open) { webConsoleSyncAbortRef.current?.abort(); setWebConsoleSyncTargets(null); } }}>
+      <AlertDialog open={webConversionTargets !== null} onOpenChange={(open) => { if (!open) closeWebConversion(); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t(webConsoleSyncTargets === "all" ? "webConsoleSync.allTitle" : "webConsoleSync.selectedTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{webConsoleSyncTargets === "all" ? t("webConsoleSync.allDescription") : t("webConsoleSync.selectedDescription")}</AlertDialogDescription>
+            <AlertDialogTitle>{t("accountConversion.title")}</AlertDialogTitle>
+            <AlertDialogDescription>{t(webConversionTargets === "all" ? "accountConversion.allDescription" : "accountConversion.selectedDescription", { count: Array.isArray(webConversionTargets) ? webConversionTargets.length : 0 })}</AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-2">
-            <p id="web-console-sync-strategy" className="text-xs font-medium">{t("webConsoleSync.strategyTitle")}</p>
-            <div role="radiogroup" aria-labelledby="web-console-sync-strategy" className="grid grid-cols-2 rounded-md bg-muted p-1">
-              <Button type="button" role="radio" aria-checked={webConsoleSyncStrategy === "missing"} variant={webConsoleSyncStrategy === "missing" ? "secondary" : "ghost"} size="sm" className="h-8 rounded-sm px-3 text-xs font-normal shadow-none" onClick={() => setWebConsoleSyncStrategy("missing")}>{t("webConsoleSync.missingStrategy")}</Button>
-              <Button type="button" role="radio" aria-checked={webConsoleSyncStrategy === "all"} variant={webConsoleSyncStrategy === "all" ? "secondary" : "ghost"} size="sm" className="h-8 rounded-sm px-3 text-xs font-normal shadow-none" onClick={() => setWebConsoleSyncStrategy("all")}>{t("webConsoleSync.allStrategy")}</Button>
-            </div>
-            <p className="min-h-8 text-xs text-muted-foreground">{t(webConsoleSyncStrategy === "missing" ? "webConsoleSync.missingStrategyDescription" : "webConsoleSync.allStrategyDescription")}</p>
+            <p id="web-conversion-target" className="text-xs font-medium">{t("accountConversion.target")}</p>
+            <Tabs value={webConversionTarget} onValueChange={(value) => setWebConversionTarget(value as WebConversionTarget)}>
+              <TabsList aria-labelledby="web-conversion-target" className="grid h-10 w-full grid-cols-2 p-1">
+                <TabsTrigger value="build" className="h-8 gap-2 font-normal" disabled={webConversionPending}><SquareTerminal className="text-quota-product-1" />Grok Build</TabsTrigger>
+                <TabsTrigger value="console" className="h-8 gap-2 font-normal" disabled={webConversionPending}><Webhook className="text-quota-product-4" />Grok Console</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+          <div className="space-y-2">
+            <p id="web-conversion-strategy" className="text-xs font-medium">{t("accountConversion.strategy")}</p>
+            <Tabs value={webConversionStrategy} onValueChange={(value) => setWebConversionStrategy(value as BuildConversionStrategy)}>
+              <TabsList aria-labelledby="web-conversion-strategy" className="grid h-10 w-full grid-cols-2 p-1">
+                <TabsTrigger value="missing" className="h-8 font-normal" disabled={webConversionPending}>{t("accountConversion.missing")}</TabsTrigger>
+                <TabsTrigger value="all" className="h-8 font-normal" disabled={webConversionPending}>{t("accountConversion.all")}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <p className="min-h-8 text-xs text-muted-foreground">{t(webConversionTarget === "build"
+              ? webConversionStrategy === "missing" ? "accountBulk.missingStrategyDescription" : "accountBulk.allStrategyDescription"
+              : webConversionStrategy === "missing" ? "webConsoleSync.missingStrategyDescription" : "webConsoleSync.allStrategyDescription")}</p>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction disabled={webConsoleSyncMutation.isPending || webConsoleSyncTargets === null || (Array.isArray(webConsoleSyncTargets) && webConsoleSyncTargets.length === 0)} onClick={(event) => { event.preventDefault(); if (webConsoleSyncTargets === "all") webConsoleSyncMutation.mutate({ all: true, strategy: webConsoleSyncStrategy }); else if (webConsoleSyncTargets) webConsoleSyncMutation.mutate({ ids: webConsoleSyncTargets, strategy: webConsoleSyncStrategy }); }}>
-              {webConsoleSyncMutation.isPending ? <><Spinner />{webConsoleSyncProgress ? <span className="tabular-nums">{webConsoleSyncProgress.completed} / {webConsoleSyncProgress.total}</span> : t("common.loading")}</> : t(webConsoleSyncStrategy === "missing" ? "webConsoleSync.syncMissing" : "webConsoleSync.syncAll")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={conversionTargets !== null} onOpenChange={(open) => { if (!open) { conversionAbortRef.current?.abort(); setConversionTargets(null); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t(conversionTargets === "all" ? "accountBulk.convertAllToBuildTitle" : "accounts.convertToBuildTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{conversionTargets === "all" ? t("accountBulk.convertAllToBuildDescription") : t("accountBulk.selectedDescription")}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="space-y-2">
-            <p id="web-build-conversion-strategy" className="text-xs font-medium">{t("accountBulk.strategyTitle")}</p>
-            <div role="radiogroup" aria-labelledby="web-build-conversion-strategy" className="grid grid-cols-2 rounded-md bg-muted p-1">
-              <Button type="button" role="radio" aria-checked={conversionStrategy === "missing"} variant={conversionStrategy === "missing" ? "secondary" : "ghost"} size="sm" className="h-8 rounded-sm px-3 text-xs font-normal shadow-none" onClick={() => setConversionStrategy("missing")}>{t("accountBulk.missingStrategy")}</Button>
-              <Button type="button" role="radio" aria-checked={conversionStrategy === "all"} variant={conversionStrategy === "all" ? "secondary" : "ghost"} size="sm" className="h-8 rounded-sm px-3 text-xs font-normal shadow-none" onClick={() => setConversionStrategy("all")}>{t("accountBulk.allStrategy")}</Button>
-            </div>
-            <p className="min-h-8 text-xs text-muted-foreground">{t(conversionStrategy === "missing" ? "accountBulk.missingStrategyDescription" : "accountBulk.allStrategyDescription")}</p>
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction disabled={conversionMutation.isPending || conversionTargets === null || (Array.isArray(conversionTargets) && conversionTargets.length === 0)} onClick={(event) => { event.preventDefault(); if (conversionTargets === "all") conversionMutation.mutate({ all: true, strategy: conversionStrategy }); else if (conversionTargets) conversionMutation.mutate({ ids: conversionTargets, strategy: conversionStrategy }); }}>
-              {conversionMutation.isPending ? <><Spinner />{activeConversionProgress ? <span className="whitespace-nowrap tabular-nums">{t(activeConversionProgress.phase === "syncing" ? "accounts.syncingProgress" : "accounts.convertingProgress", activeConversionProgress)}</span> : t("common.loading")}</> : t(conversionStrategy === "missing" ? "accountBulk.convertMissing" : "accountBulk.convertAll")}
+            <AlertDialogAction disabled={webConversionPending || webConversionTargets === null || (Array.isArray(webConversionTargets) && webConversionTargets.length === 0)} onClick={(event) => { event.preventDefault(); runWebConversion(); }}>
+              {webConversionPending ? <><Spinner />{webConversionTarget === "build" && activeConversionProgress ? <span className="whitespace-nowrap tabular-nums">{t(activeConversionProgress.phase === "syncing" ? "accounts.syncingProgress" : "accounts.convertingProgress", activeConversionProgress)}</span> : webConsoleSyncProgress ? <span className="tabular-nums">{webConsoleSyncProgress.completed} / {webConsoleSyncProgress.total}</span> : t("common.loading")}</> : t("accountConversion.start")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -778,54 +965,75 @@ export function AccountsPage() {
       <AlertDialog open={renewAllOpen} onOpenChange={(open) => { if (!open) renewalAbortRef.current?.abort(); setRenewAllOpen(open); }}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.renewAllTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.renewAllDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={allTokenMutation.isPending} onClick={() => allTokenMutation.mutate()}>{allTokenMutation.isPending ? <><Spinner />{renewalProgress ? <span className="tabular-nums">{renewalProgress.completed} / {renewalProgress.total}</span> : t("common.loading")}</> : t("accounts.renewAll")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={allTokenMutation.isPending} onClick={(event) => { event.preventDefault(); allTokenMutation.mutate(); }}>{allTokenMutation.isPending ? <><Spinner />{renewalProgress ? <span className="tabular-nums">{renewalProgress.completed} / {renewalProgress.total}</span> : t("common.loading")}</> : t("accounts.renewAll")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       <AlertDialog open={exportOpen} onOpenChange={setExportOpen}>
         <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportDescription")}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportTitle", { provider: provider === "grok_build" ? "Grok Build" : provider === "grok_web" ? "Grok Web" : "Grok Console" })}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportDescription")}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportMutation.isPending} onClick={() => exportMutation.mutate()}>{t("accounts.exportAuth")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       <Dialog open={deviceOpen} onOpenChange={setDeviceOpen}>
-        <DialogContent className="max-w-[420px]">
-          <DialogHeader>
+        <DialogContent className="max-w-[460px] pb-6">
+          <DialogHeader className="pr-7">
             <DialogTitle>{t("accounts.deviceTitle")}</DialogTitle>
             <DialogDescription>{t("accounts.deviceDescription")}</DialogDescription>
           </DialogHeader>
-          {deviceStatus === "starting" ? <LoadingState className="min-h-36" /> : null}
+          {deviceStatus === "starting" ? <LoadingState className="min-h-28" /> : null}
           {deviceSession ? (
             <div className="space-y-4">
-              <div className="space-y-1.5">
-                <Label>{t("accounts.userCode")}</Label>
-                <div className="relative">
-                  <code className="flex h-11 items-center rounded-md border bg-muted/40 px-3 pr-11 font-mono text-lg font-semibold tabular-nums">{deviceSession.userCode}</code>
-                  <CopyButton value={deviceSession.userCode} className="absolute right-1.5 top-1/2 size-8 -translate-y-1/2 rounded-md" onCopied={() => toast.success(t("common.copied"))} />
+              <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+                <span className="text-[11px] text-muted-foreground">{t("accounts.userCode")}</span>
+                <div className="mt-0.5 flex items-center justify-between gap-3">
+                  <code className="min-w-0 select-all font-mono text-xl font-semibold tracking-[0.08em] tabular-nums">{deviceSession.userCode}</code>
+                  <CopyButton value={deviceSession.userCode} className="-mr-1 size-7" onCopied={() => toast.success(t("common.copied"))} />
                 </div>
+                <p className="mt-2 text-[11px] leading-4 text-muted-foreground">{t("accounts.expiresAt", { time: formatDateTime(deviceSession.expiresAt, i18n.language) })}</p>
               </div>
-              <Button type="button" size="sm" className="w-full" onClick={() => window.open(deviceSession.verificationUriComplete || deviceSession.verificationUri, "_blank", "noopener,noreferrer")}>
-                <ExternalLink />{t("accounts.openVerification")}
-              </Button>
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("accounts.waiting")}</span>
-                <span className="whitespace-nowrap">{t("accounts.expiresAt", { time: formatDateTime(deviceSession.expiresAt, i18n.language) })}</span>
-              </div>
+              {deviceStatus === "pending" ? (
+                <div className="flex min-h-10 items-center justify-between gap-4 pt-1" aria-live="polite">
+                  <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"><Spinner className="size-3.5" />{t("accounts.waiting")}</span>
+                  <Button type="button" size="sm" className="shrink-0" onClick={() => window.open(deviceSession.verificationUriComplete || deviceSession.verificationUri, "_blank", "noopener,noreferrer")}>
+                    <Link />{t("accounts.openVerification")}
+                  </Button>
+                </div>
+              ) : null}
+              {deviceStatus === "failed" ? (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">{t("apiErrors.deviceLoginFailed")}</p>
+                  <Button type="button" variant="secondary" size="sm" className="shrink-0" onClick={() => void startDeviceLogin()}><RefreshCw />{t("common.retry")}</Button>
+                </div>
+              ) : null}
             </div>
           ) : null}
-          {deviceStatus === "failed" ? <Button type="button" variant="secondary" size="sm" className="w-full" onClick={() => void startDeviceLogin()}>{t("common.refresh")}</Button> : null}
+          {deviceStatus === "failed" && !deviceSession ? <Button type="button" variant="secondary" size="sm" className="justify-self-end" onClick={() => void startDeviceLogin()}><RefreshCw />{t("common.retry")}</Button> : null}
         </DialogContent>
       </Dialog>
 
-      <Dialog open={quickImportOpen} onOpenChange={(open) => { setQuickImportOpen(open); if (!open) setQuickImportTokens(""); }}>
+      <Dialog open={quickImportOpen} onOpenChange={(open) => { setQuickImportOpen(open); if (!open) { setQuickImportTokens(""); if (quickImportFileInputRef.current) quickImportFileInputRef.current.value = ""; } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t(provider === "grok_console" ? "console.quickImportTitle" : "accounts.quickImportTitle")}</DialogTitle>
             <DialogDescription>{t(provider === "grok_console" ? "console.quickImportDescription" : "accounts.quickImportDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="quick-sso-tokens">{t("accounts.ssoTokens")}</Label>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="quick-sso-tokens">{t("accounts.ssoTokens")}</Label>
+              <Button type="button" variant="secondary" size="sm" disabled={importMutation.isPending} onClick={() => quickImportFileInputRef.current?.click()}><FileUp />{t("accounts.uploadTXT")}</Button>
+              <input
+                ref={quickImportFileInputRef}
+                type="file"
+                accept="text/plain,.txt"
+                className="hidden"
+                onChange={(event) => {
+                  void loadQuickImportFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </div>
             <Textarea
               id="quick-sso-tokens"
               className="min-h-56 font-mono"
@@ -857,6 +1065,37 @@ export function AccountsPage() {
               <div className="space-y-2"><Label htmlFor="account-concurrency">{t("accounts.maxConcurrent")}</Label><Input id="account-concurrency" type="number" min="1" max="256" {...form.register("maxConcurrent", { valueAsNumber: true })} /></div>
             </div>
             <div className="space-y-2"><Label htmlFor="account-minimum">{t("accounts.minimumRemaining")}</Label><Input id="account-minimum" type="number" min="0" step="0.01" {...form.register("minimumRemaining", { valueAsNumber: true })} /></div>
+            {editing?.provider === "grok_build" ? (
+              <div className="space-y-4">
+                <div className="flex items-start justify-between gap-4 rounded-md bg-muted/50 p-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="account-build-super-entitled">{t("accounts.buildSuperEntitled.label")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("accounts.buildSuperEntitled.description")}</p>
+                  </div>
+                  <Switch id="account-build-super-entitled" checked={buildSuperEntitled} onCheckedChange={(checked) => form.setValue("buildSuperEntitled", checked, { shouldDirty: true })} />
+                </div>
+                <div className="space-y-2">
+                  <Label id="account-build-route-mode">{t("accounts.buildRouteMode.label")}</Label>
+                  <Tabs value={buildRouteMode} onValueChange={(value) => form.setValue("buildRouteMode", value as BuildRouteMode, { shouldDirty: true })}>
+                    <TabsList aria-labelledby="account-build-route-mode" className="grid h-10 w-full grid-cols-3 p-1">
+                    {(["auto", "build", "xai"] as BuildRouteMode[]).map((mode) => (
+                      <TabsTrigger
+                        key={mode}
+                        value={mode}
+                        className="h-8 px-2 font-normal data-[state=active]:font-medium"
+                      >
+                        {t(`accounts.buildRouteMode.${mode}`)}
+                      </TabsTrigger>
+                    ))}
+                    </TabsList>
+                  </Tabs>
+                  <p className="text-xs text-muted-foreground">{t(`accounts.buildRouteMode.${buildRouteMode}Description`)}</p>
+                  {buildRouteMode === "xai" && !buildSuperEntitled && !(editing.quota.type === "paid" && editing.quota.source !== "buildSuperEntitlement") ? (
+                    <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" />{t("accounts.buildRouteMode.xaiUnconfirmedWarning")}</p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             {editing && editing.provider !== "grok_build" ? (
               <div className="space-y-2">
                 <Label htmlFor="account-cloudflare-cookie">{t("settings.egress.cloudflareCookie")}</Label>
@@ -866,10 +1105,10 @@ export function AccountsPage() {
                   autoComplete="new-password"
                   spellCheck={false}
                   disabled={clearCloudflareCookies}
-                  placeholder={editing.cloudflareCookieConfigured ? t("settings.egress.keepConfigured") : "cf_clearance=..."}
+                  placeholder={editing?.cloudflareCookieConfigured ? t("settings.egress.keepConfigured") : "cf_clearance=..."}
                   {...form.register("cloudflareCookies")}
                 />
-                {editing.cloudflareCookieConfigured ? (
+                {editing?.cloudflareCookieConfigured ? (
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Checkbox checked={clearCloudflareCookies} onCheckedChange={(checked) => form.setValue("clearCloudflareCookies", checked === true)} />
                     {t("common.clear")}
@@ -886,70 +1125,97 @@ export function AccountsPage() {
       <AlertDialog open={Boolean(deleting)} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.deleteTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.deleteDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => deleting && deleteMutation.mutate(deleting.id)}>{t("common.delete")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => deleting && deleteMutation.mutate(deleting.id)}>{t("accounts.cleanupStart")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.batchDeleteTitle", { count: selected.size })}</AlertDialogTitle><AlertDialogDescription>{t("accounts.deleteDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => batchDeleteMutation.mutate()}>{t("common.delete")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => batchDeleteMutation.mutate()}>{t("accounts.cleanupStart")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={cleanupOpen} onOpenChange={(open) => { if (!cleanupMutation.isPending) { setCleanupOpen(open); if (!open) setCleanupStatuses(new Set()); } }}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>{t("accounts.cleanupTitle", { provider: provider === "grok_build" ? "Grok Build" : provider === "grok_web" ? "Grok Web" : "Grok Console" })}</DialogTitle>
+            <DialogDescription>{t("accounts.cleanupDescription")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            {([
+              ["cooldown", t("accounts.statusCooldown")],
+              ["disabled", t("accounts.statusDisabled")],
+              ["reauthRequired", t("accounts.statusReauthRequired")],
+            ] as const).map(([status, label]) => (
+              <label key={status} className="flex cursor-pointer items-center gap-3 rounded-md bg-muted/40 px-3 py-2.5 text-xs">
+                <Checkbox
+                  checked={cleanupStatuses.has(status)}
+                  disabled={cleanupMutation.isPending}
+                  onCheckedChange={(checked) => setCleanupStatuses((current) => {
+                    const next = new Set(current);
+                    if (checked === true) next.add(status); else next.delete(status);
+                    return next;
+                  })}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="secondary" size="sm" disabled={cleanupMutation.isPending} onClick={() => setCleanupOpen(false)}>{t("common.cancel")}</Button>
+            <Button type="button" variant="destructive" size="sm" disabled={cleanupMutation.isPending || cleanupStatuses.size === 0} onClick={() => cleanupMutation.mutate()}>{cleanupMutation.isPending ? <Spinner /> : null}{t("accounts.cleanupStart")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function downloadAccountExport(blob: Blob): void {
+function downloadAccountExport(blob: Blob, provider: AccountProvider): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `grok2api-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.download = `grok2api-${provider.replaceAll("_", "-")}-accounts-${new Date().toISOString().slice(0, 10)}.json`;
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function AccountMetricPanel({ icon, label, value, detail, loading }: { icon: ReactNode; label: string; value: string; detail: string; loading: boolean }) {
+function AccountMetricPanel({ icon, label, value, detail, loading, tone }: { icon: ReactNode; label: string; value: string; detail: string; loading: boolean; tone: string }) {
   return (
-    <div className="min-h-28 rounded-lg bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
+    <div className="min-h-28 rounded-lg bg-card p-4" aria-busy={loading}>
+      <div className="flex min-h-5 items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">{label}</span>
-        <span className="flex size-5 items-center justify-center text-muted-foreground [&_svg]:size-4">{icon}</span>
+        <span className={cn("flex size-5 items-center justify-center [&_svg]:size-4", tone)}>{icon}</span>
       </div>
-      <div className="mt-3 flex min-h-7 items-center text-xl font-medium tabular-nums">{loading ? <Spinner /> : value}</div>
-      <p className={cn("mt-1 text-xs text-muted-foreground", loading && "invisible")}>{detail}</p>
+      <div className="mt-3 flex min-h-8 items-center text-2xl font-medium tracking-tight tabular-nums">{loading ? <Spinner /> : value}</div>
+      <p className={cn("mt-1.5 min-h-4 truncate text-[11px] text-muted-foreground", loading && "invisible")} title={detail}>{detail}</p>
     </div>
   );
 }
 
-function webTierLabel(tier: AccountDTO["webTier"]) {
-  if (tier === "basic") return "Free";
-  if (tier === "super") return "Super";
-  if (tier === "heavy") return "Heavy";
-  return "Auto";
-}
-
 function WebAccountType({ tier }: { tier?: AccountDTO["webTier"] }) {
-  const label = webTierLabel(tier);
+  const { t } = useTranslation();
+  const label = tier === "basic" ? t("accountType.free") : tier === "super" ? t("accountType.super") : tier === "heavy" ? t("accountType.heavy") : t("accountType.auto");
   return <AccountTypeText label={label} variant={tier === "basic" ? "free" : "default"} />;
 }
 
 function AccountType({ quota }: { quota: QuotaDTO }) {
   const { t } = useTranslation();
   if (quota.type === "unknown") {
-    return <AccountTypeText label={t("dashboard.unknown")} variant="muted" />;
+    return <AccountTypeText label={t("accountType.pending")} title={t("accountType.pendingDescription")} variant="muted" />;
   }
 
   const isFree = quota.type === "free";
-  const label = isFree ? t("accounts.quotaFree") : t("accounts.quotaSuper");
+  const label = isFree ? t("accountType.free") : t("accountType.paid");
   return <AccountTypeText label={label} variant={isFree ? "free" : "default"} />;
 }
 
-function AccountTypeText({ label, variant }: { label: string; variant: "default" | "free" | "muted" }) {
+function AccountTypeText({ label, title, variant }: { label: string; title?: string; variant: "default" | "free" | "muted" }) {
   if (variant === "muted") {
-    return <span className="text-xs text-muted-foreground">{label}</span>;
+    return <span title={title ?? label} className="text-xs text-muted-foreground">{label}</span>;
   }
-  return <span title={label} className={cn("max-w-32 truncate text-xs font-medium", variant === "free" ? "text-sky-700 dark:text-sky-300" : "text-primary")}>{label}</span>;
+  return <span title={title ?? label} className={cn("max-w-32 truncate text-xs font-medium", variant === "free" ? "text-emerald-700 dark:text-emerald-300" : "text-primary")}>{label}</span>;
 }
 
 function AccountStatus({ account }: { account: AccountDTO }) {

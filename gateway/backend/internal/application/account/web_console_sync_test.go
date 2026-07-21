@@ -45,7 +45,8 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 	webAccount, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
 		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
 		Name: "Grok Web primary", SourceKey: "sso:" + security.HashToken(token),
-		EncryptedAccessToken: encrypt(token), EncryptedCloudflareCookie: encrypt(cloudflareCookie), Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+		EncryptedAccessToken: encrypt(token), EncryptedCloudflareCookie: encrypt(cloudflareCookie),
+		Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +98,7 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 		t.Fatal(err)
 	}
 	if consoleCookie != cloudflareCookie {
-		t.Fatalf("console Cloudflare cookie = %q", consoleCookie)
+		t.Fatalf("console Cloudflare cookie = %q, want %q", consoleCookie, cloudflareCookie)
 	}
 
 	second, err := service.SyncAllWebAccountsToConsoleWithProgress(ctx, nil, nil)
@@ -144,6 +145,9 @@ func TestSyncWebAccountsToConsoleIsIdempotentAndPreservesBuildLink(t *testing.T)
 	if updatedWeb.LinkedAccountID != buildAccount.ID || updatedWeb.LinkedProvider != accountdomain.ProviderBuild {
 		t.Fatalf("updated web account = %#v", updatedWeb)
 	}
+	if len(updatedWeb.LinkedAccounts) != 2 || updatedWeb.LinkedAccounts[0].Provider != accountdomain.ProviderBuild || updatedWeb.LinkedAccounts[1].Provider != accountdomain.ProviderConsole || updatedWeb.LinkedAccounts[1].ID != consoleAccount.ID {
+		t.Fatalf("updated Web links = %#v", updatedWeb.LinkedAccounts)
+	}
 	_, total, err := accounts.List(ctx, repository.AccountListQuery{
 		Page: repository.PageQuery{Limit: 10}, Filter: repository.AccountListFilter{Provider: string(accountdomain.ProviderConsole)},
 	})
@@ -176,7 +180,6 @@ func TestSyncAllWebAccountsToConsoleProcessesMoreThanLegacyLimitInBatches(t *tes
 	}
 	repository := &webConsoleBatchRepository{values: values}
 	service := NewService(repository, nil, nil, nil, provider.NewRegistry(consoleSSOCodecAdapter{}), cipher, memory.NewLockStore())
-	service.UpdateAccountTaskBatchSize(400)
 	progress := make([][2]int, 0, totalAccounts+1)
 	result, err := service.SyncAllWebAccountsToConsoleWithProgress(context.Background(), nil, func(completed, total int) error {
 		progress = append(progress, [2]int{completed, total})
@@ -188,7 +191,7 @@ func TestSyncAllWebAccountsToConsoleProcessesMoreThanLegacyLimitInBatches(t *tes
 	if result.Created != totalAccounts || result.Updated != 0 || len(result.AccountIDs) != totalAccounts {
 		t.Fatalf("sync result = %#v", result)
 	}
-	if repository.listCalls != 3 {
+	if repository.listCalls != 2 {
 		t.Fatalf("repository batches = %d", repository.listCalls)
 	}
 	if len(progress) != totalAccounts+1 || progress[0] != [2]int{0, totalAccounts} || progress[len(progress)-1] != [2]int{totalAccounts, totalAccounts} {

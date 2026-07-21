@@ -3,12 +3,14 @@ package egress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
+	"github.com/bogdanfinn/tls-client/profiles"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -21,6 +23,66 @@ func TestDirectFallbackRebuildsClientAfterAntiBotRejection(t *testing.T) {
 	manager.Feedback(context.Background(), 0, http.StatusForbidden, nil)
 	if len(manager.clients) != 0 {
 		t.Fatal("direct fallback client was not invalidated after anti-bot rejection")
+	}
+}
+
+func TestClientCacheEvictsIdleEntriesAndEnforcesCapacity(t *testing.T) {
+	now := time.Now()
+	idleClient := &scriptedRequestClient{}
+	freshClient := &scriptedRequestClient{}
+	idleKey := clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "idle"}
+	freshKey := clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "fresh"}
+	manager := &Manager{clients: map[clientCacheKey]cachedClient{
+		idleKey:  {client: idleClient, lastUsed: now.Add(-clientCacheIdleTTL)},
+		freshKey: {client: freshClient, lastUsed: now},
+	}}
+	manager.cleanupClientCacheLocked(now)
+	if _, exists := manager.clients[idleKey]; exists || idleClient.closedIdle != 1 {
+		t.Fatalf("idle client exists=%v closed=%d", exists, idleClient.closedIdle)
+	}
+	if _, exists := manager.clients[freshKey]; !exists || freshClient.closedIdle != 0 {
+		t.Fatalf("fresh client exists=%v closed=%d", exists, freshClient.closedIdle)
+	}
+
+	oldestClient := &scriptedRequestClient{}
+	oldestKey := clientCacheKey{nodeID: 2, scope: domain.ScopeBuild, fingerprint: "oldest"}
+	manager.clients = make(map[clientCacheKey]cachedClient, maxCachedClients)
+	manager.clients[oldestKey] = cachedClient{client: oldestClient, lastUsed: now.Add(-time.Hour)}
+	for index := 1; index < maxCachedClients; index++ {
+		key := clientCacheKey{nodeID: uint64(index + 2), scope: domain.ScopeBuild, fingerprint: "cached"}
+		manager.clients[key] = cachedClient{lastUsed: now}
+	}
+	manager.ensureClientCacheCapacityLocked()
+	if len(manager.clients) != maxCachedClients-1 || oldestClient.closedIdle != 1 {
+		t.Fatalf("cache size=%d oldest closed=%d", len(manager.clients), oldestClient.closedIdle)
+	}
+}
+
+func TestClearanceCacheEvictsIdleEntriesAndEnforcesCapacity(t *testing.T) {
+	now := time.Now().UTC()
+	manager := &Manager{clearances: map[string]clearanceState{
+		"idle":  {cookies: "cf_clearance=idle", lastUsedAt: now.Add(-clearanceCacheMinIdleTTL)},
+		"fresh": {cookies: "cf_clearance=fresh", lastUsedAt: now},
+	}}
+	manager.cleanupClearanceCacheLocked(now, time.Minute)
+	if _, exists := manager.clearances["idle"]; exists {
+		t.Fatal("idle Clearance entry was not evicted")
+	}
+	if _, exists := manager.clearances["fresh"]; !exists {
+		t.Fatal("fresh Clearance entry was evicted")
+	}
+
+	manager.clearances = make(map[string]clearanceState, maxCachedClearances)
+	manager.clearances["oldest"] = clearanceState{lastUsedAt: now.Add(-time.Hour)}
+	for index := 1; index < maxCachedClearances; index++ {
+		manager.clearances[fmt.Sprintf("cached-%d", index)] = clearanceState{lastUsedAt: now}
+	}
+	manager.ensureClearanceCacheCapacityLocked()
+	if len(manager.clearances) != maxCachedClearances-clearanceCacheEvictionBatch {
+		t.Fatalf("Clearance cache size = %d", len(manager.clearances))
+	}
+	if _, exists := manager.clearances["oldest"]; exists {
+		t.Fatal("oldest Clearance entry was not evicted")
 	}
 }
 
@@ -79,6 +141,15 @@ func TestBrowserRequestLeavesHeaderOrderingToTLSProfile(t *testing.T) {
 	}
 }
 
+func TestBrowserProfileTracksFlareSolverrChromiumUserAgent(t *testing.T) {
+	if actual := browserProfile("Mozilla/5.0 Chrome/144.0.0.0 Safari/537.36").GetClientHelloStr(); actual != profiles.Chrome_144.GetClientHelloStr() {
+		t.Fatalf("Chrome 144 selected %q", actual)
+	}
+	if actual := browserProfile("Mozilla/5.0 Chrome/145.0.0.0 Safari/537.36").GetClientHelloStr(); actual != profiles.Chrome_146.GetClientHelloStr() {
+		t.Fatalf("Chrome 145 did not select nearest profile: %q", actual)
+	}
+}
+
 func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -90,6 +161,16 @@ func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 	}}}, cipher)
 	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
 		t.Fatal("cooling configured node unexpectedly fell back to direct")
+	}
+}
+
+func TestDisabledConfiguredNodesAllowDirectFallback(t *testing.T) {
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "disabled-proxy", Scope: domain.ScopeBuild, Enabled: false, Health: 1,
+	}}}, nil)
+	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
+	if err != nil || configured || lease != nil {
+		t.Fatalf("disabled proxy fallback: lease=%#v configured=%v err=%v", lease, configured, err)
 	}
 }
 
@@ -183,7 +264,7 @@ func TestConfiguredWebNodeKeepsChromeBrowserTransport(t *testing.T) {
 	}
 }
 
-func TestAcquireCredentialRendersAccountProxyAndOverridesNodeCookie(t *testing.T) {
+func TestAcquireCredentialRendersResinAccountAndOverridesNodeCookie(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
@@ -204,22 +285,141 @@ func TestAcquireCredentialRendersAccountProxyAndOverridesNodeCookie(t *testing.T
 		ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
 		EncryptedProxyURL: proxyURL, EncryptedCloudflareCookie: nodeCookie,
 	}}}, cipher)
-	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
 		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: accountCookie,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
-	if lease.ProxyURL != "socks5h://Default.grok_web_42:token@resin:2260" {
-		t.Fatalf("proxy URL = %q", lease.ProxyURL)
+	defer first.Release()
+	if first.ProxyURL != "socks5h://Default.grok_web_42:token@resin:2260" {
+		t.Fatalf("first proxy URL = %q", first.ProxyURL)
 	}
-	if lease.CFCookies != "cf_clearance=account" || !lease.sticky {
-		t.Fatalf("cookies=%q sticky=%v", lease.CFCookies, lease.sticky)
+	if first.CFCookies != "cf_clearance=account" || !first.sticky {
+		t.Fatalf("first lease cookie=%q sticky=%v", first.CFCookies, first.sticky)
+	}
+	second, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 43, Provider: accountdomain.ProviderWeb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if second.ProxyURL != "socks5h://Default.grok_web_43:token@resin:2260" {
+		t.Fatalf("second proxy URL = %q", second.ProxyURL)
+	}
+	if second.CFCookies != "cf_clearance=node" {
+		t.Fatalf("second lease cookie = %q", second.CFCookies)
+	}
+	if first.client == second.client {
+		t.Fatal("different Resin accounts unexpectedly shared one connection pool")
+	}
+	if len(manager.clients) != 2 {
+		t.Fatalf("cached Resin account pools = %d, want 2", len(manager.clients))
 	}
 }
 
-func TestConsoleFallsBackToWebAndSharesSSOProxyIdentity(t *testing.T) {
+func TestFlareSolverrModeIgnoresCredentialCookie(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialCookie, err := cipher.Encrypt("cf_clearance=imported-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &clearanceSolverStub{}
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
+	}}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: credentialCookie,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if solver.calls != 1 || lease.CFCookies != "cf_clearance=value-1" {
+		t.Fatalf("solver calls=%d lease cookie=%q", solver.calls, lease.CFCookies)
+	}
+}
+
+func TestFlareSolverrModeRecoversFromDamagedStoredCookies(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &clearanceSolverStub{}
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
+		EncryptedCloudflareCookie: "damaged-node-ciphertext",
+	}}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: "damaged-account-ciphertext",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if solver.calls != 1 || lease.CFCookies != "cf_clearance=value-1" {
+		t.Fatalf("solver calls=%d lease cookie=%q", solver.calls, lease.CFCookies)
+	}
+}
+
+func TestLinkedProvidersSharePersistedResinIdentity(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstToken, _ := cipher.Encrypt("first-sso")
+	rotatedToken, _ := cipher.Encrypt("rotated-sso")
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
+		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+		{ID: 2, Name: "build", Scope: domain.ScopeBuild, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+	}}, cipher)
+	const identity = "sso_persisted_identity"
+	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		EncryptedAccessToken: firstToken, EgressIdentity: identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer web.Release()
+	console, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
+		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
+		EncryptedAccessToken: rotatedToken, EgressIdentity: identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer console.Release()
+	buildCtx := WithCredential(context.Background(), accountdomain.Credential{ID: 33, Provider: accountdomain.ProviderBuild, EgressIdentity: identity})
+	build, configured, err := manager.AcquireIfConfigured(buildCtx, domain.ScopeBuild, AccountFromContext(buildCtx))
+	if err != nil || !configured {
+		t.Fatalf("build configured=%v err=%v", configured, err)
+	}
+	defer build.Release()
+	for name, proxy := range map[string]string{"web": web.ProxyURL, "console": console.ProxyURL, "build": build.ProxyURL} {
+		if !strings.Contains(proxy, "Default."+identity+":") {
+			t.Fatalf("%s proxy = %q", name, proxy)
+		}
+	}
+}
+
+func TestConsoleFallsBackToWebAndSharesSSOResinIdentity(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
@@ -234,17 +434,20 @@ func TestConsoleFallsBackToWebAndSharesSSOProxyIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
-		ID: 7, Name: "shared-web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL,
+		ID: 7, Name: "shared-web", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
+		EncryptedProxyURL: proxyURL,
 	}}}, cipher)
 	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
-		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
+		ID: 11, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		EncryptedAccessToken: encryptedToken,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer web.Release()
 	console, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
-		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO, EncryptedAccessToken: encryptedToken,
+		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
+		EncryptedAccessToken: encryptedToken,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +455,7 @@ func TestConsoleFallsBackToWebAndSharesSSOProxyIdentity(t *testing.T) {
 	defer console.Release()
 	wantAccount := "sso_" + security.HashToken(token)[:32]
 	if web.NodeID != 7 || console.NodeID != 7 {
-		t.Fatalf("nodes web=%d console=%d", web.NodeID, console.NodeID)
+		t.Fatalf("nodes web=%d console=%d, want shared Web node", web.NodeID, console.NodeID)
 	}
 	if !strings.Contains(web.ProxyURL, "Default."+wantAccount+":") || web.ProxyURL != console.ProxyURL {
 		t.Fatalf("proxy identities web=%q console=%q", web.ProxyURL, console.ProxyURL)
@@ -322,20 +525,361 @@ func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	}
 }
 
-func TestWebAssetFallsBackToWeb(t *testing.T) {
+func TestFlareSolverrRefreshesRejectedNodeBeforeNextLease(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+
+	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CFCookies != "cf_clearance=value-1" || first.UserAgent != "Chrome/146 test" {
+		t.Fatalf("first lease = %#v", first)
+	}
+	first.Release()
+	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	second, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if solver.calls != 2 || second.CFCookies != "cf_clearance=value-2" {
+		t.Fatalf("calls=%d second cookies=%q", solver.calls, second.CFCookies)
+	}
+	stored, err := cipher.Decrypt(repository.node.EncryptedCloudflareCookie)
+	if err != nil || stored != "cf_clearance=value-2" {
+		t.Fatalf("stored cookies=%q err=%v", stored, err)
+	}
+}
+
+func TestFlareSolverrSupportsDirectWebEgress(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.NodeID != 0 || lease.CFCookies != "cf_clearance=value-1" || solver.proxyURL != "" {
+		t.Fatalf("direct lease=%#v proxy=%q", lease, solver.proxyURL)
+	}
+}
+
+func TestFlareSolverrPrewarmsDirectWebEgressWhenNoNodesExist(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+	if err := manager.RefreshDueClearances(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if solver.calls != 1 || lease.CFCookies != "cf_clearance=value-1" {
+		t.Fatalf("calls=%d cookies=%q", solver.calls, lease.CFCookies)
+	}
+}
+
+func TestStickyProxyForbiddenDoesNotCooldownSharedNode(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxy}}
+	manager := NewManager(repository, cipher)
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
+		t.Fatalf("sticky proxy 403 changed shared node: updates=%d node=%#v", repository.updates, repository.node)
+	}
+}
+
+func TestFlareSolverrIsolatesResinClearancePerAccount(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxy,
+	}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+
+	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	second, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 43, Provider: accountdomain.ProviderWeb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Release()
+	again, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.Release()
+
+	if first.CFCookies != "cf_clearance=value-1" || second.CFCookies != "cf_clearance=value-2" || again.CFCookies != first.CFCookies {
+		t.Fatalf("clearances leaked across accounts: first=%q second=%q again=%q", first.CFCookies, second.CFCookies, again.CFCookies)
+	}
+	if solver.calls != 2 || repository.updates != 0 || repository.node.EncryptedCloudflareCookie != "" {
+		t.Fatalf("calls=%d updates=%d persisted=%q", solver.calls, repository.updates, repository.node.EncryptedCloudflareCookie)
+	}
+}
+
+func TestClearanceRefreshFailureUsesLastKnownGoodUntilRejected(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Nanosecond})
+
+	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	solver.err = errors.New("solver unavailable")
+	second, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil || second.CFCookies != first.CFCookies {
+		t.Fatalf("last-known-good was not used: cookies=%q err=%v", second.CFCookies, err)
+	}
+	second.Release()
+
+	manager.InvalidateClearance(1)
+	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
+		t.Fatal("invalid clearance was reused after a rejection")
+	}
+}
+
+func TestClearanceFallbackSurvivesSolverAddressChangeOnly(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	base := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver-a", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
+	manager.UpdateClearanceConfig(base)
+	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+
+	base.FlareSolverrURL = "http://solver-b"
+	manager.UpdateClearanceConfig(base)
+	solver.err = errors.New("new solver unavailable")
+	second, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if second.CFCookies != first.CFCookies || solver.calls != 2 {
+		t.Fatalf("fallback cookie=%q want=%q solver calls=%d", second.CFCookies, first.CFCookies, solver.calls)
+	}
+}
+
+func TestNodeEditForgetsRuntimeStateButKeepsBoundFallback(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+
+	// Service updates clear freshness but preserve the binding that proves the
+	// old cookie still belongs to this target/proxy pair.
+	repository.node.Name = "renamed"
+	repository.node.ClearanceRefreshedAt = nil
+	repository.node.ClearanceFingerprint = ""
+	manager.ForgetClearance(repository.node.ID)
+	solver.err = errors.New("solver unavailable")
+	second, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if second.CFCookies != first.CFCookies || solver.calls != 2 {
+		t.Fatalf("fallback cookie=%q want=%q solver calls=%d", second.CFCookies, first.CFCookies, solver.calls)
+	}
+}
+
+func TestClearanceFallbackRejectsDifferentBinding(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyA, err := cipher.Encrypt("socks5h://proxy-a:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyB, err := cipher.Encrypt("socks5h://proxy-b:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyA}}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(repository, cipher)
+	manager.solver = solver
+	config := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
+	manager.UpdateClearanceConfig(config)
+	first, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	solver.err = errors.New("solver unavailable")
+
+	config.TargetURL = "https://console.x.ai"
+	manager.UpdateClearanceConfig(config)
+	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
+		t.Fatal("Clearance from a different target binding was reused")
+	}
+
+	config.TargetURL = "https://grok.com"
+	manager.UpdateClearanceConfig(config)
+	repository.node.EncryptedProxyURL = proxyB
+	manager.invalidateNodes(domain.ScopeWeb)
+	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
+		t.Fatal("Clearance from a different proxy binding was reused")
+	}
+}
+
+func TestClearanceBackgroundRefreshSkipsResinTemplate(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &clearanceSolverStub{}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxy,
+	}}}, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour})
+	if err := manager.RefreshDueClearances(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if solver.calls != 0 {
+		t.Fatalf("background refresh solved an account template %d times", solver.calls)
+	}
+}
+
+func TestPersistedClearancePreventsDuplicateInstanceRefresh(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	solver := &clearanceSolverStub{}
+	config := ClearanceConfig{Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com", Timeout: time.Second, RefreshInterval: time.Hour}
+	firstManager := NewManager(repository, cipher)
+	firstManager.solver = solver
+	firstManager.UpdateClearanceConfig(config)
+	first, err := firstManager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+
+	secondManager := NewManager(repository, cipher)
+	secondManager.solver = solver
+	secondManager.UpdateClearanceConfig(config)
+	second, err := secondManager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Release()
+	if solver.calls != 1 || second.CFCookies != first.CFCookies {
+		t.Fatalf("instances did not reuse persisted clearance: calls=%d first=%q second=%q", solver.calls, first.CFCookies, second.CFCookies)
+	}
+}
+
+func TestWebAssetCredentialFallsBackToWebWithSameResinIdentity(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountCookie, err := cipher.Encrypt("cf_clearance=account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "shared-web-asset-sso"
+	encryptedToken, err := cipher.Encrypt(token)
+	if err != nil {
+		t.Fatal(err)
+	}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
-		{ID: 2, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1},
+		{ID: 2, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
-	webLease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	credential := accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		EncryptedAccessToken: encryptedToken, EncryptedCloudflareCookie: accountCookie,
+	}
+	webLease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, credential)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer webLease.Release()
-	lease, err := manager.Acquire(context.Background(), domain.ScopeWebAsset, "account")
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWebAsset, credential)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,8 +887,15 @@ func TestWebAssetFallsBackToWeb(t *testing.T) {
 	if lease.NodeID != 2 {
 		t.Fatalf("node = %d, want web fallback node 2", lease.NodeID)
 	}
+	wantAccount := "sso_" + security.HashToken(token)[:32]
+	if lease.ProxyURL != webLease.ProxyURL || !strings.Contains(lease.ProxyURL, "Default."+wantAccount+":") {
+		t.Fatalf("proxy identities web=%q asset=%q", webLease.ProxyURL, lease.ProxyURL)
+	}
+	if lease.CFCookies != "cf_clearance=account" {
+		t.Fatalf("asset lease cookie = %q", lease.CFCookies)
+	}
 	if lease.client != webLease.client {
-		t.Fatal("Web Asset fallback did not reuse the matching Web browser session")
+		t.Fatal("Web Asset credential fallback did not reuse the matching Web browser session")
 	}
 }
 
@@ -384,6 +935,21 @@ type countingEgressRepository struct {
 type mutableEgressRepository struct {
 	node    domain.Node
 	updates int
+}
+
+type clearanceSolverStub struct {
+	calls    int
+	proxyURL string
+	err      error
+}
+
+func (s *clearanceSolverStub) Solve(_ context.Context, _ ClearanceConfig, proxyURL string) (clearanceSolution, error) {
+	s.calls++
+	s.proxyURL = proxyURL
+	if s.err != nil {
+		return clearanceSolution{}, s.err
+	}
+	return clearanceSolution{Cookies: fmt.Sprintf("cf_clearance=value-%d", s.calls), UserAgent: "Chrome/146 test"}, nil
 }
 
 func (r *mutableEgressRepository) ListEgressNodes(_ context.Context, scope domain.Scope, _ repository.SortQuery) ([]domain.Node, error) {
