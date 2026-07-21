@@ -382,8 +382,8 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	videoGateway := &fakeLegacyVideoGateway{listed: []mediadomain.Job{{
 		ID: "video-job-1", RequestID: "request-1", Status: mediadomain.StatusCompleted,
-		UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4",
-		InputJSON:   `{"image_urls":[],"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
+		UpstreamURL:  "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4",
+		MetadataJSON: `{"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
 	}}}
 	videoCache := &fakeLegacyVideoCache{items: []LegacyCachedVideo{{
 		Source: "legacy", CacheKey: "local.mp4",

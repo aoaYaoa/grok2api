@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -75,7 +76,7 @@ func TestMediaJobInputMetadataPendingIndexExists(t *testing.T) {
 	var count int
 	if err := database.db.WithContext(ctx).Raw(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`,
-		"idx_media_jobs_input_metadata_pending",
+		"idx_media_jobs_input_metadata_v1_pending",
 	).Scan(&count).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +86,11 @@ func TestMediaJobInputMetadataPendingIndexExists(t *testing.T) {
 	var sql string
 	if err := database.db.WithContext(ctx).Raw(
 		`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`,
-		"idx_media_jobs_input_metadata_pending",
+		"idx_media_jobs_input_metadata_v1_pending",
 	).Scan(&sql).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.ToLower(sql), "input_image_count is null") {
+	if !strings.Contains(strings.ToLower(sql), "input_metadata_version < 1") {
 		t.Fatalf("pending index sql = %q", sql)
 	}
 }
@@ -118,11 +119,39 @@ func TestInitializeSchemaUpgradesOnlyPreviousMediaJobInputConstraint(t *testing.
 	}
 	now := time.Now().UTC()
 	existing := testMediaJob("video_previous_input", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
-	existing.InputJSON = `{"image_urls":["data:image/png;base64,AAAA"]}`
+	existing.InputJSON = `{"image_urls":["data:image/png;base64,AAAA"],"display_name":"Saved","poster_url":"/poster.jpg","retry_count":2}`
 	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, existing); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", existing.ID).UpdateColumn("input_image_count", nil).Error; err != nil {
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", existing.ID).UpdateColumns(map[string]any{"input_image_count": nil, "input_metadata_version": 0}).Error; err != nil {
+		t.Fatal(err)
+	}
+	intermediate := testMediaJob("video_previous_count_only", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
+	intermediate.InputJSON = `{"image_urls":["data:image/png;base64,CCCC"],"display_name":"Counted","retry_count":3}`
+	intermediate.InputImageCount = 1
+	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, intermediate); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", intermediate.ID).UpdateColumn("input_metadata_version", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	completedAt := now.Add(time.Minute)
+	terminal := testMediaJob("video_previous_terminal", accountValue.ID, key.ID, mediadomain.StatusCompleted, now)
+	terminal.InputJSON = `{"image_urls":["data:image/png;base64,BBBB"],"display_name":"Finished","poster_url":"/finished.jpg","extend_post_id":"post-1"}`
+	terminal.CompletedAt = &completedAt
+	terminal.UsageRecordedAt = &completedAt
+	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, terminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", terminal.ID).UpdateColumns(map[string]any{"input_image_count": nil, "input_metadata_version": 0}).Error; err != nil {
+		t.Fatal(err)
+	}
+	overLimit := testMediaJob("video_previous_over_limit", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
+	overLimit.InputJSON = `{"image_urls":["1","2","3","4","5","6","7","8","9","10"],"preset":"custom"}`
+	if err := NewMediaJobRepository(database).CreateMediaJob(ctx, overLimit); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", overLimit.ID).UpdateColumns(map[string]any{"input_image_count": nil, "input_metadata_version": 0}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := downgradeOnlyMediaJobInputConstraint(ctx, database); err != nil {
@@ -138,8 +167,26 @@ func TestInitializeSchemaUpgradesOnlyPreviousMediaJobInputConstraint(t *testing.
 	if err := database.db.WithContext(ctx).Where("id = ?", existing.ID).First(&migrated).Error; err != nil {
 		t.Fatal(err)
 	}
-	if migrated.InputJSON != existing.InputJSON || migrated.InputImageCount == nil || *migrated.InputImageCount != 1 {
-		t.Fatalf("migrated input json len=%d count=%v", len(migrated.InputJSON), migrated.InputImageCount)
+	if migrated.InputJSON != existing.InputJSON || migrated.MetadataJSON != `{"display_name":"Saved","poster_url":"/poster.jpg","retry_count":2}` || migrated.InputImageCount == nil || *migrated.InputImageCount != 1 {
+		t.Fatalf("migrated input json len=%d metadata=%q count=%v", len(migrated.InputJSON), migrated.MetadataJSON, migrated.InputImageCount)
+	}
+	var migratedIntermediate mediaJobModel
+	if err := database.db.WithContext(ctx).Where("id = ?", intermediate.ID).First(&migratedIntermediate).Error; err != nil || migratedIntermediate.MetadataJSON != `{"display_name":"Counted","retry_count":3}` {
+		t.Fatalf("count-only migration input=%q metadata=%q err=%v", migratedIntermediate.InputJSON, migratedIntermediate.MetadataJSON, err)
+	}
+	var migratedTerminal mediaJobModel
+	if err := database.db.WithContext(ctx).Where("id = ?", terminal.ID).First(&migratedTerminal).Error; err != nil || migratedTerminal.InputJSON != "{}" || migratedTerminal.MetadataJSON != `{"display_name":"Finished","extend_post_id":"post-1","poster_url":"/finished.jpg"}` {
+		t.Fatalf("terminal migration input=%q metadata=%q err=%v", migratedTerminal.InputJSON, migratedTerminal.MetadataJSON, err)
+	}
+	var migratedOverLimit mediaJobModel
+	if err := database.db.WithContext(ctx).Where("id = ?", overLimit.ID).First(&migratedOverLimit).Error; err != nil || migratedOverLimit.InputImageCount == nil || *migratedOverLimit.InputImageCount != mediadomain.MaxInputImages {
+		t.Fatalf("over-limit migration=%#v err=%v", migratedOverLimit, err)
+	}
+	var migratedInput struct {
+		ImageURLs []string `json:"image_urls"`
+	}
+	if err := json.Unmarshal([]byte(migratedOverLimit.InputJSON), &migratedInput); err != nil || len(migratedInput.ImageURLs) != mediadomain.MaxInputImages || migratedOverLimit.MetadataJSON != `{"preset":"custom"}` {
+		t.Fatalf("over-limit input=%q metadata=%q err=%v", migratedOverLimit.InputJSON, migratedOverLimit.MetadataJSON, err)
 	}
 	large := testMediaJob("video_previous_large", accountValue.ID, key.ID, mediadomain.StatusQueued, now)
 	large.InputJSON = `{"image_urls":["` + strings.Repeat("A", (1<<20)+1) + `"]}`

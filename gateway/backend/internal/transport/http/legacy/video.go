@@ -248,7 +248,7 @@ func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
 		var metadata struct {
 			DisplayName string `json:"display_name"`
 		}
-		_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
+		_ = json.Unmarshal([]byte(videoJobMetadataPayload(job)), &metadata)
 		displayName = strings.TrimSpace(metadata.DisplayName)
 	}
 	name := job.ID + ".mp4"
@@ -268,8 +268,15 @@ func videoJobPosterURL(job mediadomain.Job) string {
 	var metadata struct {
 		PosterURL string `json:"poster_url"`
 	}
-	_ = json.Unmarshal([]byte(job.InputJSON), &metadata)
+	_ = json.Unmarshal([]byte(videoJobMetadataPayload(job)), &metadata)
 	return strings.TrimSpace(metadata.PosterURL)
+}
+
+func videoJobMetadataPayload(job mediadomain.Job) string {
+	if value := strings.TrimSpace(job.MetadataJSON); value != "" && value != "{}" {
+		return value
+	}
+	return job.InputJSON
 }
 
 func dedupeCachedVideos(items []LegacyCachedVideo) []LegacyCachedVideo {

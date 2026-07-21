@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 )
 
-const mediaJobInputMetadataPendingIndex = "CREATE INDEX IF NOT EXISTS idx_media_jobs_input_metadata_pending ON media_jobs(id) WHERE input_image_count IS NULL"
+const mediaJobInputMetadataPendingIndex = "CREATE INDEX IF NOT EXISTS idx_media_jobs_input_metadata_v1_pending ON media_jobs(id) WHERE input_metadata_version < 1"
 
 var schemaModels = []any{
 	&adminModel{},
@@ -223,29 +224,24 @@ func (d *Database) ensureMediaJobInputMetadataPendingIndex(ctx context.Context) 
 	return nil
 }
 
-// migrateMediaJobInputMetadata backfills the compact image count introduced
-// after InputJSON began accepting large Base64 references. Already-audited
-// terminal jobs can discard the raw payload immediately; active and unaudited
-// jobs retain it for worker recovery.
+// migrateMediaJobInputMetadata separates lightweight mutable video metadata
+// from large immutable image references before terminal payloads are compacted.
 func (d *Database) migrateMediaJobInputMetadata(ctx context.Context) error {
 	db := d.db.WithContext(ctx)
-	terminal := []string{"completed", "failed"}
-	if err := db.Model(&mediaJobModel{}).
-		Where("status IN ? AND usage_recorded_at IS NOT NULL AND input_json <> ?", terminal, "{}").
-		UpdateColumn("input_json", "{}").Error; err != nil {
-		return err
-	}
 	type inputRow struct {
-		ID        string
-		InputJSON string
+		ID              string
+		Status          string
+		UsageRecordedAt *time.Time
+		InputJSON       string
+		MetadataJSON    string
 	}
 	const batchSize = 8
 	cursor := ""
 	for {
 		var rows []inputRow
 		query := db.Model(&mediaJobModel{}).
-			Select("id", "input_json").
-			Where("id > ? AND input_image_count IS NULL", cursor).
+			Select("id", "status", "usage_recorded_at", "input_json", "metadata_json").
+			Where("id > ? AND input_metadata_version < 1", cursor).
 			Order("id ASC").Limit(batchSize)
 		if err := query.Find(&rows).Error; err != nil {
 			return err
@@ -254,16 +250,22 @@ func (d *Database) migrateMediaJobInputMetadata(ctx context.Context) error {
 			return nil
 		}
 		for _, row := range rows {
-			var input struct {
-				ImageURLs []string `json:"image_urls"`
-			}
+			var input map[string]any
 			parseErr := json.Unmarshal([]byte(row.InputJSON), &input)
-			count := min(len(input.ImageURLs), media.MaxInputImages)
-			updates := map[string]any{"input_image_count": count}
-			// Historical code treated malformed or empty input as no references.
-			// Normalize it once so future startups do not rescan the same row.
-			if parseErr != nil || count == 0 {
+			imageURLs := stringSliceValue(input["image_urls"])
+			count := min(len(imageURLs), media.MaxInputImages)
+			updates := map[string]any{"input_image_count": count, "input_metadata_version": 1}
+			if parseErr == nil {
+				delete(input, "image_urls")
+				if row.MetadataJSON == "" || row.MetadataJSON == "{}" {
+					updates["metadata_json"] = marshalJSONMap(input)
+				}
+			}
+			terminalRecorded := (row.Status == "completed" || row.Status == "failed") && row.UsageRecordedAt != nil
+			if parseErr != nil || count == 0 || terminalRecorded {
 				updates["input_json"] = "{}"
+			} else if len(imageURLs) > media.MaxInputImages {
+				updates["input_json"] = marshalJSONMap(map[string]any{"image_urls": imageURLs[:media.MaxInputImages]})
 			}
 			if err := db.Model(&mediaJobModel{}).Where("id = ?", row.ID).UpdateColumns(updates).Error; err != nil {
 				return err
@@ -271,6 +273,32 @@ func (d *Database) migrateMediaJobInputMetadata(ctx context.Context) error {
 		}
 		cursor = rows[len(rows)-1].ID
 	}
+}
+
+func stringSliceValue(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		if ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func marshalJSONMap(value map[string]any) string {
+	if len(value) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 // ensureMediaJobAccountForeignKey 让终态视频任务在账号删除后保留快照，

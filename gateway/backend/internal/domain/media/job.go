@@ -41,6 +41,7 @@ type Job struct {
 	Status          Status
 	Progress        int
 	InputJSON       string
+	MetadataJSON    string
 	DisplayName     string
 	InputImageCount int
 	UpstreamURL     string

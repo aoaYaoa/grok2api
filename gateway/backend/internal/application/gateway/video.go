@@ -90,11 +90,12 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if input.IsExtension {
 		metadata.markAccountAttempt(lease.Credential.ID)
 	}
-	inputJSON, err := encodeVideoMetadataChecked(metadata)
+	inputJSON, err := encodeVideoInput(input.ReferenceURLs)
 	if err != nil {
 		lease.Release()
 		return media.Job{}, err
 	}
+	metadataJSON := encodeVideoJobMetadata(metadata)
 	accountID := lease.Credential.ID
 	lease.Release()
 	token, err := security.NewOpaqueToken(18)
@@ -108,7 +109,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: inputJSON, InputImageCount: len(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: inputJSON, MetadataJSON: metadataJSON, InputImageCount: len(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(externalModel, input.Resolution, input.Duration); ok {
@@ -183,7 +184,7 @@ func (s *Service) ListVideos(ctx context.Context, key clientkey.Key, page, pageS
 		return nil, 0, err
 	}
 	for index := range values {
-		values[index].DisplayName = decodeVideoMetadata(values[index].InputJSON).DisplayName
+		values[index].DisplayName = videoMetadataForJob(values[index]).DisplayName
 	}
 	return values, total, nil
 }
@@ -203,9 +204,9 @@ func (s *Service) RenameVideo(ctx context.Context, identifier, displayName strin
 			if job.ID != identifier && job.RequestID != identifier && job.UpstreamURL != identifier && !strings.Contains(job.UpstreamURL, identifier) {
 				continue
 			}
-			metadata := decodeVideoMetadata(job.InputJSON)
+			metadata := videoMetadataForJob(job)
 			metadata.DisplayName = displayName
-			job.InputJSON = encodeVideoMetadata(metadata)
+			job.MetadataJSON = encodeVideoJobMetadata(metadata)
 			job.DisplayName = displayName
 			job.UpdatedAt = time.Now().UTC()
 			if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
@@ -365,7 +366,7 @@ func (s *Service) repairCompletedVideoOutputs(ctx context.Context) error {
 			result = firstError(result, fmt.Errorf("任务 %s 保存视频: %w", job.ID, archiveErr))
 			continue
 		}
-		job.UpstreamURL, job.ContentType, job.InputJSON, job.UpdatedAt = archived.URL, archived.ContentType, withVideoPosterURL(job.InputJSON, archived.PosterURL), time.Now().UTC()
+		job.UpstreamURL, job.ContentType, job.MetadataJSON, job.UpdatedAt = archived.URL, archived.ContentType, withVideoPosterURL(encodeVideoJobMetadata(videoMetadataForJob(job)), archived.PosterURL), time.Now().UTC()
 		if updateErr := s.mediaJobs.UpdateMediaJob(ctx, job); updateErr != nil {
 			result = firstError(result, fmt.Errorf("任务 %s 更新本地地址: %w", job.ID, updateErr))
 		}
@@ -514,7 +515,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
 		s.logger.Warn("video_job_progress_write_failed", "job_id", job.ID, "error", err)
 	}
-	metadata := decodeVideoMetadata(job.InputJSON)
+	metadata := videoMetadataForJob(job)
 	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
 	if err != nil {
 		if s.videoCancelled(job.ID) {
@@ -580,7 +581,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			}
 			if delay, retry := videoRetryPlan(status, metadata.RetryCount, retrySafe); retry {
 				metadata.RetryCount++
-				job.InputJSON = encodeVideoMetadata(metadata)
+				job.MetadataJSON = encodeVideoJobMetadata(metadata)
 				applyMediaJobEgress(&job, egressTrace, route.Provider)
 				s.deferVideoJobFor(parent, job, delay)
 				if s.logger != nil {
@@ -666,7 +667,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if result.AssetID != "" {
 		job.ResultAssetID = result.AssetID
 	}
-	job.InputJSON = withVideoPosterURL(job.InputJSON, result.PosterURL)
+	job.MetadataJSON = withVideoPosterURL(encodeVideoJobMetadata(videoMetadataForJob(job)), result.PosterURL)
 	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
 	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
@@ -750,7 +751,7 @@ func videoPosterURL(job media.Job) string {
 	var metadata struct {
 		PosterURL string `json:"poster_url"`
 	}
-	if json.Unmarshal([]byte(job.InputJSON), &metadata) != nil {
+	if json.Unmarshal([]byte(videoMetadataPayload(job)), &metadata) != nil {
 		return ""
 	}
 	return strings.TrimSpace(metadata.PosterURL)
@@ -904,7 +905,7 @@ func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Jo
 	metadata.markAccountAttempt(lease.Credential.ID)
 	job.AccountID = lease.Credential.ID
 	job.AccountName = lease.Credential.Name
-	job.InputJSON = encodeVideoMetadata(*metadata)
+	job.MetadataJSON = encodeVideoJobMetadata(*metadata)
 	job.UpdatedAt = time.Now().UTC()
 	if err := s.mediaJobs.UpdateMediaJob(ctx, *job); err != nil {
 		lease.Release()
@@ -932,6 +933,11 @@ func encodeVideoMetadata(metadata videoInputMetadata) string {
 	return string(data)
 }
 
+func encodeVideoJobMetadata(metadata videoInputMetadata) string {
+	metadata.ImageURLs = nil
+	return encodeVideoMetadata(metadata)
+}
+
 func encodeVideoInput(referenceURLs []string) (string, error) {
 	return encodeVideoMetadataChecked(videoInputMetadata{ImageURLs: referenceURLs})
 }
@@ -949,6 +955,19 @@ func encodeVideoMetadataChecked(metadata videoInputMetadata) (string, error) {
 
 func decodeVideoInput(value string) []string {
 	return decodeVideoMetadata(value).ImageURLs
+}
+
+func videoMetadataPayload(job media.Job) string {
+	if value := strings.TrimSpace(job.MetadataJSON); value != "" && value != "{}" {
+		return value
+	}
+	return job.InputJSON
+}
+
+func videoMetadataForJob(job media.Job) videoInputMetadata {
+	metadata := decodeVideoMetadata(videoMetadataPayload(job))
+	metadata.ImageURLs = decodeVideoInput(job.InputJSON)
+	return metadata
 }
 
 func decodeVideoMetadata(value string) videoInputMetadata {

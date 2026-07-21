@@ -315,11 +315,26 @@ func (r *videoUsageRepository) MarkMediaJobUsageRecorded(_ context.Context, _ st
 }
 
 func TestVideoPosterMetadataRoundTrip(t *testing.T) {
-	raw := withVideoPosterURL(`{"reference_urls":[]}`, "/v1/files/image/poster.jpg")
-	if got := videoPosterURL(media.Job{InputJSON: raw}); got != "/v1/files/image/poster.jpg" {
+	raw := withVideoPosterURL(`{"display_name":"Saved"}`, "/v1/files/image/poster.jpg")
+	if got := videoPosterURL(media.Job{MetadataJSON: raw}); got != "/v1/files/image/poster.jpg" {
 		t.Fatalf("poster URL = %q, input = %s", got, raw)
 	}
 	if got := withVideoPosterURL(raw, ""); got != raw {
 		t.Fatalf("empty poster changed metadata: %s", got)
+	}
+}
+
+func TestVideoMetadataCombinesImmutableReferencesAndMutableState(t *testing.T) {
+	inputJSON, err := encodeVideoInput([]string{"data:image/png;base64,AAAA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := media.Job{
+		InputJSON:    inputJSON,
+		MetadataJSON: `{"preset":"custom","is_extension":true,"retry_count":2,"attempted_account_ids":[11,22]}`,
+	}
+	metadata := videoMetadataForJob(job)
+	if len(metadata.ImageURLs) != 1 || metadata.ImageURLs[0] != "data:image/png;base64,AAAA" || metadata.Preset != "custom" || !metadata.IsExtension || metadata.RetryCount != 2 || len(metadata.AttemptedAccountIDs) != 2 {
+		t.Fatalf("combined metadata = %#v", metadata)
 	}
 }
