@@ -282,11 +282,11 @@ export function ModelsPage() {
                   <TableCell className="min-w-0">
                     <span className="block truncate text-xs text-muted-foreground" title={model.upstreamModel}>{model.upstreamModel}</span>
                   </TableCell>
-                  <TableCell className="text-center">{model.enabled ? <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("common.enabled")}</Badge> : <Badge variant="outline" className="text-muted-foreground">{t("common.disabled")}</Badge>}</TableCell>
+                  <TableCell className="text-center">{model.enabled ? <Badge variant="secondary" className="bg-blue-500/10 text-blue-700 dark:text-blue-300">{t("common.enabled")}</Badge> : <Badge variant="outline" className="text-muted-foreground">{t("common.disabled")}</Badge>}</TableCell>
                   <TableCell className="text-center"><ModelProvider provider={model.provider} /></TableCell>
                   <TableCell className="text-center text-xs">
                     <div title={t("models.supportSummary", { supported: model.supportedAccounts, total: model.totalAccounts })}>
-                      <span className="inline-flex items-baseline gap-1 tabular-nums"><span className={cn("font-medium", model.supportedAccounts > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>{model.supportedAccounts}</span><span className="text-muted-foreground">/ {model.totalAccounts}</span></span>
+                      <span className="inline-flex items-baseline gap-1 tabular-nums"><span className={cn("font-medium", model.supportedAccounts > 0 ? "text-blue-600 dark:text-blue-400" : "text-muted-foreground")}>{model.supportedAccounts}</span><span className="text-muted-foreground">/ {model.totalAccounts}</span></span>
                       {model.bindingMode ? <span className="mt-0.5 block text-[10px] text-muted-foreground">{t("models.boundAccounts")}</span> : null}
                     </div>
                   </TableCell>

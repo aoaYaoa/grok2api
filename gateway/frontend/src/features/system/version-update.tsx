@@ -99,7 +99,7 @@ export function VersionUpdateSection() {
           </VersionField>
           <VersionField label={t("updates.statusLabel")} description={t("updates.statusLabelHelp")}>
             <VersionValue>
-              {version?.status ? <span className={cn("size-1.5 shrink-0 rounded-full bg-muted-foreground", version.status === "up_to_date" && "bg-emerald-500", version.status === "update_available" && "bg-amber-500", version.status === "check_failed" && "bg-destructive")} /> : null}
+              {version?.status ? <span className={cn("size-1.5 shrink-0 rounded-full bg-muted-foreground", version.status === "up_to_date" && "bg-blue-500", version.status === "update_available" && "bg-amber-500", version.status === "check_failed" && "bg-destructive")} /> : null}
               <span>{version ? t(`updates.status.${version.status}`) : t("common.loading")}</span>
             </VersionValue>
           </VersionField>

@@ -13,7 +13,7 @@ export type SettingsConfigDTO = {
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
   providerConsole: { baseURL: string; chatTimeout: string };
-  batch: { importConcurrency: number; conversionConcurrency: number; syncConcurrency: number; refreshConcurrency: number; randomDelay: string };
+  batch: { accountTaskBatchSize: number; importConcurrency: number; conversionConcurrency: number; syncConcurrency: number; refreshConcurrency: number; randomDelay: string };
   media: {
     maxImageBytes: number; maxTotalBytes: number; cleanupThresholdPercent: number;
     cleanupInterval: string;
@@ -63,7 +63,7 @@ const settingsConfigValidator = hasShape({
     clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, recoveryBackoffBase: isString, recoveryBackoffMax: isString,
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString }),
-  batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
+  batch: hasShape({ accountTaskBatchSize: isNumber, importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
   media: hasShape({ maxImageBytes: isNumber, maxTotalBytes: isNumber, cleanupThresholdPercent: isNumber, cleanupInterval: isString }),
   frontend: hasShape({ publicApiBaseURL: isString }),
   routing: hasShape({ stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber, preferFreeBuild: isBoolean }),

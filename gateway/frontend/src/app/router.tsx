@@ -1,7 +1,8 @@
 import { Navigate, createBrowserRouter, type RouteObject } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredCachePage, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { gatewayBasename, gatewayRoutePaths } from "@/app/gateway-paths.mjs";
 import { LoginPage } from "@/features/auth/login-page";
 
 export const gatewayRouterRoutes: RouteObject[] = [
@@ -15,18 +16,19 @@ export const gatewayRouterRoutes: RouteObject[] = [
       {
         element: <DeferredAppShell />,
         children: [
-          { index: true, element: <Navigate to="/dashboard" replace /> },
-          { path: "/dashboard", element: <DeferredDashboardPage /> },
-          { path: "/accounts", element: <DeferredAccountsPage /> },
-          { path: "/models", element: <DeferredModelsPage /> },
-          { path: "/creative-console", element: <DeferredCreativeConsolePage /> },
-          { path: "/client-keys", element: <DeferredClientKeysPage /> },
-          { path: "/gallery", element: <DeferredGalleryPage /> },
-          { path: "/video-gallery", element: <DeferredVideoGalleryPage /> },
-          { path: "/request-audits", element: <DeferredRequestAuditsPage /> },
-          { path: "/docs", element: <Navigate to="/docs/chat/completions" replace /> },
-          { path: "/docs/:category/:endpoint", element: <DeferredApiDocsPage /> },
-          { path: "/settings", element: <DeferredSettingsPage /> },
+          { index: true, element: <Navigate to={gatewayRoutePaths.dashboard} replace /> },
+          { path: gatewayRoutePaths.dashboard, element: <DeferredDashboardPage /> },
+          { path: gatewayRoutePaths.accounts, element: <DeferredAccountsPage /> },
+          { path: gatewayRoutePaths.models, element: <DeferredModelsPage /> },
+          { path: gatewayRoutePaths.creativeConsole, element: <DeferredCreativeConsolePage /> },
+          { path: gatewayRoutePaths.clientKeys, element: <DeferredClientKeysPage /> },
+          { path: gatewayRoutePaths.gallery, element: <DeferredGalleryPage /> },
+          { path: gatewayRoutePaths.videoGallery, element: <DeferredVideoGalleryPage /> },
+          { path: gatewayRoutePaths.requestAudits, element: <DeferredRequestAuditsPage /> },
+          { path: gatewayRoutePaths.cache, element: <DeferredCachePage /> },
+          { path: gatewayRoutePaths.docs, element: <Navigate to={gatewayRoutePaths.docsDefault} replace /> },
+          { path: gatewayRoutePaths.docsEndpoint, element: <DeferredApiDocsPage /> },
+          { path: gatewayRoutePaths.settings, element: <DeferredSettingsPage /> },
         ],
       },
     ],

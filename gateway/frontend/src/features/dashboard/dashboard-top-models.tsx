@@ -32,7 +32,7 @@ export function DashboardTopModels({ dashboard, locale, loading }: DashboardTopM
             <TableHead>{t("dashboard.model")}</TableHead>
             <TableHead className="w-28 whitespace-nowrap">
               <span className="flex items-center justify-end gap-1.5">
-                <span className="size-1.5 rounded-full bg-emerald-500" />
+                <span className="size-1.5 rounded-full bg-blue-500" />
                 {t("dashboard.billing")}
               </span>
             </TableHead>
@@ -75,7 +75,7 @@ export function DashboardTopModels({ dashboard, locale, loading }: DashboardTopM
                     </p>
                   </div>
                 </TableCell>
-                <TableCell className={cn("whitespace-nowrap text-right text-xs font-medium tabular-nums text-emerald-600 dark:text-emerald-400", item.billedCostUsdTicks === 0 && "font-normal text-muted-foreground")}>{formatUSD(item.billedCostUsdTicks, locale)}</TableCell>
+                <TableCell className={cn("whitespace-nowrap text-right text-xs font-medium tabular-nums text-blue-600 dark:text-blue-400", item.billedCostUsdTicks === 0 && "font-normal text-muted-foreground")}>{formatUSD(item.billedCostUsdTicks, locale)}</TableCell>
                 <TableCell
                   className={cn("text-right text-xs font-medium tabular-nums text-violet-600 dark:text-violet-400", item.tokens === 0 && "font-normal text-muted-foreground")}
                   title={formatNumber(item.tokens, locale)}

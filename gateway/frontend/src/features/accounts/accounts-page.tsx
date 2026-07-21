@@ -1215,7 +1215,7 @@ function AccountTypeText({ label, title, variant }: { label: string; title?: str
   if (variant === "muted") {
     return <span title={title ?? label} className="text-xs text-muted-foreground">{label}</span>;
   }
-  return <span title={title ?? label} className={cn("max-w-32 truncate text-xs font-medium", variant === "free" ? "text-emerald-700 dark:text-emerald-300" : "text-primary")}>{label}</span>;
+  return <span title={title ?? label} className={cn("max-w-32 truncate text-xs font-medium", variant === "free" ? "text-blue-700 dark:text-blue-300" : "text-primary")}>{label}</span>;
 }
 
 function AccountStatus({ account }: { account: AccountDTO }) {

@@ -300,11 +300,6 @@ const resources = {
           failed: "失败",
         },
       },
-      media: {
-        images: { title: "图库", description: "浏览已生成的图片资源", search: "搜索 ID、类型或哈希", empty: "暂无图片", noMatches: "未找到匹配的图片", sha256: "SHA256", totalImages: "图片总数", totalImagesDetail: "已归档的图片数量", totalBytes: "占用空间", totalBytesDetail: "所有图片文件总大小", pageSummary: "显示 {{count}} / {{total}} 张" },
-        videos: { title: "视频库", description: "查看视频生成任务记录", search: "搜索提示词或 ID", empty: "暂无视频任务", statusFilter: "状态筛选", totalJobs: "任务总数", queued: "排队中", inProgress: "进行中", completed: "已完成", failed: "失败", prompt: "提示词", model: "模型", status: "状态", progress: "进度", spec: "规格", owner: "归属", createdAt: "创建时间", completedAt: "完成时间", seconds: "{{count}} 秒", pageSummary: "显示 {{count}} / {{total}} 条" },
-        videoStatus: { queued: "排队中", in_progress: "进行中", completed: "已完成", failed: "失败" },
-      },
       auth: {
         title: "管理员登录",
         productTitle: "轻量 API 网关",

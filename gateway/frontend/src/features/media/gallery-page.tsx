@@ -225,7 +225,7 @@ function GallerySummary({ loading, unavailable, totalImages, totalBytes, locale 
   return (
     <div className="flex h-8 items-center gap-4 whitespace-nowrap text-xs" aria-busy={loading}>
       <span className="inline-flex items-center gap-1.5">
-        <ImageIcon className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+        <ImageIcon className="size-3.5 text-blue-600 dark:text-blue-400" />
         <span className="text-muted-foreground">{t("media.images.totalImages")}</span>
         <strong className="font-medium tabular-nums">{loading ? <Spinner className="size-3" /> : unavailable ? "-" : formatNumber(totalImages, locale, 0)}</strong>
       </span>

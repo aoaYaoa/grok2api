@@ -118,7 +118,7 @@ export function DashboardResources({ dashboard, locale, loading }: DashboardData
 
           <div className="min-w-0 divide-y divide-border/60">
             <ResourceSummary
-              color="bg-emerald-500"
+              color="bg-blue-500"
               label={t("dashboard.activeAccounts")}
               value={formatNumber(activeAccounts, locale)}
               detail={t("dashboard.availableSummary", { active: formatNumber(activeAccounts, locale), total: formatNumber(totalAccounts, locale) })}

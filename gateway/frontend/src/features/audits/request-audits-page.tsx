@@ -236,8 +236,8 @@ function EgressValue({ audit }: { audit: AuditDTO }) {
     <Tooltip>
       <TooltipTrigger asChild>
         <button type="button" className="block min-w-0 max-w-full cursor-help text-left" aria-label={`${proxied ? t("audits.egressProxy") : t("audits.egressDirect")}: ${node}`}>
-          <span className={cn("inline-flex items-center gap-1.5 text-xs", proxied ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground")}>
-            <span className={cn("size-1.5 rounded-full", proxied ? "bg-emerald-500" : "bg-muted-foreground/50")} />
+          <span className={cn("inline-flex items-center gap-1.5 text-xs", proxied ? "text-blue-700 dark:text-blue-300" : "text-muted-foreground")}>
+            <span className={cn("size-1.5 rounded-full", proxied ? "bg-blue-500" : "bg-muted-foreground/50")} />
             {proxied ? t("audits.egressProxy") : t("audits.egressDirect")}
           </span>
         </button>
@@ -435,7 +435,7 @@ function statusTone(statusCode: number, hasError = false): { dot: string; text: 
   if (hasError) return { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300" };
   if (statusCode >= 500) return { dot: "bg-red-500", text: "text-red-700 dark:text-red-300" };
   if (statusCode >= 400) return { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300" };
-  if (statusCode >= 200 && statusCode < 300) return { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-300" };
+  if (statusCode >= 200 && statusCode < 300) return { dot: "bg-blue-500", text: "text-blue-700 dark:text-blue-300" };
   return { dot: "bg-muted-foreground/50", text: "text-muted-foreground" };
 }
 

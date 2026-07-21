@@ -252,6 +252,6 @@ function StatusBadge({ statusCode, failed = false }: { statusCode: number; faile
     : statusCode >= 500
     ? "bg-red-500/10 text-red-700 dark:text-red-300"
     : statusCode >= 400 ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-      : statusCode >= 200 && statusCode < 300 ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-muted text-muted-foreground";
+      : statusCode >= 200 && statusCode < 300 ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-muted text-muted-foreground";
   return <Badge variant="secondary" className={cn("min-w-9 justify-center px-1.5", className)}>{statusCode}</Badge>;
 }

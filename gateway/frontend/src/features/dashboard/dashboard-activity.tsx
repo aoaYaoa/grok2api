@@ -15,11 +15,11 @@ type DashboardActivityProps = {
 };
 
 const INTENSITY_CLASSES = [
-  "bg-emerald-500/10",
-  "bg-emerald-500/25",
-  "bg-emerald-500/45",
-  "bg-emerald-500/70",
-  "bg-emerald-500",
+  "bg-blue-500/10",
+  "bg-blue-500/25",
+  "bg-blue-500/45",
+  "bg-blue-500/70",
+  "bg-blue-500",
 ] as const;
 
 export function DashboardActivity({ dashboard, locale, loading }: DashboardActivityProps) {

@@ -511,7 +511,7 @@ function BillingUsage({ value }: { value: ClientKeyDTO }) {
     <div className="min-w-0 space-y-1.5">
       <div className="truncate text-xs tabular-nums" title={`${formatUSD(used, i18n.language)} / ${formatUSD(limit, i18n.language)}`}>{formatUSD(used, i18n.language)} / {formatUSD(limit, i18n.language)}</div>
       <div className="h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-        <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${percent}%` }} />
+        <div className="h-full rounded-full bg-blue-500 transition-[width]" style={{ width: `${percent}%` }} />
       </div>
     </div>
   );

@@ -275,7 +275,7 @@ function VideoSummary({ stats, loading, unavailable, locale }: { stats?: VideoSt
       <span className="h-3 w-px shrink-0 bg-border" aria-hidden="true" />
       <VideoSummaryItem icon={Clock} label={t("media.videos.queued")} value={value(stats?.queued)} tone="text-amber-600 dark:text-amber-400" />
       <VideoSummaryItem icon={Loader2} label={t("media.videos.inProgress")} value={value(stats?.inProgress)} tone="text-sky-600 dark:text-sky-400" />
-      <VideoSummaryItem icon={CheckCircle2} label={t("media.videos.completed")} value={value(stats?.completed)} tone="text-emerald-600 dark:text-emerald-400" />
+      <VideoSummaryItem icon={CheckCircle2} label={t("media.videos.completed")} value={value(stats?.completed)} tone="text-blue-600 dark:text-blue-400" />
       <VideoSummaryItem icon={AlertCircle} label={t("media.videos.failed")} value={value(stats?.failed)} tone="text-red-600 dark:text-red-400" />
     </div>
   );
@@ -341,7 +341,7 @@ function VideoTimes({ job, locale }: { job: MediaJobDTO; locale: string }) {
 function progressTone(status: MediaJobDTO["status"]): string {
   switch (status) {
     case "completed":
-      return "bg-emerald-500";
+      return "bg-blue-500";
     case "failed":
       return "bg-red-500";
     case "in_progress":
@@ -354,7 +354,7 @@ function progressTone(status: MediaJobDTO["status"]): string {
 function statusTone(status: MediaJobDTO["status"]): { dot: string; text: string } {
   switch (status) {
     case "completed":
-      return { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-300" };
+      return { dot: "bg-blue-500", text: "text-blue-700 dark:text-blue-300" };
     case "failed":
       return { dot: "bg-red-500", text: "text-red-700 dark:text-red-300" };
     case "in_progress":
