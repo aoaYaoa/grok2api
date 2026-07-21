@@ -90,6 +90,11 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if input.IsExtension {
 		metadata.markAccountAttempt(lease.Credential.ID)
 	}
+	inputJSON, err := encodeVideoMetadataChecked(metadata)
+	if err != nil {
+		lease.Release()
+		return media.Job{}, err
+	}
 	accountID := lease.Credential.ID
 	lease.Release()
 	token, err := security.NewOpaqueToken(18)
@@ -103,7 +108,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoMetadata(metadata), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: inputJSON, InputImageCount: len(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(externalModel, input.Resolution, input.Duration); ok {
@@ -801,7 +806,7 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 		Provider: job.Provider, Operation: audit.OperationVideo, UsageSource: audit.UsageSourceNone,
 		AccountID: accountID, AccountName: job.AccountName, StatusCode: statusCode, ErrorCode: job.ErrorCode,
 		EgressNodeID: job.EgressNodeID, EgressNodeName: job.EgressNodeName, EgressScope: job.EgressScope, EgressMode: audit.EgressMode(job.EgressMode),
-		MediaInputImages: int64(len(decodeVideoInput(job.InputJSON))),
+		MediaInputImages: int64(job.InputImageCount),
 		DurationMS:       durationMS, CreatedAt: createdAt,
 	}
 	if job.Status == media.StatusCompleted {
@@ -840,10 +845,6 @@ type videoInputMetadata struct {
 	RetryCount          int      `json:"retry_count,omitempty"`
 	AccountRetryCount   int      `json:"account_retry_count,omitempty"`
 	AttemptedAccountIDs []uint64 `json:"attempted_account_ids,omitempty"`
-}
-
-func encodeVideoInput(input VideoInput) string {
-	return encodeVideoMetadata(videoMetadataFromInput(input))
 }
 
 func videoMetadataFromInput(input VideoInput) videoInputMetadata {
@@ -929,6 +930,21 @@ func shouldSwitchVideoAccount(err error) bool {
 func encodeVideoMetadata(metadata videoInputMetadata) string {
 	data, _ := json.Marshal(metadata)
 	return string(data)
+}
+
+func encodeVideoInput(referenceURLs []string) (string, error) {
+	return encodeVideoMetadataChecked(videoInputMetadata{ImageURLs: referenceURLs})
+}
+
+func encodeVideoMetadataChecked(metadata videoInputMetadata) (string, error) {
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return "", fmt.Errorf("编码视频输入: %w", err)
+	}
+	if len(data) > media.MaxInputJSONBytes {
+		return "", ErrVideoInputTooLarge
+	}
+	return string(data), nil
 }
 
 func decodeVideoInput(value string) []string {
