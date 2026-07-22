@@ -267,6 +267,17 @@ func TestExtractStatsigActionsAndIndexesFromObfuscatedChunks(t *testing.T) {
 	if len(chunks) != 1 || chunks[0] != "https://grok.com/_next/static/chunks/0-ayohnvnb_qs.js" {
 		t.Fatalf("chunks = %#v", chunks)
 	}
+	moduleID, ok := extractStatsigSignerModuleID(`async function d2(){return e.A(4629918).then(e=>e.default())} headers.set("x-statsig-id",t)`)
+	if !ok || moduleID != 4629918 {
+		t.Fatalf("moduleID=%d ok=%v", moduleID, ok)
+	}
+	moduleChunks := extractStatsigModuleChunkURLs(`...,4629918,s=>{s.v(t=>Promise.all(["static/chunks/11l7ylw6aaq_g.js"].map(t=>s.l(t))))}`, moduleID, "https://cdn.grok.com/_next/static/chunks/0tetjbk2-s6u_.js")
+	if len(moduleChunks) != 1 || moduleChunks[0] != "https://cdn.grok.com/_next/static/chunks/11l7ylw6aaq_g.js" {
+		t.Fatalf("module chunks = %#v", moduleChunks)
+	}
+	if got := extractStatsigIndexes(`n[38],16;n[33],16;n[24],16;n[32],16`); fmt.Sprint(got) != "[38 33 24 32]" {
+		t.Fatalf("current indexes = %#v", got)
+	}
 }
 
 func TestExtractStatsigChallengeAndAnimationMaterials(t *testing.T) {
@@ -344,6 +355,31 @@ func TestFetchStatsigMaterialsCompletesAnonymousChallengeFlow(t *testing.T) {
 	}
 	if len(requests) != 6 {
 		t.Fatalf("requests=%#v", requests)
+	}
+}
+
+func TestFetchStatsigBuildFollowsTurbopackLazySignerModule(t *testing.T) {
+	const cdn = "https://cdn.grok.test/_next/static/chunks/"
+	actions := []string{strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)}
+	bodies := map[string]string{
+		cdn + "action.js":  `anonPrivateKey;createServerReference)("` + actions[0] + `");createServerReference)("` + actions[1] + `");createServerReference)("` + actions[2] + `")`,
+		cdn + "caller.js":  `async function sign(){return e.A(4629918).then(e=>e.default())} headers.set("x-statsig-id",value)`,
+		cdn + "runtime.js": `...,4629918,s=>{s.v(t=>Promise.all(["static/chunks/signer.js"].map(t=>s.l(t))))}`,
+		cdn + "signer.js":  `n[38],16;n[33],16;n[24],16;n[32],16`,
+	}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, ok := bodies[request.URL.String()]
+		if !ok {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("missing"))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	build, err := fetchStatsigBuild(context.Background(), client, statsigBootstrap{ScriptURLs: []string{cdn + "action.js", cdn + "caller.js", cdn + "runtime.js"}}, "agent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(build.Actions) != fmt.Sprint(actions) || fmt.Sprint(build.Indexes) != "[38 33 24 32]" {
+		t.Fatalf("build=%#v", build)
 	}
 }
 

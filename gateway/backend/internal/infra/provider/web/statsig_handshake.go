@@ -33,6 +33,7 @@ const (
 var (
 	statsigActionPattern              = regexp.MustCompile(`createServerReference\)\s*\(\s*["']([a-f0-9]{32,64})["']`)
 	statsigIndexPattern               = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*\[(\d+)\]\s*,\s*16`)
+	statsigLazyModulePattern          = regexp.MustCompile(`\.A\((\d+)\)`)
 	statsigChunkPattern               = regexp.MustCompile(`["']((?:/_next/)?static/chunks/[^"']+\.js)["']`)
 	statsigRelativeChunkPattern       = regexp.MustCompile(`["']([^"'/?#]+\.js)["']`)
 	statsigAnonUserPattern            = regexp.MustCompile(`anonUserId\\?"\s*:\s*\\?"([^"\\]+)`)
@@ -265,18 +266,33 @@ func fetchStatsigBuild(ctx context.Context, client statsigRequestDoer, bootstrap
 	actions := []string{}
 	indexes := []int{}
 	candidateURLs := map[string]struct{}{}
+	scripts := make([]scriptResult, 0, len(bootstrap.ScriptURLs))
+	signerModuleID := 0
 	for result := range results {
 		if result.err != nil {
 			continue
 		}
+		scripts = append(scripts, result)
 		if len(actions) < 3 && (strings.Contains(result.body, "anonPrivateKey") || strings.Contains(result.body, "userPublicKey")) {
 			actions = extractStatsigActions(result.body)
+		}
+		if signerModuleID == 0 {
+			if value, ok := extractStatsigSignerModuleID(result.body); ok {
+				signerModuleID = value
+			}
 		}
 		if len(indexes) < 4 && (strings.Contains(result.body, "880932") || strings.Contains(result.body, "obfiowerehiring")) {
 			indexes = extractStatsigIndexes(result.body)
 		}
 		if strings.Contains(result.body, "880932") || strings.Contains(result.body, "obfiowerehiring") {
 			for _, candidate := range extractStatsigChunkURLs(result.body, result.url) {
+				candidateURLs[candidate] = struct{}{}
+			}
+		}
+	}
+	if len(indexes) < 4 && signerModuleID != 0 {
+		for _, script := range scripts {
+			for _, candidate := range extractStatsigModuleChunkURLs(script.body, signerModuleID, script.url) {
 				candidateURLs[candidate] = struct{}{}
 			}
 		}
@@ -358,6 +374,51 @@ func extractStatsigIndexes(script string) []int {
 		if len(result) == 4 {
 			break
 		}
+	}
+	return result
+}
+
+func extractStatsigSignerModuleID(script string) (int, bool) {
+	marker := strings.Index(script, "x-statsig-id")
+	if marker < 0 {
+		return 0, false
+	}
+	start := marker - 4096
+	if start < 0 {
+		start = 0
+	}
+	matches := statsigLazyModulePattern.FindAllStringSubmatch(script[start:marker], -1)
+	if len(matches) == 0 || len(matches[len(matches)-1]) < 2 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(matches[len(matches)-1][1])
+	return value, err == nil && value > 0
+}
+
+func extractStatsigModuleChunkURLs(script string, moduleID int, scriptURL string) []string {
+	if moduleID <= 0 {
+		return nil
+	}
+	marker := "," + strconv.Itoa(moduleID) + ","
+	result := []string{}
+	seen := map[string]struct{}{}
+	for offset := 0; offset < len(script); {
+		relative := strings.Index(script[offset:], marker)
+		if relative < 0 {
+			break
+		}
+		start := offset + relative
+		end := start + 2048
+		if end > len(script) {
+			end = len(script)
+		}
+		for _, candidate := range extractStatsigChunkURLs(script[start:end], scriptURL) {
+			if _, ok := seen[candidate]; !ok {
+				seen[candidate] = struct{}{}
+				result = append(result, candidate)
+			}
+		}
+		offset = start + len(marker)
 	}
 	return result
 }
