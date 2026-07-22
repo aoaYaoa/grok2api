@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"testing"
@@ -106,33 +107,20 @@ func TestStatsigSignerClientRejectsRedirects(t *testing.T) {
 	}
 }
 
-func TestStatsigSignerCachesByMethodAndPathForOneHour(t *testing.T) {
+func TestStatsigSignerCachesMaterialsButRegeneratesPathSignatures(t *testing.T) {
 	var fetches int
-	var signedMeta []string
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	signer := newStatsigSigner()
 	signer.now = func() time.Time { return now }
-	signer.validateEndpoint = func(context.Context, string) error { return nil }
-	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+	signer.random = bytes.NewReader([]byte{1, 2, 3, 4, 5})
+	signer.fetchMaterials = func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error) {
 		fetches++
-		return fmt.Sprintf("meta-%d", fetches), nil
+		return statsigMaterials{
+			VerificationToken: "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE",
+			SVGData:           testStatsigSVG(),
+			Indexes:           []int{0, 1, 2, 3},
+		}, nil
 	}
-	signer.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var payload struct {
-			Environment struct {
-				MetaContent string `json:"metaContent"`
-			} `json:"environment"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		signedMeta = append(signedMeta, payload.Environment.MetaContent)
-		raw := make([]byte, 70)
-		raw[0] = byte(len(signedMeta))
-		encoded := base64.RawStdEncoding.EncodeToString(raw)
-		body, _ := json.Marshal(map[string]string{"x-statsig-id": encoded})
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: http.Header{}}, nil
-	})}
 	first, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token-a", nil, http.MethodPost, "https://grok.com/rest/test")
 	if err != nil {
 		t.Fatal(err)
@@ -141,17 +129,24 @@ func TestStatsigSignerCachesByMethodAndPathForOneHour(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fetches != 1 || len(signedMeta) != 1 || first != second {
-		t.Fatalf("cached fetches=%d signedMeta=%v first=%q second=%q", fetches, signedMeta, first, second)
+	if fetches != 1 || first == second {
+		t.Fatalf("fetches=%d first=%q second=%q", fetches, first, second)
 	}
 
-	now = now.Add(time.Hour)
+	if _, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token-a", nil, http.MethodPost, "https://grok.com/rest/other"); err != nil {
+		t.Fatal(err)
+	}
+	if fetches != 1 {
+		t.Fatalf("different path rebuilt shared materials: fetches=%d", fetches)
+	}
+
+	now = now.Add(statsigMaterialsTTL)
 	third, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token-b", nil, http.MethodPost, "https://grok.com/rest/test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fetches != 2 || third == first {
-		t.Fatalf("hourly refresh fetches=%d first=%q third=%q", fetches, first, third)
+		t.Fatalf("material refresh fetches=%d first=%q third=%q", fetches, first, third)
 	}
 
 	signer.Invalidate("https://grok.com", "https://signer.example/sign", http.MethodPost, "https://grok.com/rest/test")
@@ -162,13 +157,6 @@ func TestStatsigSignerCachesByMethodAndPathForOneHour(t *testing.T) {
 	if fetches != 3 || fourth == third {
 		t.Fatalf("invalidation fetches=%d third=%q fourth=%q", fetches, third, fourth)
 	}
-
-	if _, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token-a", nil, http.MethodPost, "https://grok.com/rest/other"); err != nil {
-		t.Fatal(err)
-	}
-	if fetches != 4 {
-		t.Fatalf("different path reused signature: fetches=%d", fetches)
-	}
 }
 
 func TestStatsigSignerGeneratesSignatureLocallyFromSiteVerification(t *testing.T) {
@@ -178,23 +166,17 @@ func TestStatsigSignerGeneratesSignatureLocallyFromSiteVerification(t *testing.T
 		t.Fatal(err)
 	}
 
-	remoteCalls := 0
 	signer := newStatsigSigner()
-	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
-		return siteVerification, nil
+	signer.fetchMaterials = func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error) {
+		return statsigMaterials{VerificationToken: siteVerification, SVGData: testStatsigSVG(), Indexes: []int{0, 1, 2, 3}}, nil
 	}
-	signer.validateEndpoint = func(context.Context, string) error { return nil }
-	signer.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		remoteCalls++
-		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("unavailable")), Header: http.Header{}}, nil
-	})}
 
 	value, source, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, http.MethodPost, "https://grok.com/rest/app-chat/conversations/new")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source != "refresh" || remoteCalls != 0 {
-		t.Fatalf("source=%q remoteCalls=%d", source, remoteCalls)
+	if source != "refresh" {
+		t.Fatalf("source=%q", source)
 	}
 	raw, err := base64.RawStdEncoding.DecodeString(value)
 	if err != nil || len(raw) != 70 {
@@ -213,12 +195,188 @@ func TestStatsigSignerGeneratesSignatureLocallyFromSiteVerification(t *testing.T
 	}
 }
 
+func TestLocalStatsigSignatureMatchesAnimationReference(t *testing.T) {
+	const verification = "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE"
+	const want = "gLACEI3xNJC7WzAI6SA7DrTydZTCpNx/jYv6LK5QRTIUML6wv9wyDmh4nF9//LXnRJVN24eUotmANCO10OK1ScwlIjrsgw"
+	materials := statsigMaterials{
+		VerificationToken: verification,
+		SVGData:           testStatsigSVG(),
+		Indexes:           []int{0, 1, 2, 3},
+	}
+	now := time.Unix(defaultStatsigEpoch+123456789, 0).UTC()
+	got, err := localStatsigSignature(http.MethodPost, "/rest/app-chat/conversations/new", materials, now, bytes.NewReader([]byte{128}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("signature = %q\nwant      = %q", got, want)
+	}
+}
+
+func TestStatsigSignatureIsFreshForEveryRequest(t *testing.T) {
+	materials := statsigMaterials{
+		VerificationToken: "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE",
+		SVGData:           testStatsigSVG(),
+		Indexes:           []int{0, 1, 2, 3},
+	}
+	signer := newStatsigSigner()
+	signer.fetchMaterials = func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error) {
+		return materials, nil
+	}
+	signer.random = bytes.NewReader([]byte{1, 2})
+	signer.now = func() time.Time { return time.Unix(defaultStatsigEpoch+123456789, 0).UTC() }
+
+	first, _, err := signer.Sign(context.Background(), "https://grok.com", "", "token", nil, http.MethodPost, "https://grok.com/rest/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := signer.Sign(context.Background(), "https://grok.com", "", "token", nil, http.MethodPost, "https://grok.com/rest/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("Statsig signature was reused instead of being generated per request")
+	}
+}
+
+func TestParseStatsigBootstrapFindsCurrentBuildScriptsAndTraceMeta(t *testing.T) {
+	body := []byte(`<html><head><meta name="baggage" content="sentry-environment=production"><meta name="sentry-trace" content="0123456789abcdef0123456789abcdef-1111111111111111-0"></head><body><script src="/_next/static/chunks/0-action.js"></script><script src="/_next/static/chunks/0-loader.js"></script></body></html>`)
+	bootstrap, err := parseStatsigBootstrap(body, "https://grok.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bootstrap.ScriptURLs) != 2 || bootstrap.ScriptURLs[0] != "https://grok.com/_next/static/chunks/0-action.js" {
+		t.Fatalf("scripts = %#v", bootstrap.ScriptURLs)
+	}
+	if bootstrap.Baggage != "sentry-environment=production" || bootstrap.SentryTrace != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("bootstrap = %#v", bootstrap)
+	}
+}
+
+func TestExtractStatsigActionsAndIndexesFromObfuscatedChunks(t *testing.T) {
+	actionChunk := `x=createServerReference)("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",x);y=createServerReference)("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",y);z=createServerReference)("cccccccccccccccccccccccccccccccccccccccc",z);anonPrivateKey`
+	actions := extractStatsigActions(actionChunk)
+	if len(actions) != 3 || actions[0] != strings.Repeat("a", 40) || actions[2] != strings.Repeat("c", 40) {
+		t.Fatalf("actions = %#v", actions)
+	}
+	indexes := extractStatsigIndexes(`obfiowerehiring;a=x[7],16;b=x[11],16;c=x[13],16;d=x[17],16`)
+	if fmt.Sprint(indexes) != "[7 11 13 17]" {
+		t.Fatalf("indexes = %#v", indexes)
+	}
+	chunks := extractStatsigChunkURLs(`a(880932);load("0-ayohnvnb_qs.js")`, "https://grok.com/_next/static/chunks/0-loader.js")
+	if len(chunks) != 1 || chunks[0] != "https://grok.com/_next/static/chunks/0-ayohnvnb_qs.js" {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+}
+
+func TestExtractStatsigChallengeAndAnimationMaterials(t *testing.T) {
+	challenge, err := extractStatsigChallenge(append(append([]byte("0:prefix:o86,"), []byte{1, 2, 3, 4}...), []byte("1:suffix")...))
+	if err != nil || !bytes.Equal(challenge, []byte{1, 2, 3, 4}) {
+		t.Fatalf("challenge=%v err=%v", challenge, err)
+	}
+	verification := base64.StdEncoding.EncodeToString(append([]byte{0, 0, 0, 0, 0, 2}, make([]byte, 42)...))
+	body := []byte(`0:{"name":"grok-site-verification","content":"` + verification + `"}\n1:` + statsigAnimationFixture())
+	materials, err := extractStatsigAnimationMaterials(body, []int{0, 1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if materials.VerificationToken != verification || materials.SVGData == "" || len(materials.Indexes) != 4 {
+		t.Fatalf("materials = %#v", materials)
+	}
+	reversed := []byte(`0:{"content":"` + verification + `","name":"grok-site-verification"}\n1:` + statsigAnimationFixture())
+	if _, err := extractStatsigAnimationMaterials(reversed, []int{0, 1, 2, 3}); err != nil {
+		t.Fatalf("reversed verification fields: %v", err)
+	}
+}
+
+func TestFetchStatsigMaterialsCompletesAnonymousChallengeFlow(t *testing.T) {
+	const baseURL = "https://grok.test"
+	actions := []string{strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)}
+	verificationBytes := append([]byte{0, 0, 0, 0, 0, 2}, make([]byte, 42)...)
+	verification := base64.StdEncoding.EncodeToString(verificationBytes)
+	var requests []string
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.Method+" "+request.URL.Path+" "+request.Header.Get("Next-Action"))
+		response := func(body string) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/c":
+			result, _ := response(`<html><head><meta name="baggage" content="bag"><meta name="sentry-trace" content="trace-span-0"></head><script src="/_next/static/chunks/action.js"></script><script src="/_next/static/chunks/xsid.js"></script></html>`)
+			result.Header.Add("Set-Cookie", "anon_session=one; Path=/; Secure")
+			return result, nil
+		case request.Method == http.MethodGet && request.URL.Path == "/_next/static/chunks/action.js":
+			return response(`anonPrivateKey;createServerReference)("` + actions[0] + `");createServerReference)("` + actions[1] + `");createServerReference)("` + actions[2] + `")`)
+		case request.Method == http.MethodGet && request.URL.Path == "/_next/static/chunks/xsid.js":
+			return response(`obfiowerehiring;x[0],16;x[1],16;x[2],16;x[3],16`)
+		case request.Method == http.MethodPost && request.Header.Get("Next-Action") == actions[0]:
+			if !strings.Contains(request.Header.Get("Cookie"), "anon_session=one") {
+				t.Fatalf("first action cookie = %q", request.Header.Get("Cookie"))
+			}
+			reader, err := multipart.NewReader(request.Body, strings.TrimPrefix(request.Header.Get("Content-Type"), "multipart/form-data; boundary=")).ReadForm(1024)
+			if err != nil || len(reader.File["1"]) != 1 || len(reader.Value["0"]) != 1 {
+				t.Fatalf("multipart form=%#v err=%v", reader, err)
+			}
+			return response(`0:{"anonUserId":"anon-123"}`)
+		case request.Method == http.MethodPost && request.Header.Get("Next-Action") == actions[1]:
+			return response("0:prefix:o86," + string([]byte{1, 2, 3, 4}) + "1:suffix")
+		case request.Method == http.MethodPost && request.Header.Get("Next-Action") == actions[2]:
+			var payload []map[string]string
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || len(payload) != 1 {
+				t.Fatalf("challenge payload=%#v err=%v", payload, err)
+			}
+			signature, err := base64.StdEncoding.DecodeString(payload[0]["signature"])
+			if err != nil || len(signature) != 64 {
+				t.Fatalf("challenge signature length=%d err=%v", len(signature), err)
+			}
+			return response(`0:{"name":"grok-site-verification","content":"` + verification + `"}\n1:` + statsigAnimationFixture())
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("missing"))}, nil
+		}
+	})}
+
+	materials, err := fetchStatsigMaterialsWithClient(context.Background(), baseURL, "test-agent", "cf_clearance=clear", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if materials.VerificationToken != verification || len(materials.Indexes) != 4 || materials.SVGData == "" {
+		t.Fatalf("materials=%#v", materials)
+	}
+	if len(requests) != 6 {
+		t.Fatalf("requests=%#v", requests)
+	}
+}
+
+func testStatsigSVG() string {
+	segments := make([]string, 16)
+	for index := range segments {
+		segments[index] = fmt.Sprintf(" %d,%d,%d,%d,%d,%d h %d s 25,64,192,230", 10+index, 20+index, 30+index, 110+index, 120+index, 130+index, 140+index)
+	}
+	return "M 10,30 C" + strings.Join(segments, " C")
+}
+
+func statsigAnimationFixture() string {
+	animations := make([][]map[string]any, 4)
+	for animation := range animations {
+		animations[animation] = make([]map[string]any, 16)
+		for index := range animations[animation] {
+			animations[animation][index] = map[string]any{
+				"color":  []int{10 + index, 20 + index, 30 + index, 110 + index, 120 + index, 130 + index},
+				"deg":    140 + index,
+				"bezier": []int{25, 64, 192, 230},
+			}
+		}
+	}
+	encoded, _ := json.Marshal(animations)
+	return string(encoded)
+}
+
 func TestStatsigSignerBoundsRefreshFailure(t *testing.T) {
 	signer := newStatsigSigner()
 	signer.refreshTimeout = 20 * time.Millisecond
-	signer.fetchMeta = func(ctx context.Context, _ string, _ string, _ *infraegress.Lease) (string, error) {
+	signer.fetchMaterials = func(ctx context.Context, _ string, _ string, _ *infraegress.Lease) (statsigMaterials, error) {
 		<-ctx.Done()
-		return "", ctx.Err()
+		return statsigMaterials{}, ctx.Err()
 	}
 
 	started := time.Now()
@@ -231,32 +389,17 @@ func TestStatsigSignerBoundsRefreshFailure(t *testing.T) {
 	}
 }
 
-func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
-	var fetches, signatures int
+func TestStatsigWarmupFetchesMaterialsOnceForSharedPaths(t *testing.T) {
+	var fetches int
 	signer := newStatsigSigner()
-	signer.validateEndpoint = func(context.Context, string) error { return nil }
-	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+	signer.random = bytes.NewReader([]byte{1, 2})
+	signer.fetchMaterials = func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error) {
 		fetches++
-		return "shared-meta", nil
+		return statsigMaterials{
+			VerificationToken: "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE",
+			SVGData:           testStatsigSVG(), Indexes: []int{0, 1, 2, 3},
+		}, nil
 	}
-	signer.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		signatures++
-		var payload struct {
-			Environment struct {
-				MetaContent string `json:"metaContent"`
-			} `json:"environment"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.Environment.MetaContent != "shared-meta" {
-			t.Fatalf("meta = %q", payload.Environment.MetaContent)
-		}
-		raw := make([]byte, 70)
-		raw[0] = byte(signatures)
-		body, _ := json.Marshal(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(raw)})
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: http.Header{}}, nil
-	})}
 	targets := []statsigWarmTarget{
 		{method: http.MethodPost, target: "https://grok.com/rest/chat"},
 		{method: http.MethodPost, target: "https://grok.com/rest/rate-limits"},
@@ -266,8 +409,8 @@ func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if warmed != len(targets) || fetches != 1 || signatures != len(targets) {
-		t.Fatalf("warmed=%d fetches=%d signatures=%d", warmed, fetches, signatures)
+	if warmed != len(targets) || fetches != 1 {
+		t.Fatalf("warmed=%d fetches=%d", warmed, fetches)
 	}
 	if warmedAgain, err := signer.Warm(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, targets); err != nil || warmedAgain != 0 || fetches != 1 {
 		t.Fatalf("cached warmup=%d fetches=%d err=%v", warmedAgain, fetches, err)
@@ -276,16 +419,10 @@ func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
 
 func TestStatsigWarmupGeneratesLocallyFromSiteVerification(t *testing.T) {
 	const siteVerification = "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE"
-	remoteCalls := 0
 	signer := newStatsigSigner()
-	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
-		return siteVerification, nil
+	signer.fetchMaterials = func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error) {
+		return statsigMaterials{VerificationToken: siteVerification, SVGData: testStatsigSVG(), Indexes: []int{0, 1, 2, 3}}, nil
 	}
-	signer.validateEndpoint = func(context.Context, string) error { return nil }
-	signer.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		remoteCalls++
-		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("unavailable")), Header: http.Header{}}, nil
-	})}
 	targets := []statsigWarmTarget{
 		{method: http.MethodPost, target: "https://grok.com/rest/app-chat/conversations/new"},
 		{method: http.MethodPost, target: "https://grok.com/rest/rate-limits"},
@@ -296,8 +433,8 @@ func TestStatsigWarmupGeneratesLocallyFromSiteVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if warmed != len(targets) || remoteCalls != 0 {
-		t.Fatalf("warmed=%d remoteCalls=%d", warmed, remoteCalls)
+	if warmed != len(targets) {
+		t.Fatalf("warmed=%d", warmed)
 	}
 }
 

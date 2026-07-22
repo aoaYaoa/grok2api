@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +26,7 @@ const (
 	defaultStatsigSignerURL = "https://grok.wodf.de/sign"
 	statsigCacheTTL         = time.Hour
 	statsigCacheMaxEntries  = 4096
+	statsigMaterialsTTL     = 15 * time.Minute
 	statsigMetaBodyLimit    = 4 << 20
 	statsigResponseLimit    = 4 << 10
 	defaultStatsigTrailer   = byte(3)
@@ -38,6 +35,11 @@ const (
 
 type statsigCacheEntry struct {
 	value     string
+	expiresAt time.Time
+}
+
+type statsigMaterialsEntry struct {
+	value     statsigMaterials
 	expiresAt time.Time
 }
 
@@ -54,11 +56,14 @@ type statsigWarmTarget struct {
 type statsigSigner struct {
 	client           *http.Client
 	fetchMeta        func(context.Context, string, string, *infraegress.Lease) (string, error)
+	fetchMaterials   func(context.Context, string, string, *infraegress.Lease) (statsigMaterials, error)
 	validateEndpoint func(context.Context, string) error
 	now              func() time.Time
+	random           io.Reader
 	refreshTimeout   time.Duration
 	mu               sync.Mutex
 	entries          map[string]statsigCacheEntry
+	materials        map[string]statsigMaterialsEntry
 	refreshes        singleflight.Group
 }
 
@@ -69,10 +74,13 @@ func newStatsigSigner() *statsigSigner {
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		fetchMeta:        fetchStatsigMetaContent,
+		fetchMaterials:   fetchStatsigMaterials,
 		validateEndpoint: validateStatsigSignerEndpoint,
 		now:              time.Now,
-		refreshTimeout:   10 * time.Second,
+		random:           rand.Reader,
+		refreshTimeout:   25 * time.Second,
 		entries:          make(map[string]statsigCacheEntry),
+		materials:        make(map[string]statsigMaterialsEntry),
 	}
 }
 
@@ -81,13 +89,19 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 	if err != nil {
 		return "", "", err
 	}
+	// Legacy entries are only retained for compatibility with an in-flight
+	// rejected request. New signatures are never cached because their counter is time-bound.
 	if value, ok := s.cached(key, s.now().UTC()); ok {
 		return value, "cache", nil
 	}
-	value, err, _ := s.refreshes.Do(key, func() (any, error) {
+	materialsKey := statsigMaterialsCacheKey(baseURL, lease)
+	value, err, _ := s.refreshes.Do(materialsKey, func() (any, error) {
 		now := s.now().UTC()
-		if cached, ok := s.cached(key, now); ok {
-			return statsigSignResult{value: cached, source: "cache"}, nil
+		if cached, ok := s.cachedMaterials(materialsKey, now); ok {
+			return struct {
+				materials statsigMaterials
+				source    string
+			}{cached, "cache"}, nil
 		}
 		refreshCtx := ctx
 		cancel := func() {}
@@ -95,137 +109,43 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 			refreshCtx, cancel = context.WithTimeout(ctx, s.refreshTimeout)
 		}
 		defer cancel()
-		fresh, refreshErr := s.freshSignature(refreshCtx, baseURL, signerURL, token, lease, method, path)
+		fresh, refreshErr := s.fetchMaterials(refreshCtx, baseURL, token, lease)
 		if refreshErr != nil {
-			if stale, ok := s.stale(key); ok {
-				return statsigSignResult{value: stale, source: "stale"}, nil
-			}
-			return statsigSignResult{}, refreshErr
+			return nil, refreshErr
 		}
-		s.store(key, fresh, now.Add(statsigCacheTTL), now)
-		return statsigSignResult{value: fresh, source: "refresh"}, nil
+		s.storeMaterials(materialsKey, fresh, now.Add(statsigMaterialsTTL), now)
+		return struct {
+			materials statsigMaterials
+			source    string
+		}{fresh, "refresh"}, nil
 	})
 	if err != nil {
 		return "", "", err
 	}
-	result := value.(statsigSignResult)
-	return result.value, result.source, nil
+	result := value.(struct {
+		materials statsigMaterials
+		source    string
+	})
+	signature, err := localStatsigSignature(method, path, result.materials, s.now().UTC(), s.random)
+	if err != nil {
+		return "", "", err
+	}
+	return signature, result.source, nil
 }
 
-// Warm 使用一次 metaContent 请求预热多个常用签名键，避免按账号或按路径重复抓取首页。
+// Warm 只预热当前出口的匿名 challenge 材料；具体签名必须按请求实时生成。
 func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, targets []statsigWarmTarget) (int, error) {
-	now := s.now().UTC()
-	type pendingTarget struct {
-		key    string
-		method string
-		path   string
-	}
-	pending := make([]pendingTarget, 0, len(targets))
-	for _, target := range targets {
-		key, path, err := statsigSignatureKey(baseURL, signerURL, target.method, target.target)
-		if err != nil {
-			return 0, err
-		}
-		if _, ok := s.cached(key, now); ok {
-			continue
-		}
-		pending = append(pending, pendingTarget{key: key, method: target.method, path: path})
-	}
-	if len(pending) == 0 {
+	if len(targets) == 0 {
 		return 0, nil
 	}
-	meta, err := s.fetchMeta(ctx, baseURL, token, lease)
+	_, source, err := s.Sign(ctx, baseURL, signerURL, token, lease, targets[0].method, targets[0].target)
 	if err != nil {
 		return 0, err
 	}
-	warmed := 0
-	for _, target := range pending {
-		value, signErr := localStatsigSignature(target.method, target.path, meta, s.now().UTC(), rand.Reader)
-		if signErr != nil {
-			value, signErr = s.requestSignature(ctx, signerURL, target.method, target.path, meta)
-		}
-		if signErr != nil {
-			return warmed, signErr
-		}
-		s.store(target.key, value, now.Add(statsigCacheTTL), now)
-		warmed++
+	if source == "cache" {
+		return 0, nil
 	}
-	return warmed, nil
-}
-
-func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, path string) (string, error) {
-	meta, err := s.fetchMeta(ctx, baseURL, token, lease)
-	if err != nil {
-		return "", err
-	}
-	if signature, localErr := localStatsigSignature(method, path, meta, s.now().UTC(), rand.Reader); localErr == nil {
-		return signature, nil
-	}
-	signature, err := s.requestSignature(ctx, signerURL, method, path, meta)
-	if err == nil {
-		return signature, nil
-	}
-
-	meta, refreshErr := s.fetchMeta(ctx, baseURL, token, lease)
-	if refreshErr != nil {
-		return "", fmt.Errorf("刷新 Statsig metaContent: %w", refreshErr)
-	}
-	if signature, localErr := localStatsigSignature(method, path, meta, s.now().UTC(), rand.Reader); localErr == nil {
-		return signature, nil
-	}
-	signature, retryErr := s.requestSignature(ctx, signerURL, method, path, meta)
-	if retryErr != nil {
-		return "", fmt.Errorf("Statsig 签名失败: %w", retryErr)
-	}
-	return signature, nil
-}
-
-func localStatsigSignature(method, path, metaContent string, now time.Time, random io.Reader) (string, error) {
-	fingerprint, err := base64.StdEncoding.DecodeString(strings.TrimSpace(metaContent))
-	if err != nil {
-		fingerprint, err = base64.RawStdEncoding.DecodeString(strings.TrimSpace(metaContent))
-	}
-	if err != nil || len(fingerprint) != 48 {
-		return "", fmt.Errorf("Statsig metaContent 格式无效")
-	}
-	if random == nil {
-		random = rand.Reader
-	}
-	method = strings.ToUpper(strings.TrimSpace(method))
-	if method == "" {
-		method = http.MethodPost
-	}
-	if path == "" {
-		path = "/"
-	}
-	counter := now.Unix() - defaultStatsigEpoch
-	if counter < 0 {
-		counter = 0
-	}
-	nonce := make([]byte, 16)
-	if _, err := io.ReadFull(random, nonce); err != nil {
-		return "", fmt.Errorf("生成 Statsig nonce: %w", err)
-	}
-	digest := sha256.Sum256([]byte(method + "!" + path + "!" + strconv.FormatInt(counter, 10) + hex.EncodeToString(nonce)))
-	randomByte := make([]byte, 1)
-	if _, err := io.ReadFull(random, randomByte); err != nil {
-		return "", fmt.Errorf("生成 Statsig 掩码: %w", err)
-	}
-
-	payload := make([]byte, 0, 69)
-	payload = append(payload, fingerprint...)
-	var littleEndianCounter [4]byte
-	binary.LittleEndian.PutUint32(littleEndianCounter[:], uint32(counter))
-	payload = append(payload, littleEndianCounter[:]...)
-	payload = append(payload, digest[:16]...)
-	payload = append(payload, defaultStatsigTrailer)
-
-	encoded := make([]byte, 1, 70)
-	encoded[0] = randomByte[0]
-	for _, value := range payload {
-		encoded = append(encoded, value^randomByte[0])
-	}
-	return base64.RawStdEncoding.EncodeToString(encoded), nil
+	return len(targets), nil
 }
 
 func (s *statsigSigner) Invalidate(baseURL, signerURL, method, target string) {
@@ -235,13 +155,43 @@ func (s *statsigSigner) Invalidate(baseURL, signerURL, method, target string) {
 	}
 	s.mu.Lock()
 	delete(s.entries, key)
+	clear(s.materials)
 	s.mu.Unlock()
 }
 
 func (s *statsigSigner) Clear() {
 	s.mu.Lock()
 	clear(s.entries)
+	clear(s.materials)
 	s.mu.Unlock()
+}
+
+func (s *statsigSigner) cachedMaterials(key string, now time.Time) (statsigMaterials, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.materials[key]
+	if !ok || !now.Before(entry.expiresAt) {
+		return statsigMaterials{}, false
+	}
+	return entry.value, true
+}
+
+func (s *statsigSigner) storeMaterials(key string, value statsigMaterials, expiresAt, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for existingKey, entry := range s.materials {
+		if !now.Before(entry.expiresAt) {
+			delete(s.materials, existingKey)
+		}
+	}
+	s.materials[key] = statsigMaterialsEntry{value: value, expiresAt: expiresAt}
+}
+
+func statsigMaterialsCacheKey(baseURL string, lease *infraegress.Lease) string {
+	if lease == nil {
+		return strings.TrimRight(baseURL, "/") + "\x00direct"
+	}
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s", strings.TrimRight(baseURL, "/"), lease.NodeID, lease.ProxyURL, lease.UserAgent)
 }
 
 func (s *statsigSigner) cached(key string, now time.Time) (string, bool) {
