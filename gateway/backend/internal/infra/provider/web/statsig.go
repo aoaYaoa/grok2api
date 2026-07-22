@@ -3,12 +3,17 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +32,8 @@ const (
 	statsigCacheMaxEntries  = 4096
 	statsigMetaBodyLimit    = 4 << 20
 	statsigResponseLimit    = 4 << 10
+	defaultStatsigTrailer   = byte(3)
+	defaultStatsigEpoch     = int64(1682924400)
 )
 
 type statsigCacheEntry struct {
@@ -49,6 +56,7 @@ type statsigSigner struct {
 	fetchMeta        func(context.Context, string, string, *infraegress.Lease) (string, error)
 	validateEndpoint func(context.Context, string) error
 	now              func() time.Time
+	refreshTimeout   time.Duration
 	mu               sync.Mutex
 	entries          map[string]statsigCacheEntry
 	refreshes        singleflight.Group
@@ -63,6 +71,7 @@ func newStatsigSigner() *statsigSigner {
 		fetchMeta:        fetchStatsigMetaContent,
 		validateEndpoint: validateStatsigSignerEndpoint,
 		now:              time.Now,
+		refreshTimeout:   10 * time.Second,
 		entries:          make(map[string]statsigCacheEntry),
 	}
 }
@@ -80,7 +89,13 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 		if cached, ok := s.cached(key, now); ok {
 			return statsigSignResult{value: cached, source: "cache"}, nil
 		}
-		fresh, refreshErr := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
+		refreshCtx := ctx
+		cancel := func() {}
+		if s.refreshTimeout > 0 {
+			refreshCtx, cancel = context.WithTimeout(ctx, s.refreshTimeout)
+		}
+		defer cancel()
+		fresh, refreshErr := s.freshSignature(refreshCtx, baseURL, signerURL, token, lease, method, path)
 		if refreshErr != nil {
 			if stale, ok := s.stale(key); ok {
 				return statsigSignResult{value: stale, source: "stale"}, nil
@@ -140,6 +155,9 @@ func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, 
 	if err != nil {
 		return "", err
 	}
+	if signature, localErr := localStatsigSignature(method, path, meta, s.now().UTC(), rand.Reader); localErr == nil {
+		return signature, nil
+	}
 	signature, err := s.requestSignature(ctx, signerURL, method, path, meta)
 	if err == nil {
 		return signature, nil
@@ -149,11 +167,62 @@ func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, 
 	if refreshErr != nil {
 		return "", fmt.Errorf("刷新 Statsig metaContent: %w", refreshErr)
 	}
+	if signature, localErr := localStatsigSignature(method, path, meta, s.now().UTC(), rand.Reader); localErr == nil {
+		return signature, nil
+	}
 	signature, retryErr := s.requestSignature(ctx, signerURL, method, path, meta)
 	if retryErr != nil {
 		return "", fmt.Errorf("Statsig 签名失败: %w", retryErr)
 	}
 	return signature, nil
+}
+
+func localStatsigSignature(method, path, metaContent string, now time.Time, random io.Reader) (string, error) {
+	fingerprint, err := base64.StdEncoding.DecodeString(strings.TrimSpace(metaContent))
+	if err != nil {
+		fingerprint, err = base64.RawStdEncoding.DecodeString(strings.TrimSpace(metaContent))
+	}
+	if err != nil || len(fingerprint) != 48 {
+		return "", fmt.Errorf("Statsig metaContent 格式无效")
+	}
+	if random == nil {
+		random = rand.Reader
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = http.MethodPost
+	}
+	if path == "" {
+		path = "/"
+	}
+	counter := now.Unix() - defaultStatsigEpoch
+	if counter < 0 {
+		counter = 0
+	}
+	nonce := make([]byte, 16)
+	if _, err := io.ReadFull(random, nonce); err != nil {
+		return "", fmt.Errorf("生成 Statsig nonce: %w", err)
+	}
+	digest := sha256.Sum256([]byte(method + "!" + path + "!" + strconv.FormatInt(counter, 10) + hex.EncodeToString(nonce)))
+	randomByte := make([]byte, 1)
+	if _, err := io.ReadFull(random, randomByte); err != nil {
+		return "", fmt.Errorf("生成 Statsig 掩码: %w", err)
+	}
+
+	payload := make([]byte, 0, 69)
+	payload = append(payload, fingerprint...)
+	var littleEndianCounter [4]byte
+	binary.LittleEndian.PutUint32(littleEndianCounter[:], uint32(counter))
+	payload = append(payload, littleEndianCounter[:]...)
+	payload = append(payload, digest[:16]...)
+	payload = append(payload, defaultStatsigTrailer)
+
+	encoded := make([]byte, 1, 70)
+	encoded[0] = randomByte[0]
+	for _, value := range payload {
+		encoded = append(encoded, value^randomByte[0])
+	}
+	return base64.RawStdEncoding.EncodeToString(encoded), nil
 }
 
 func (s *statsigSigner) Invalidate(baseURL, signerURL, method, target string) {

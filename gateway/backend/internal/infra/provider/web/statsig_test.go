@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -167,6 +168,66 @@ func TestStatsigSignerCachesByMethodAndPathForOneHour(t *testing.T) {
 	}
 	if fetches != 4 {
 		t.Fatalf("different path reused signature: fetches=%d", fetches)
+	}
+}
+
+func TestStatsigSignerGeneratesSignatureLocallyFromSiteVerification(t *testing.T) {
+	const siteVerification = "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE"
+	wantFingerprint, err := base64.StdEncoding.DecodeString(siteVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remoteCalls := 0
+	signer := newStatsigSigner()
+	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+		return siteVerification, nil
+	}
+	signer.validateEndpoint = func(context.Context, string) error { return nil }
+	signer.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		remoteCalls++
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("unavailable")), Header: http.Header{}}, nil
+	})}
+
+	value, source, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, http.MethodPost, "https://grok.com/rest/app-chat/conversations/new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != "refresh" || remoteCalls != 0 {
+		t.Fatalf("source=%q remoteCalls=%d", source, remoteCalls)
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(value)
+	if err != nil || len(raw) != 70 {
+		t.Fatalf("signature length=%d err=%v", len(raw), err)
+	}
+	random := raw[0]
+	decoded := make([]byte, len(raw)-1)
+	for index, current := range raw[1:] {
+		decoded[index] = current ^ random
+	}
+	if !bytes.Equal(decoded[:48], wantFingerprint) {
+		t.Fatal("signature did not embed the current site-verification fingerprint")
+	}
+	if decoded[68] != 3 {
+		t.Fatalf("trailer=%d", decoded[68])
+	}
+}
+
+func TestStatsigSignerBoundsRefreshFailure(t *testing.T) {
+	signer := newStatsigSigner()
+	signer.refreshTimeout = 20 * time.Millisecond
+	signer.fetchMeta = func(ctx context.Context, _ string, _ string, _ *infraegress.Lease) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	started := time.Now()
+	_, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, http.MethodPost, "https://grok.com/rest/app-chat/conversations/new")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("refresh took %s", elapsed)
 	}
 }
 
