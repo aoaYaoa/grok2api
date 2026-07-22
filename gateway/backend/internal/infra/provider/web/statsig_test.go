@@ -274,6 +274,33 @@ func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
 	}
 }
 
+func TestStatsigWarmupGeneratesLocallyFromSiteVerification(t *testing.T) {
+	const siteVerification = "MIKQDXG0EDvbsIhpoLuONHL1FEIkXP8NC3qsLtDFspSwPjA/XLKO6Pgc3/98NWfE"
+	remoteCalls := 0
+	signer := newStatsigSigner()
+	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+		return siteVerification, nil
+	}
+	signer.validateEndpoint = func(context.Context, string) error { return nil }
+	signer.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		remoteCalls++
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("unavailable")), Header: http.Header{}}, nil
+	})}
+	targets := []statsigWarmTarget{
+		{method: http.MethodPost, target: "https://grok.com/rest/app-chat/conversations/new"},
+		{method: http.MethodPost, target: "https://grok.com/rest/rate-limits"},
+		{method: http.MethodPost, target: "https://grok.com/rest/media/post/create"},
+	}
+
+	warmed, err := signer.Warm(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warmed != len(targets) || remoteCalls != 0 {
+		t.Fatalf("warmed=%d remoteCalls=%d", warmed, remoteCalls)
+	}
+}
+
 func TestApplySignedStatsigUsesManualValue(t *testing.T) {
 	value := base64.RawStdEncoding.EncodeToString(make([]byte, 70))
 	adapter := &Adapter{cfg: Config{BaseURL: "https://grok.com", StatsigMode: "manual", StatsigManualValue: value}}

@@ -140,7 +140,10 @@ func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token stri
 	}
 	warmed := 0
 	for _, target := range pending {
-		value, signErr := s.requestSignature(ctx, signerURL, target.method, target.path, meta)
+		value, signErr := localStatsigSignature(target.method, target.path, meta, s.now().UTC(), rand.Reader)
+		if signErr != nil {
+			value, signErr = s.requestSignature(ctx, signerURL, target.method, target.path, meta)
+		}
 		if signErr != nil {
 			return warmed, signErr
 		}
