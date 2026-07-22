@@ -297,7 +297,7 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 
 func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, error) {
 	for attempt := 1; attempt <= videoModerationAttempts; attempt++ {
-		response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+		response, err := a.postStreamingJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 		if err != nil {
 			return provider.VideoResult{}, nil, 0, err
 		}
@@ -831,6 +831,9 @@ func webMediaStreamError(value map[string]any) error {
 	message := safeWebMediaDiagnostic(firstString(value, "message", "error", "detail"), webMediaDiagnosticFieldLimit)
 	if message == "" {
 		message = "未提供错误详情"
+	}
+	if code, _ := numberAsInt(value["code"]); code == 7 || strings.Contains(strings.ToLower(message), "anti-bot") {
+		return fmt.Errorf("视频上游错误: %w: %s", errWebAntiBot, message)
 	}
 	return fmt.Errorf("视频上游错误: %s", message)
 }

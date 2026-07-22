@@ -654,9 +654,15 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 		if json.Unmarshal(data, &message) != nil {
 			continue
 		}
-		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
+		if upstreamErr := imagineWebSocketError(message); upstreamErr != nil {
+			status := 0
+			if errors.Is(upstreamErr, errWebAntiBot) {
+				status = http.StatusForbidden
+			}
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, upstreamErr)
+			if status == http.StatusForbidden {
+				return antiBotProviderResponse(), nil
+			}
 			return nil, upstreamErr
 		}
 		collector.Accept(message)
@@ -765,7 +771,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 		}
 	}
 	payload := buildImageEditPayload(request.Prompt, refs, parentID, ratio)
-	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine/post/"+parentID)
+	response, err := a.postStreamingJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine/post/"+parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -855,6 +861,19 @@ func parseImageEditStreamFrame(data []byte) (imageEditStreamFrame, bool) {
 	}
 	moderated, _ := imageResponse["moderated"].(bool)
 	return imageEditStreamFrame{URL: absoluteAssetURL(rawURL), Progress: progress, Moderated: moderated}, true
+}
+
+func imagineWebSocketError(message map[string]any) error {
+	if message == nil || message["type"] != "error" {
+		return nil
+	}
+	if value, ok := message["error"].(map[string]any); ok {
+		return webResponseError(value)
+	}
+	if value, ok := message["error"].(string); ok && strings.TrimSpace(value) != "" {
+		return webResponseError(map[string]any{"message": value, "code": message["code"]})
+	}
+	return webResponseError(message)
 }
 
 func (a *Adapter) streamImageEdit(
@@ -1476,35 +1495,82 @@ func (a *Adapter) postJSON(ctx context.Context, cfg Config, lease *egress.Lease,
 	return a.postJSONWithReferer(ctx, cfg, lease, token, endpoint, payload, timeout, cfg.BaseURL+"/imagine")
 }
 
+func (a *Adapter) postStreamingJSON(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, payload any, timeout time.Duration) (*http.Response, error) {
+	return a.postStreamingJSONWithReferer(ctx, cfg, lease, token, endpoint, payload, timeout, cfg.BaseURL+"/imagine")
+}
+
 func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, payload any, timeout time.Duration, referer string) (*http.Response, error) {
 	data, _ := json.Marshal(payload)
 	for attempt := 0; attempt < 2; attempt++ {
-		requestCtx, cancel := context.WithTimeout(ctx, timeout)
-		request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(data))
+		response, err := a.postJSONWithRefererAttempt(ctx, cfg, lease, token, endpoint, data, timeout, referer)
 		if err != nil {
-			cancel()
-			return nil, err
-		}
-		request.Header = buildHeaders(token, lease, "application/json")
-		applyAppHeaders(request.Header, cfg.BaseURL, referer)
-		a.applySignedStatsig(requestCtx, request, token, lease)
-		response, err := lease.Do(request)
-		if err != nil {
-			cancel()
 			return nil, err
 		}
 		if response.StatusCode == http.StatusForbidden {
 			if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
 				_ = response.Body.Close()
-				cancel()
 				continue
 			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, nil)
 		}
-		response.Body = &cancelBody{ReadCloser: response.Body, cancel: cancel}
 		return response, nil
 	}
 	return nil, fmt.Errorf("Grok Web Statsig 刷新失败")
+}
+
+func (a *Adapter) postStreamingJSONWithReferer(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, payload any, timeout time.Duration, referer string) (*http.Response, error) {
+	data, _ := json.Marshal(payload)
+	for attempt := 0; attempt < 2; attempt++ {
+		response, err := a.postJSONWithRefererAttempt(ctx, cfg, lease, token, endpoint, data, timeout, referer)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if response.StatusCode == http.StatusForbidden && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
+				_ = response.Body.Close()
+				continue
+			}
+			if response.StatusCode == http.StatusForbidden {
+				a.feedbackAntiBot(ctx, lease, endpoint)
+			}
+			return response, nil
+		}
+		prepared, preflightErr := preflightUpstream(response.Body)
+		if preflightErr == nil {
+			response.Body = prepared
+			return response, nil
+		}
+		_ = response.Body.Close()
+		if errors.Is(preflightErr, errWebAntiBot) {
+			if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
+				continue
+			}
+			a.feedbackAntiBot(ctx, lease, endpoint)
+			providerResponse := antiBotProviderResponse()
+			return &http.Response{StatusCode: providerResponse.StatusCode, Status: providerResponse.Status, Header: providerResponse.Header, Body: providerResponse.Body}, nil
+		}
+		return nil, preflightErr
+	}
+	return nil, fmt.Errorf("Grok Web Statsig 刷新失败")
+}
+
+func (a *Adapter) postJSONWithRefererAttempt(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, data []byte, timeout time.Duration, referer string) (*http.Response, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	request.Header = buildHeaders(token, lease, "application/json")
+	applyAppHeaders(request.Header, cfg.BaseURL, referer)
+	a.applySignedStatsig(requestCtx, request, token, lease)
+	response, err := lease.Do(request)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	response.Body = &cancelBody{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
 }
 
 func (a *Adapter) imageResponse(ctx context.Context, credential account.Credential, urls, blobs []string, count int, format string) (*provider.Response, error) {
@@ -1606,9 +1672,12 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 		if json.Unmarshal(data, &message) != nil {
 			continue
 		}
-		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
+		if upstreamErr := imagineWebSocketError(message); upstreamErr != nil {
+			status := 0
+			if errors.Is(upstreamErr, errWebAntiBot) {
+				status = http.StatusForbidden
+			}
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, upstreamErr)
 			_ = writer.CloseWithError(upstreamErr)
 			return
 		}

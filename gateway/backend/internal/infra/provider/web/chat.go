@@ -280,8 +280,15 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 					if errorValue, ok := root["error"].(map[string]any); ok {
 						return nil, webResponseError(errorValue)
 					}
-					if result, ok := root["result"].(map[string]any); ok && (result["conversation"] != nil || result["response"] != nil) {
-						return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+					if result, ok := root["result"].(map[string]any); ok {
+						if response, ok := result["response"].(map[string]any); ok {
+							if errorValue, ok := response["error"].(map[string]any); ok {
+								return nil, webResponseError(errorValue)
+							}
+						}
+						if result["conversation"] != nil || result["response"] != nil {
+							return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+						}
 					}
 				}
 			}
@@ -941,7 +948,7 @@ func webResponseError(value map[string]any) error {
 	}
 	code, _ := numberAsInt(value["code"])
 	if code == 7 || strings.Contains(strings.ToLower(message), "anti-bot") {
-		return fmt.Errorf("%w: %s", errWebAntiBot, message)
+		return fmt.Errorf("%w: Grok Web 出口会话被上游反机器人规则拒绝", errWebAntiBot)
 	}
 	normalized := strings.ToLower(message)
 	if strings.Contains(normalized, "usage limit") || strings.Contains(normalized, "usage quota") {

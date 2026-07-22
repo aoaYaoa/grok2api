@@ -576,6 +576,93 @@ func TestImageEditRejectsUnconfirmedCountAndResolution(t *testing.T) {
 	}
 }
 
+func TestPostStreamingJSONRetriesStreamAntiBotOnce(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/rest/app-chat/conversations/new" {
+			http.NotFound(writer, request)
+			return
+		}
+		requests++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			_, _ = io.WriteString(writer, `data: {"error":{"message":"Request rejected by anti-bot rules.","code":7}}`+"\n")
+			return
+		}
+		_, _ = io.WriteString(writer, `data: {"result":{"conversation":{"conversationId":"conv_retry"}}}`+"\n")
+		_, _ = io.WriteString(writer, `data: {"result":{"response":{"token":"recovered","isThinking":false,"messageTag":"final"}}}`+"\n")
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "url"}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	seed := base64.RawStdEncoding.EncodeToString(make([]byte, 70))
+	key, _, err := statsigSignatureKey(server.URL, adapter.config().StatsigSignerURL, http.MethodPost, server.URL+"/rest/app-chat/conversations/new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.statsig.entries[key] = statsigCacheEntry{value: seed, expiresAt: time.Now().Add(time.Hour)}
+	lease, err := adapter.egress.AcquireCredential(context.Background(), egressdomain.ScopeWeb, account.Credential{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	response, err := adapter.postStreamingJSONWithReferer(context.Background(), adapter.config(), lease, "test-sso", server.URL+"/rest/app-chat/conversations/new", map[string]any{"message": "retry"}, time.Second, server.URL+"/imagine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("recovered")) {
+		t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
+	}
+}
+
+func TestPostStreamingJSONStopsAfterSecondStreamAntiBot(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/rest/app-chat/conversations/new" {
+			http.NotFound(writer, request)
+			return
+		}
+		requests++
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, `data: {"error":{"message":"Request rejected by anti-bot rules.","code":7}}`+"\n")
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "url"}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	lease, err := adapter.egress.AcquireCredential(context.Background(), egressdomain.ScopeWeb, account.Credential{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	response, err := adapter.postStreamingJSONWithReferer(context.Background(), adapter.config(), lease, "test-sso", server.URL+"/rest/app-chat/conversations/new", map[string]any{"message": "retry"}, time.Second, server.URL+"/imagine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusForbidden || !bytes.Contains(body, []byte("反机器人")) {
+		t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
+	}
+}
+
 func TestBuildImageEditPayloadMatchesCapturedAspectRatioShape(t *testing.T) {
 	payload := buildImageEditPayload("改成兔子", []string{"https://assets.grok.com/users/test/reference/content"}, "post_1", "1:1")
 	metadata, _ := payload["responseMetadata"].(map[string]any)
@@ -626,6 +713,16 @@ func TestParseImageEditStreamFrame(t *testing.T) {
 	frame, ok = parseImageEditStreamFrame([]byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/edit/image.jpg","isFinal":true,"moderated":true}}}}`))
 	if !ok || frame.Progress != 100 || !frame.Moderated {
 		t.Fatalf("final frame = %#v ok=%t", frame, ok)
+	}
+}
+
+func TestImagineWebSocketClassifiesAntiBot(t *testing.T) {
+	err := imagineWebSocketError(map[string]any{
+		"type":  "error",
+		"error": map[string]any{"message": "Request rejected by anti-bot rules.", "code": float64(7)},
+	})
+	if !errors.Is(err, errWebAntiBot) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -878,6 +975,13 @@ func TestPreflightRejectsInBandErrorBeforeStreaming(t *testing.T) {
 
 func TestPreflightClassifiesAntiBotRejection(t *testing.T) {
 	source := io.NopCloser(strings.NewReader(`{"error":{"message":"Request rejected by anti-bot rules.","code":7,"details":[]}}` + "\n"))
+	if _, err := preflightUpstream(source); !errors.Is(err, errWebAntiBot) || strings.Contains(err.Error(), "Request rejected") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPreflightClassifiesNestedAntiBotRejection(t *testing.T) {
+	source := io.NopCloser(strings.NewReader(`{"result":{"response":{"error":{"message":"Request rejected by anti-bot rules.","code":7}}}}` + "\n"))
 	if _, err := preflightUpstream(source); !errors.Is(err, errWebAntiBot) {
 		t.Fatalf("error = %v", err)
 	}
@@ -1334,6 +1438,19 @@ func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	status, ok := provider.ErrorHTTPStatus(err)
 	if !ok || status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+}
+
+func TestVideoStreamClassifiesAntiBot(t *testing.T) {
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"error":{"message":"Request rejected by anti-bot rules.","code":7}}` + "\n",
+		)),
+	}
+	_, _, err := parseVideoStream(response, nil)
+	if !errors.Is(err, errWebAntiBot) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
