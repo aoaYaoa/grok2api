@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -635,6 +636,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
+		s.logVideoGenerationFailure(job, lease.Credential, err)
 		if shouldSwitchVideoAccount(err) {
 			lease.Release()
 			fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata)
@@ -994,6 +996,30 @@ func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, 
 		s.logger.Error("video_usage_record_failed", "job_id", job.ID, "event_id", "video_usage_"+job.ID, "error", auditErr)
 	}
 	s.cancelBillingReservation("video_usage_" + job.ID)
+}
+
+func (s *Service) logVideoGenerationFailure(job media.Job, credential account.Credential, err error) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	attributes := []any{
+		"job_id", job.ID,
+		"request_id", job.RequestID,
+		"account_id", credential.ID,
+		"provider", credential.Provider,
+		"model", job.UpstreamModel,
+		"egress_scope", job.EgressScope,
+		"egress_mode", job.EgressMode,
+		"error", sanitizeDiagnosticText(err.Error(), 512),
+	}
+	if status, ok := provider.ErrorHTTPStatus(err); ok {
+		attributes = append(attributes, "upstream_status", status)
+	}
+	if job.EgressNodeID != nil {
+		attributes = append(attributes, "egress_node_id", *job.EgressNodeID, "egress_node_name", job.EgressNodeName)
+	}
+	logger.Warn("video_generation_failed", attributes...)
 }
 
 func (s *Service) deferVideoJob(ctx context.Context, job media.Job) {

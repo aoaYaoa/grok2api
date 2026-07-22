@@ -23,7 +23,7 @@ import (
 
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 const nodeSnapshotTTL = time.Second
-const stickyProxyRetryLimit = 2
+const proxyPoolRetryLimit = 2
 const clientCacheIdleTTL = 30 * time.Minute
 const clientCacheCleanupInterval = time.Minute
 const maxCachedClients = 4096
@@ -43,6 +43,7 @@ type Lease struct {
 	client           requestClient
 	browser          *browserClient
 	sticky           bool
+	proxyPool        bool
 	clearanceKey     string
 	clearanceManager *Manager
 	release          func()
@@ -169,9 +170,9 @@ func (m *Manager) AcquireCredential(ctx context.Context, scope domain.Scope, cre
 		identity = string(credential.Provider) + "_" + strconv.FormatUint(credential.ID, 10)
 	}
 	// Web and Console accounts can be two database projections of the same SSO
-	// login.  Resin must see one stable account identity across both channels;
+	// login. Resin must see one stable account identity across both channels;
 	// otherwise the proxy rotates the IP while the clearance remains bound to
-	// the other lease.  The digest is non-reversible and is only used as a proxy
+	// the other lease. The digest is non-reversible and is only used as a proxy
 	// template account label.
 	if strings.TrimSpace(credential.EgressIdentity) == "" && credential.AuthType == accountdomain.AuthTypeSSO && strings.TrimSpace(credential.EncryptedAccessToken) != "" {
 		token, decryptErr := m.cipher.Decrypt(credential.EncryptedAccessToken)
@@ -213,7 +214,11 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 				continue
 			}
 			configured = true
-			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
+			proxyPool := m.isProxyPoolNode(node)
+			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) || proxyPool {
+				if proxyPool {
+					node.Health, node.FailureCount, node.CooldownUntil, node.LastError = 1, 0, nil, ""
+				}
 				candidateAvailable = append(candidateAvailable, node)
 			}
 		}
@@ -243,6 +248,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		return nil, false, err
 	}
 	sticky := strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+	proxyPool := selected.ProxyPool || sticky
 	if sticky {
 		accountKey := accountFromContext(ctx)
 		if accountKey == "" && strings.TrimSpace(affinity) != "" {
@@ -296,7 +302,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	m.mu.Unlock()
 	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != ""})
 	var once sync.Once
-	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, clearanceKey: clearanceKey, clearanceManager: m, release: func() {
+	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, proxyPool: proxyPool, clearanceKey: clearanceKey, clearanceManager: m, release: func() {
 		once.Do(func() {
 			m.mu.Lock()
 			m.inflight[selected.ID]--
@@ -393,7 +399,7 @@ func fallbackScopes(scope domain.Scope) []domain.Scope {
 		return []domain.Scope{domain.ScopeWebAsset, domain.ScopeWeb}
 	}
 	if scope == domain.ScopeConsole {
-		// Console uses the same browser/clearance surface as Grok Web.  A
+		// Console uses the same browser/clearance surface as Grok Web. A
 		// dedicated Console node is preferred, but a Web node is a safe and
 		// expected fallback for deployments that configure one shared pool.
 		return []domain.Scope{domain.ScopeConsole, domain.ScopeWeb}
@@ -462,9 +468,9 @@ func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, 
 		value.browser = client
 	}
 	value.lastUsed = now
-	// 固定代理同节点出现新指纹说明配置已更新，旧连接池应淘汰。
-	// 账号模板代理的指纹会随 Resin Account 变化，必须并存才能维持各账号的粘性连接池。
-	// 直连节点统一使用 ID 0，不同 Provider 的传输必须并存，避免 Build 与 Web 互相重建客户端。
+	// A new fingerprint on the same fixed-proxy node means its configuration changed, so evict the old connection pool.
+	// Account-template proxy fingerprints vary by Resin Account and must coexist to preserve per-account sticky pools.
+	// Direct nodes all use ID 0, so transports for different Providers must coexist to prevent Build and Web rebuilding each other.
 	if id != 0 && !sticky {
 		for previousKey, previous := range m.clients {
 			if previousKey.nodeID != id {
@@ -523,7 +529,7 @@ func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, trans
 
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
 	if nodeID == 0 {
-		if transportErr != nil || status >= 500 || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
+		if transportErr != nil || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
 			m.mu.Lock()
 			if isGrokWebScope(scope) && status == http.StatusForbidden && m.clearanceConfig.Mode == "flaresolverr" {
 				state := m.clearances["direct"]
@@ -550,18 +556,16 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	case status == http.StatusUnauthorized || status == http.StatusTooManyRequests:
 		return
 	case scope == domain.ScopeBuild && status == http.StatusForbidden:
-		// Build 403 可能是账号权限、额度、Token 或出口策略，响应体由网关层
-		// 分类；仅凭状态码不能把标准 CLI 出口误判为 Web anti-bot。
+		// Build 403 may indicate account permissions, quota, token, or egress policy. The gateway classifies the body;
+		// status alone must not misclassify standard CLI egress as Web anti-bot behavior.
 		return
 	case scope == domain.ScopeBuild && status == http.StatusBadRequest:
-		// Device OAuth 在用户确认前会以 400 + authorization_pending 轮询，
-		// 这是协议正常状态，不能当作出口节点故障进入冷却。
+		// Device OAuth polls with 400 + authorization_pending before user confirmation.
+		// This is a normal protocol state and must not cool the egress node.
 		return
 	case status == http.StatusForbidden:
-		if m.isStickyProxyNode(value) {
-			// A 403 on an account-bound Resin lease usually means that account's
-			// clearance is stale. Do not cool or invalidate the shared node for
-			// unrelated accounts.
+		if m.isProxyPoolNode(value) {
+			// A request-level 403 does not prove that a shared proxy pool is unhealthy.
 			return
 		}
 		value.FailureCount++
@@ -578,20 +582,23 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		}
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
-	default:
+	case transportErr != nil:
+		if m.isProxyPoolNode(value) {
+			return
+		}
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
 		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
 		until := now.Add(cooldown)
 		value.CooldownUntil = &until
-		if transportErr != nil {
-			value.LastError = "transport error"
-		} else {
-			value.LastError = fmt.Sprintf("upstream status %d", status)
-		}
+		value.LastError = "transport error"
 		m.mu.Lock()
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
+	default:
+		// An HTTP status describes the upstream response, not the health of the
+		// configured proxy endpoint. Account routing handles upstream failures.
+		return
 	}
 	if stateRepository, ok := m.repository.(egressStateRepository); ok {
 		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err == nil {
@@ -1055,6 +1062,10 @@ func (m *Manager) isStickyProxyNode(value domain.Node) bool {
 	}
 	proxyURL, err := m.cipher.Decrypt(value.EncryptedProxyURL)
 	return err == nil && strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+}
+
+func (m *Manager) isProxyPoolNode(value domain.Node) bool {
+	return value.ProxyPool || m.isStickyProxyNode(value)
 }
 
 func (m *Manager) invalidateClientLocked(nodeID uint64) {
