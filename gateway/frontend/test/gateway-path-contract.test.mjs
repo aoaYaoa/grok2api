@@ -118,15 +118,17 @@ test("admin action menu links back to the public workspace", async () => {
 test("account batch workflows expose quota and conversion strategy controls", async () => {
   const api = await readFile(path.join(frontendRoot, "src/features/accounts/accounts-api.ts"), "utf8");
   const page = await readFile(path.join(frontendRoot, "src/features/accounts/accounts-page.tsx"), "utf8");
+  const settingsPage = await readFile(path.join(frontendRoot, "src/features/settings/settings-page.tsx"), "utf8");
   const translations = await readFile(path.join(frontendRoot, "src/shared/i18n/index.ts"), "utf8");
 
   assert.match(api, /export function refreshAccountsQuota/);
   assert.match(api, /\/accounts\/batch\/refresh-quotas/);
   assert.match(page, /refreshAccountsQuota\(\[\.\.\.selected\], provider\)/);
-  assert.match(page, /const \[conversionStrategy, setConversionStrategy\]/);
-  assert.match(page, /const \[webConsoleSyncStrategy, setWebConsoleSyncStrategy\]/);
-  assert.match(page, /strategy: conversionStrategy/);
-  assert.match(page, /strategy: webConsoleSyncStrategy/);
+  assert.match(page, /const \[webConversionTarget, setWebConversionTarget\]/);
+  assert.match(page, /const \[webConversionStrategy, setWebConversionStrategy\]/);
+  assert.match(page, /webConversionTarget === "build"/);
+  assert.match(page, /strategy: webConversionStrategy/);
+  assert.match(settingsPage, /form\.register\("batch\.accountTaskBatchSize"/);
   assert.match(translations, /accountTaskBatchSize: "单次全量任务账号数"/);
   assert.match(translations, /accountTaskBatchSize: "Accounts per all-task batch"/);
 });

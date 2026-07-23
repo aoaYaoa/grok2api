@@ -115,7 +115,11 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	adapter := &failoverAdapter{firstID: first.ID}
+	adapter := &failoverAdapter{
+		firstID: first.ID, failureStatus: http.StatusPaymentRequired,
+		failureBody:   `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits"}`,
+		failureHeader: http.Header{"X-Should-Retry": {"false"}},
+	}
 	registry := provider.NewRegistry(adapter)
 	cipher := testCipher(t)
 	sticky := memory.NewStickyStore()
@@ -159,11 +163,11 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("observed account = %#v, err = %v", observedAccount, err)
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].AccountID == nil || *logs[0].AccountID != second.ID || logs[0].ClientKeyName != "test-key" || logs[0].ModelPublicID != "grok-test" || logs[0].ModelUpstreamModel != "Build/grok-test" || logs[0].AccountName != "second" || logs[0].CachedInputTokens != 80 || logs[0].AttemptCount != 0 {
+	if err != nil || total != 1 || logs[0].AccountID == nil || *logs[0].AccountID != second.ID || logs[0].ClientKeyName != "test-key" || logs[0].ModelPublicID != "grok-test" || logs[0].ModelUpstreamModel != "Build/grok-test" || logs[0].AccountName != "second" || logs[0].CachedInputTokens != 80 || logs[0].StatusCode != http.StatusOK || logs[0].AttemptCount != 1 {
 		t.Fatalf("audit = %#v, %d, %v", logs, total, err)
 	}
 	detail, err := auditRepo.Get(ctx, logs[0].ID)
-	if err != nil || len(detail.Attempts) != 0 {
+	if err != nil || len(detail.Attempts) != 1 || detail.Attempts[0].UpstreamStatusCode == nil || *detail.Attempts[0].UpstreamStatusCode != http.StatusPaymentRequired || !strings.Contains(string(detail.Attempts[0].ResponseBody), "personal-team-blocked:spending-limit") {
 		t.Fatalf("audit detail = %#v, err = %v", detail, err)
 	}
 	ownership, err := responseRepo.Get(ctx, "resp-test", clientKey.ID, time.Now().UTC())
@@ -679,6 +683,126 @@ func TestGatewayWebOwnershipDoesNotPersistRawPromptCacheKey(t *testing.T) {
 	if ownership.AccountID != credential.ID || ownership.Provider != account.ProviderWeb || ownership.PromptCacheKey != "" || ownership.ReasoningReplayKey != "" {
 		t.Fatalf("web ownership = %#v", ownership)
 	}
+}
+
+func TestFinalizationCommitsOwnershipAndLocalQuotaBeforeSlowAudit(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "finalization-order.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierBasic,
+		Name: "web", SourceKey: "finalization-order", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := accountRepo.SaveQuotaWindows(ctx, credential.ID, account.WebTierBasic, now, []account.QuotaWindow{{
+		AccountID: credential.ID, Mode: "fast", Remaining: 5, Total: 10, WindowSeconds: 3600,
+		Source: account.QuotaSourceUpstream, SyncedAt: &now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const model = "grok-finalization-order"
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderWeb, []string{model}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, now); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "key", Prefix: "finalization-order", SecretHash: strings.Repeat("e", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := finalizationOrderAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, nil, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	audits := &blockingFinalizeAudit{started: make(chan struct{}), release: make(chan struct{})}
+	service := NewService(modelRepo, audits, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+
+	result, err := service.CreateResponse(ctx, Input{RequestID: "req-finalization-order", ClientKey: key, PublicModel: model, Body: []byte(`{"model":"grok-finalization-order","input":"hello"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(result.Body)
+	done := make(chan struct{})
+	go func() {
+		result.Finalize(Usage{}, "resp-finalization-order", "")
+		close(done)
+	}()
+	select {
+	case <-audits.started:
+	case <-time.After(time.Second):
+		t.Fatal("audit finalization did not start")
+	}
+	if _, err := responseRepo.Get(ctx, "resp-finalization-order", key.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("response ownership was blocked by audit: %v", err)
+	}
+	windows, err := accountRepo.GetQuotaWindows(ctx, []uint64{credential.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows[credential.ID]) != 1 || windows[credential.ID][0].Remaining != 4 {
+		t.Fatalf("local quota was blocked by audit: %#v", windows[credential.ID])
+	}
+	close(audits.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("finalization did not finish")
+	}
+	_ = result.Body.Close()
+}
+
+type blockingFinalizeAudit struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (a *blockingFinalizeAudit) Create(ctx context.Context, _ audit.Record) error {
+	a.once.Do(func() { close(a.started) })
+	select {
+	case <-a.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type finalizationOrderAdapter struct{}
+
+func (finalizationOrderAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (finalizationOrderAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider:     account.ProviderWeb,
+		Quota:        provider.QuotaRemoteWindow,
+		Conversation: provider.ConversationSurface{Responses: true, StoredResponses: true},
+		Inference:    provider.InferencePolicy{Usage: provider.UsageEstimated},
+	}
+}
+func (finalizationOrderAdapter) QuotaMode(string) string { return "fast" }
+func (finalizationOrderAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+}
+func (finalizationOrderAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"resp-finalization-order"}`)), QuotaUnits: 1}, nil
 }
 
 func TestParseFreeQuotaExhaustion(t *testing.T) {
@@ -1415,6 +1539,9 @@ func runQuotaRefreshWorkers(t *testing.T, service *accountapp.Service) {
 type failoverAdapter struct {
 	mu                     sync.Mutex
 	firstID                uint64
+	failureStatus          int
+	failureBody            string
+	failureHeader          http.Header
 	attempts               []uint64
 	lastMethod             string
 	lastPath               string
@@ -1833,12 +1960,21 @@ func (a *failoverAdapter) ForwardResponse(_ context.Context, request provider.Re
 	resourceStatus := a.resourceStatus
 	a.mu.Unlock()
 	status, body := http.StatusOK, "ok"
+	header := make(http.Header)
 	if request.Method != http.MethodPost && resourceStatus != 0 {
 		status, body = resourceStatus, "missing"
 	} else if request.Credential.ID == a.firstID {
-		status, body = http.StatusTooManyRequests, "limited"
+		status = a.failureStatus
+		if status == 0 {
+			status = http.StatusTooManyRequests
+		}
+		body = a.failureBody
+		if body == "" {
+			body = "limited"
+		}
+		header = a.failureHeader.Clone()
 	}
-	return &provider.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	return &provider.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
 func (a *failoverAdapter) setResourceStatus(status int) {

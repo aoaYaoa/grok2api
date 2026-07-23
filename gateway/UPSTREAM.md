@@ -1,18 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `11bb5e20e7409ecaa64cf083c1e302fbb6ab30e7`
-- Imported: `2026-07-22`
+- Commit: `41665caa21279349b4f7a6ea5f4ea512b9414c04`
+- Imported: `2026-07-23`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized from the previous reviewed baseline `ca8b2474bf2ed1a0f96f22044cd3d8031a838e37` to upstream `v3.0.7`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized from upstream `v3.0.7` through commit `41665caa21279349b4f7a6ea5f4ea512b9414c04`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
-- Claude Code and Codex prompt-cache affinity, including stable session routing and native client-tool cache compatibility.
-- Bounded, redacted Grok Web image/video diagnostics and clearer video failure logging without exposing credentials or upstream media URLs.
-- Proxy-pool endpoint support with per-proxy cooldown isolation in the existing egress manager.
-- Build billing/free-profile inference updates for account routing and quota presentation.
-- Provider, persistence, CLI, Console, conversation, and inference compatibility fixes from upstream `v3.0.7`.
+- High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
+- Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
+- Improved spending-limit failover, account quota recovery, Codex model catalog compatibility, and cached-token accounting.
+- Provider, persistence, CLI, Console, conversation, and inference compatibility fixes after upstream `v3.0.7`.
 
 ## Updating
 

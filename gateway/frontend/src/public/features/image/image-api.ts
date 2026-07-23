@@ -44,7 +44,7 @@ export function cachedImage(payload: Record<string, unknown>): CachedImage {
   const source = (String(payload.source || "legacy") === "mediaAsset" ? "mediaAsset" : "legacy") as "legacy" | "mediaAsset";
   const cacheKey = String(payload.cache_key || name);
   return {
-    id: `${source}:${cacheKey}` || crypto.randomUUID(), name, url, source, cacheKey, sourceURL: url,
+    id: `${source}:${cacheKey}`, name, url, source, cacheKey, sourceURL: url,
     requestSourceURL: cachedImageReference(source, cacheKey, url), parentPostID,
     prompt: name, sizeBytes: Number(payload.size_bytes || 0), createdAt: Number(payload.mtime_ms || Date.now()),
   };

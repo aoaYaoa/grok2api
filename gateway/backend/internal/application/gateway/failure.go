@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
 // UpstreamFailure 保存可安全暴露给下游和审计的上游失败分类，不包含响应正文或凭据。
@@ -104,6 +106,9 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.PublicMessage = "上游账号额度不足"
 		failure.AccountScoped = true
 		failure.QuotaExhausted = true
+		// spending-limit is account-scoped, but its paid/free recovery kind depends on
+		// the selected account's billing snapshot and must be decided by the selector.
+		failure.FreeQuotaExhausted = isFreeQuotaExhaustion(metadataText)
 	case http.StatusForbidden:
 		failure.Code = "upstream_forbidden"
 		failure.PublicMessage = "上游拒绝了该请求"
@@ -134,11 +139,14 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	code, message := "upstream_network_error", "连接上游服务失败"
-	if errors.Is(err, context.DeadlineExceeded) {
+	status := http.StatusBadGateway
+	if neterrorpkg.IsResponseHeaderTimeout(err) {
+		status, code, message = http.StatusGatewayTimeout, "upstream_header_timeout", "等待上游响应头超时"
+	} else if errors.Is(err, context.DeadlineExceeded) {
 		code, message = "upstream_timeout", "上游服务响应超时"
 	}
 	return &UpstreamFailure{
-		HTTPStatus: http.StatusBadGateway, Code: code, PublicMessage: message,
+		HTTPStatus: status, Code: code, PublicMessage: message,
 		AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err,
 	}
 }

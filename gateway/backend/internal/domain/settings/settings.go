@@ -2,6 +2,12 @@ package settings
 
 import "time"
 
+const (
+	DefaultBuildResponseHeaderTimeout = 5 * time.Minute
+	MinBuildResponseHeaderTimeout     = 30 * time.Second
+	MaxBuildResponseHeaderTimeout     = 30 * time.Minute
+)
+
 // Config 表示可跨重启持久化并支持热加载的网关运行参数。
 type Config struct {
 	Server            ServerConfig
@@ -70,22 +76,33 @@ type BatchConfig struct {
 
 // ProviderBuildConfig 定义 Grok Build CLI 上游协议标识。
 type ProviderBuildConfig struct {
-	BaseURL          string
-	FallbackBaseURL  string
-	ClientVersion    string
-	ClientIdentifier string
-	TokenAuth        string
-	UserAgent        string
+	BaseURL               string
+	FallbackBaseURL       string
+	ClientVersion         string
+	ClientIdentifier      string
+	TokenAuth             string
+	UserAgent             string
+	ResponseHeaderTimeout time.Duration
 }
 
 // RoutingConfig 定义会话粘性、冷却和故障切换边界。
 type RoutingConfig struct {
-	StickyTTL       time.Duration
-	CooldownBase    time.Duration
-	CooldownMax     time.Duration
-	CapacityWait    time.Duration
-	MaxAttempts     int
-	PreferFreeBuild bool
+	StickyTTL         time.Duration
+	CooldownBase      time.Duration
+	CooldownMax       time.Duration
+	CapacityWait      time.Duration
+	MaxAttempts       int
+	PreferFreeBuild   bool
+	SegmentedSelector *SegmentedSelectorConfig
+}
+
+// SegmentedSelectorConfig persists the bounded selector policy.
+// A nil value means the stored settings predate this policy and startup defaults must be preserved.
+type SegmentedSelectorConfig struct {
+	// ActiveEnabled retains the original persisted field name so existing disabled policies remain disabled.
+	ActiveEnabled bool
+	MinCandidates int
+	WindowSize    int
 }
 
 // AuditConfig 定义请求审计异步写入参数。
@@ -93,6 +110,7 @@ type AuditConfig struct {
 	BufferSize    int
 	BatchSize     int
 	FlushInterval time.Duration
+	CommitDelay   time.Duration
 }
 
 // ClientKeyDefaultsConfig 定义新建客户端密钥的默认限制。

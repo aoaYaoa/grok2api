@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,6 +157,46 @@ func TestGatewayErrorMapsOversizedVideoInputToBadRequest(t *testing.T) {
 	}
 }
 
+func TestGatewayErrorMapsLedgerUnavailableToServiceUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		writeGatewayError(c, gateway.ErrLedgerUnavailable)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"ledger_unavailable"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGatewayErrorMapsResponseHeaderTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	openAIRouter := gin.New()
+	openAIRouter.GET("/", func(c *gin.Context) {
+		writeGatewayError(c, &gateway.UpstreamFailure{
+			HTTPStatus: http.StatusGatewayTimeout, Code: "upstream_header_timeout", PublicMessage: "等待上游响应头超时",
+		})
+	})
+	openAIRecorder := httptest.NewRecorder()
+	openAIRouter.ServeHTTP(openAIRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if openAIRecorder.Code != http.StatusGatewayTimeout || !strings.Contains(openAIRecorder.Body.String(), `"code":"upstream_header_timeout"`) {
+		t.Fatalf("OpenAI status=%d body=%s", openAIRecorder.Code, openAIRecorder.Body.String())
+	}
+
+	anthropicRouter := gin.New()
+	anthropicRouter.GET("/", func(c *gin.Context) {
+		writeGatewayAnthropicError(c, &gateway.UpstreamFailure{
+			HTTPStatus: http.StatusGatewayTimeout, Code: "upstream_header_timeout", PublicMessage: "等待上游响应头超时",
+		})
+	})
+	anthropicRecorder := httptest.NewRecorder()
+	anthropicRouter.ServeHTTP(anthropicRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if anthropicRecorder.Code != http.StatusGatewayTimeout || !strings.Contains(anthropicRecorder.Body.String(), `"type":"timeout_error"`) {
+		t.Fatalf("Anthropic status=%d body=%s", anthropicRecorder.Code, anthropicRecorder.Body.String())
+	}
+}
+
 func TestGatewayErrorHidesUpstreamCredentialStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	openAIRouter := gin.New()
@@ -182,6 +223,19 @@ func TestGatewayErrorHidesUpstreamCredentialStatus(t *testing.T) {
 	anthropicRouter.ServeHTTP(anthropicRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if anthropicRecorder.Code != http.StatusTooManyRequests || !strings.Contains(anthropicRecorder.Body.String(), `"type":"rate_limit_error"`) {
 		t.Fatalf("Anthropic status=%d body=%s", anthropicRecorder.Code, anthropicRecorder.Body.String())
+	}
+
+	quotaRouter := gin.New()
+	quotaRouter.GET("/", func(c *gin.Context) {
+		writeGatewayAnthropicError(c, &gateway.UpstreamFailure{
+			HTTPStatus: http.StatusTooManyRequests, Code: "upstream_rate_limited", PublicMessage: "official upgrade prompt",
+			QuotaExhausted: true,
+		})
+	})
+	quotaRecorder := httptest.NewRecorder()
+	quotaRouter.ServeHTTP(quotaRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if quotaRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(quotaRecorder.Body.String(), `"type":"overloaded_error"`) || strings.Contains(quotaRecorder.Body.String(), "upgrade") {
+		t.Fatalf("Anthropic quota status=%d body=%s", quotaRecorder.Code, quotaRecorder.Body.String())
 	}
 
 	credentialRouter := gin.New()
@@ -515,10 +569,12 @@ func TestExtractUsageFromCompletedEvent(t *testing.T) {
 }
 
 func TestExtractUsageFromAnthropicMessagesCaches(t *testing.T) {
-	// Anthropic Messages 协议用 cache_read_input_tokens，不得再记为 0。
-	metadata := extractMetadata([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"grok-4.5","usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":80,"cost_in_usd_ticks":1000}}`))
+	metadata := normalizeMetadataUsage(extractMetadata([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"grok-4.5","usage":{"input_tokens":20,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":80,"cost_in_usd_ticks":1000}}`)), streamProtocolAnthropic)
 	if metadata.Usage.CachedInputTokens != 80 || metadata.Usage.InputTokens != 100 || metadata.Usage.OutputTokens != 20 {
 		t.Fatalf("anthropic usage = %#v", metadata.Usage)
+	}
+	if metadata.Usage.TotalTokens != 120 {
+		t.Fatalf("anthropic total usage = %#v", metadata.Usage)
 	}
 }
 
@@ -539,15 +595,49 @@ func TestExtractUsagePrefersResponsesCachedTokensOverAnthropicField(t *testing.T
 }
 
 func TestStreamInspectorMergesCachedTokensAcrossFrames(t *testing.T) {
-	// 模拟流式：先到 input/output，后到带 cache 的 usage 帧。
 	inspector := &responseInspector{protocol: streamProtocolAnthropic}
-	inspector.Inspect([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}\n\n"))
+	inspector.Inspect([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":20,\"output_tokens\":20}}\n\n"))
 	inspector.Inspect([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":80}}\n\n"))
 	inspector.Inspect([]byte("data: {\"type\":\"message_stop\"}\n\n"))
 	inspector.Finish()
 	usage := inspector.Metadata().Usage
-	if usage.InputTokens != 100 || usage.OutputTokens != 20 || usage.CachedInputTokens != 80 {
+	if usage.InputTokens != 100 || usage.OutputTokens != 20 || usage.CachedInputTokens != 80 || usage.TotalTokens != 120 {
 		t.Fatalf("merged stream usage = %#v", usage)
+	}
+}
+
+func TestAnthropicUsageReconstructsCacheCreationAndSaturates(t *testing.T) {
+	metadata := responseMetadata{
+		Usage:                    gateway.Usage{InputTokens: 20, CachedInputTokens: 70, OutputTokens: 5},
+		cacheCreationInputTokens: 10,
+	}
+	usage := normalizeMetadataUsage(metadata, streamProtocolAnthropic).Usage
+	if usage.InputTokens != 100 || usage.CachedInputTokens != 70 || usage.TotalTokens != 105 {
+		t.Fatalf("anthropic reconstructed usage = %#v", usage)
+	}
+
+	overflow := responseMetadata{Usage: gateway.Usage{InputTokens: math.MaxInt64, CachedInputTokens: 1, OutputTokens: 1}}
+	usage = normalizeMetadataUsage(overflow, streamProtocolAnthropic).Usage
+	if usage.InputTokens != math.MaxInt64 || usage.TotalTokens != math.MaxInt64 {
+		t.Fatalf("anthropic saturated usage = %#v", usage)
+	}
+}
+
+func TestCopyJSONReconstructsAnthropicTotalInputForAudit(t *testing.T) {
+	payload := []byte(`{"id":"msg_1","type":"message","model":"grok-4.5","usage":{"input_tokens":10899,"output_tokens":227,"cache_creation_input_tokens":0,"cache_read_input_tokens":229504}}`)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+
+	metadata, err := copyJSON(context.Writer, bytes.NewReader(payload), streamProtocolAnthropic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), payload) {
+		t.Fatalf("forwarded body = %s", recorder.Body.String())
+	}
+	usage := metadata.Usage
+	if usage.InputTokens != 240403 || usage.CachedInputTokens != 229504 || usage.OutputTokens != 227 || usage.TotalTokens != 240630 {
+		t.Fatalf("anthropic audit usage = %#v", usage)
 	}
 }
 
@@ -694,6 +784,7 @@ func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 		"Connection":          {"X-Upstream-Internal"},
 		"Content-Type":        {"application/json"},
 		"Set-Cookie":          {"upstream_session=secret"},
+		"X-Models-Etag":       {`"upstream-account-catalog"`},
 		"X-Request-Id":        {"req_123"},
 		"X-Upstream-Internal": {"hidden"},
 	}
@@ -704,7 +795,7 @@ func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 	if destination.Get("Content-Type") != "application/json" || destination.Get("X-Request-Id") != "req_123" {
 		t.Fatalf("forwarded headers = %#v", destination)
 	}
-	if destination.Get("Set-Cookie") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" {
+	if destination.Get("Set-Cookie") != "" || destination.Get("X-Models-Etag") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" {
 		t.Fatalf("filtered headers leaked = %#v", destination)
 	}
 }
@@ -717,7 +808,7 @@ func TestCopyJSONForwardsBodyBeyondMetadataInspectionLimit(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 
-	metadata, err := copyJSON(context.Writer, bytes.NewReader(payload))
+	metadata, err := copyJSON(context.Writer, bytes.NewReader(payload), streamProtocolResponses)
 	if err != nil {
 		t.Fatal(err)
 	}

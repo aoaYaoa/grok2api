@@ -55,13 +55,14 @@ type frontendConfigDTO struct {
 }
 
 type providerBuildConfigDTO struct {
-	BaseURL             string `json:"baseURL"`
-	FallbackBaseURL     string `json:"fallbackBaseURL"`
-	ClientVersion       string `json:"clientVersion"`
-	ClientIdentifier    string `json:"clientIdentifier"`
-	TokenAuth           string `json:"tokenAuth"`
-	TokenAuthConfigured bool   `json:"tokenAuthConfigured"`
-	UserAgent           string `json:"userAgent"`
+	BaseURL               string `json:"baseURL"`
+	FallbackBaseURL       string `json:"fallbackBaseURL"`
+	ClientVersion         string `json:"clientVersion"`
+	ClientIdentifier      string `json:"clientIdentifier"`
+	TokenAuth             string `json:"tokenAuth"`
+	TokenAuthConfigured   bool   `json:"tokenAuthConfigured"`
+	UserAgent             string `json:"userAgent"`
+	ResponseHeaderTimeout string `json:"responseHeaderTimeout"`
 }
 
 type providerWebConfigDTO struct {
@@ -94,18 +95,26 @@ type batchConfigDTO struct {
 }
 
 type routingConfigDTO struct {
-	StickyTTL       string `json:"stickyTTL"`
-	CooldownBase    string `json:"cooldownBase"`
-	CooldownMax     string `json:"cooldownMax"`
-	CapacityWait    string `json:"capacityWait"`
-	MaxAttempts     int    `json:"maxAttempts"`
-	PreferFreeBuild bool   `json:"preferFreeBuild"`
+	StickyTTL         string                      `json:"stickyTTL"`
+	CooldownBase      string                      `json:"cooldownBase"`
+	CooldownMax       string                      `json:"cooldownMax"`
+	CapacityWait      string                      `json:"capacityWait"`
+	MaxAttempts       int                         `json:"maxAttempts"`
+	PreferFreeBuild   bool                        `json:"preferFreeBuild"`
+	SegmentedSelector *segmentedSelectorConfigDTO `json:"segmentedSelector,omitempty"`
+}
+
+type segmentedSelectorConfigDTO struct {
+	Enabled       bool `json:"enabled"`
+	MinCandidates int  `json:"minCandidates"`
+	WindowSize    int  `json:"windowSize"`
 }
 
 type auditConfigDTO struct {
 	BufferSize    int    `json:"bufferSize"`
 	BatchSize     int    `json:"batchSize"`
 	FlushInterval string `json:"flushInterval"`
+	CommitDelayMS int    `json:"commitDelayMS"`
 }
 
 type clientKeyDefaultsConfigDTO struct {
@@ -173,6 +182,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			BaseURL: value.ProviderBuild.BaseURL, FallbackBaseURL: value.ProviderBuild.FallbackBaseURL,
 			ClientVersion: value.ProviderBuild.ClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
 			TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: value.ProviderBuild.UserAgent,
+			ResponseHeaderTimeout: value.ProviderBuild.ResponseHeaderTimeout,
 		},
 		ProviderWeb: settingsapp.ProviderWebConfig{
 			BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: value.ProviderWeb.QuotaTimeout,
@@ -208,11 +218,18 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			PreferFreeBuild: value.Routing.PreferFreeBuild,
 		},
 		Audit: settingsapp.AuditConfig{
-			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval,
+			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval, CommitDelayMS: value.Audit.CommitDelayMS,
 		},
 		ClientKeyDefaults: settingsapp.ClientKeyDefaultsConfig{
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
 		},
+	}
+	if value.Routing.SegmentedSelector != nil {
+		result.Routing.SegmentedSelector = settingsapp.SegmentedSelectorConfig{
+			Enabled: value.Routing.SegmentedSelector.Enabled, MinCandidates: value.Routing.SegmentedSelector.MinCandidates,
+			WindowSize: value.Routing.SegmentedSelector.WindowSize,
+		}
+		result.Routing.SegmentedSelectorProvided = true
 	}
 	if value.Accounts != nil {
 		result.Accounts = settingsapp.AccountsConfig{
@@ -236,6 +253,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				ClientVersion: config.ProviderBuild.ClientVersion, ClientIdentifier: config.ProviderBuild.ClientIdentifier,
 				TokenAuth:           config.ProviderBuild.TokenAuth,
 				TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "", UserAgent: config.ProviderBuild.UserAgent,
+				ResponseHeaderTimeout: config.ProviderBuild.ResponseHeaderTimeout,
 			},
 			ProviderWeb: providerWebConfigDTO{
 				BaseURL: config.ProviderWeb.BaseURL, QuotaTimeout: config.ProviderWeb.QuotaTimeout,
@@ -268,9 +286,13 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				StickyTTL: config.Routing.StickyTTL, CooldownBase: config.Routing.CooldownBase,
 				CooldownMax: config.Routing.CooldownMax, CapacityWait: config.Routing.CapacityWait, MaxAttempts: config.Routing.MaxAttempts,
 				PreferFreeBuild: config.Routing.PreferFreeBuild,
+				SegmentedSelector: &segmentedSelectorConfigDTO{
+					Enabled: config.Routing.SegmentedSelector.Enabled, MinCandidates: config.Routing.SegmentedSelector.MinCandidates,
+					WindowSize: config.Routing.SegmentedSelector.WindowSize,
+				},
 			},
 			Audit: auditConfigDTO{
-				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval,
+				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval, CommitDelayMS: config.Audit.CommitDelayMS,
 			},
 			ClientKeyDefaults: clientKeyDefaultsConfigDTO{
 				RPMLimit: config.ClientKeyDefaults.RPMLimit, MaxConcurrent: config.ClientKeyDefaults.MaxConcurrent,

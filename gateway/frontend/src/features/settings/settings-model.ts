@@ -21,6 +21,10 @@ const consoleChatDuration = durationSchema.refine((value) => {
   const seconds = durationSeconds(value);
   return seconds >= 5 && seconds <= 30 * 60;
 });
+const buildResponseHeaderDuration = durationSchema.refine((value) => {
+  const seconds = durationSeconds(value);
+  return seconds >= 30 && seconds <= 30 * 60;
+});
 
 function validPublicAPIBaseURL(value: string): boolean {
   const trimmed = value.trim();
@@ -46,6 +50,7 @@ export const settingsSchema = z.object({
     tokenAuth: z.string().trim().min(1),
     tokenAuthConfigured: z.boolean(),
     userAgent: z.string().trim().min(1),
+    responseHeaderTimeout: buildResponseHeaderDuration,
   }),
   providerWeb: z.object({
     baseURL: z.url().refine((value) => value.startsWith("https://")),
@@ -107,8 +112,14 @@ export const settingsSchema = z.object({
     capacityWait: routingCapacityWaitDuration,
     maxAttempts: positiveInteger.max(10),
     preferFreeBuild: z.boolean(),
-  }).refine((value) => durationSeconds(value.cooldownMax) >= durationSeconds(value.cooldownBase), { path: ["cooldownMax"] }),
-  audit: z.object({ bufferSize: positiveInteger.max(262_144), batchSize: positiveInteger.max(4_096), flushInterval: auditFlushDuration })
+    segmentedSelector: z.object({
+      enabled: z.boolean(),
+      minCandidates: z.number().int().min(100).max(1_000_000),
+      windowSize: z.number().int().min(8).max(256),
+    }),
+  }).refine((value) => durationSeconds(value.cooldownMax) >= durationSeconds(value.cooldownBase), { path: ["cooldownMax"] })
+    .refine((value) => value.segmentedSelector.windowSize <= value.segmentedSelector.minCandidates, { path: ["segmentedSelector", "windowSize"] }),
+  audit: z.object({ bufferSize: positiveInteger.max(262_144), batchSize: positiveInteger.max(4_096), flushInterval: auditFlushDuration, commitDelayMS: positiveInteger.max(50) })
     .refine((value) => value.batchSize <= value.bufferSize, { path: ["batchSize"] }),
   clientKeyDefaults: z.object({ rpmLimit: positiveInteger.max(100_000), maxConcurrent: positiveInteger.max(1_024) }),
   accounts: z.object({
@@ -130,7 +141,7 @@ export type SettingsForm = z.infer<typeof settingsSchema>;
 export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
   return {
     server: config.server,
-    providerBuild: config.providerBuild,
+    providerBuild: { ...config.providerBuild, responseHeaderTimeout: parseDuration(config.providerBuild.responseHeaderTimeout) },
     providerWeb: {
       ...config.providerWeb,
       statsigManualValue: "",
@@ -153,8 +164,9 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       stickyTTL: parseDuration(config.routing.stickyTTL), cooldownBase: parseDuration(config.routing.cooldownBase),
       cooldownMax: parseDuration(config.routing.cooldownMax), capacityWait: parseDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
       preferFreeBuild: config.routing.preferFreeBuild,
+      segmentedSelector: config.routing.segmentedSelector,
     },
-    audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: parseDuration(config.audit.flushInterval) },
+    audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: parseDuration(config.audit.flushInterval), commitDelayMS: config.audit.commitDelayMS },
     clientKeyDefaults: config.clientKeyDefaults,
     accounts: {
       autoCleanReauthEnabled: config.accounts.autoCleanReauthEnabled,
@@ -168,7 +180,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
 export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
   return {
     server: config.server,
-    providerBuild: config.providerBuild,
+    providerBuild: { ...config.providerBuild, responseHeaderTimeout: formatDuration(config.providerBuild.responseHeaderTimeout) },
     providerWeb: {
       ...config.providerWeb,
       quotaTimeout: formatDuration(config.providerWeb.quotaTimeout), chatTimeout: formatDuration(config.providerWeb.chatTimeout),
@@ -190,8 +202,9 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       stickyTTL: formatDuration(config.routing.stickyTTL), cooldownBase: formatDuration(config.routing.cooldownBase),
       cooldownMax: formatDuration(config.routing.cooldownMax), capacityWait: formatDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
       preferFreeBuild: config.routing.preferFreeBuild,
+      segmentedSelector: config.routing.segmentedSelector,
     },
-    audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: formatDuration(config.audit.flushInterval) },
+    audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: formatDuration(config.audit.flushInterval), commitDelayMS: config.audit.commitDelayMS },
     clientKeyDefaults: config.clientKeyDefaults,
     accounts: {
       autoCleanReauthEnabled: config.accounts.autoCleanReauthEnabled,

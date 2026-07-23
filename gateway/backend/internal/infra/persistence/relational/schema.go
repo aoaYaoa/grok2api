@@ -3,19 +3,27 @@ package relational
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	"gorm.io/gorm"
 )
 
 const mediaJobInputMetadataPendingIndex = "CREATE INDEX IF NOT EXISTS idx_media_jobs_input_metadata_v1_pending ON media_jobs(id) WHERE input_metadata_version < 1"
 
+const postgresSchemaMigrationLockID int64 = 0x47524f4b32415049
+
 var schemaModels = []any{
 	&adminModel{},
 	&adminSessionModel{},
+	&egressSubscriptionSourceModel{},
+	&egressNodeModel{},
+	&egressOperationsConfigModel{},
 	&accountModel{},
 	&accountCredentialModel{},
 	&accountProviderLinkModel{},
@@ -41,7 +49,6 @@ var schemaModels = []any{
 	&mediaAssetModel{},
 	&mediaUploadTicketModel{},
 	&runtimeSettingsModel{},
-	&egressNodeModel{},
 }
 
 var schemaIndexes = []string{
@@ -68,16 +75,17 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_client_key_models_route_key ON client_key_models(model_route_id, client_key_id)",
 	"CREATE INDEX IF NOT EXISTS idx_billing_reservations_expiry ON billing_reservations(expires_at, client_key_id)",
 	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_scope_health ON egress_nodes(scope, enabled, health DESC, id ASC)",
+	"CREATE INDEX IF NOT EXISTS idx_egress_nodes_probe_due ON egress_nodes(enabled, last_probed_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_created_id ON request_audits(created_at DESC, id DESC)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_audits_event_id ON request_audits(event_id) WHERE event_id <> ''",
 	"CREATE INDEX IF NOT EXISTS idx_audits_account_created_id ON request_audits(account_id, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_status_created_id ON request_audits(status_code, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_streaming_created_id ON request_audits(streaming, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audit_attempts_audit_number ON request_audit_attempts(audit_id, number)",
-	"CREATE INDEX IF NOT EXISTS idx_response_ownership_expires ON response_ownership(expires_at)",
+	"CREATE INDEX IF NOT EXISTS idx_response_ownership_expires_id ON response_ownership(expires_at, response_id)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_account ON response_ownership(account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_client_key ON response_ownership(client_key_id)",
-	"CREATE INDEX IF NOT EXISTS idx_web_response_states_expires ON web_response_states(expires_at)",
+	"CREATE INDEX IF NOT EXISTS idx_web_response_states_expires_id ON web_response_states(expires_at, response_id)",
 	"CREATE INDEX IF NOT EXISTS idx_web_response_states_account ON web_response_states(account_id, created_at DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_client_created ON media_jobs(client_key_id, created_at DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_account_status ON media_jobs(account_id, status)",
@@ -93,6 +101,19 @@ var schemaIndexes = []string{
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。
 func (d *Database) InitializeSchema(ctx context.Context) error {
+	if d.dialect == "postgres" {
+		return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", postgresSchemaMigrationLockID).Error; err != nil {
+				return fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
+			}
+			locked := &Database{db: tx, dialect: d.dialect}
+			return locked.initializeSchema(ctx)
+		})
+	}
+	return d.initializeSchema(ctx)
+}
+
+func (d *Database) initializeSchema(ctx context.Context) error {
 	db := d.db.WithContext(ctx)
 	// all 作用域会让 Build 与 Web 共用 UA、健康度和冷却状态，升级时直接移除旧节点。
 	if db.Migrator().HasTable(&egressNodeModel{}) {
@@ -113,6 +134,9 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	}
 	if migrateErr != nil {
 		return fmt.Errorf("初始化数据库表: %w", migrateErr)
+	}
+	if err := d.migrateBuildResponseHeaderTimeout(ctx); err != nil {
+		return fmt.Errorf("迁移 Grok Build 响应头超时: %w", err)
 	}
 	if err := d.ensureConsoleConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移 Console 数据库约束: %w", err)
@@ -149,6 +173,9 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	if err := d.backfillReauthMarkedAt(ctx); err != nil {
 		return fmt.Errorf("迁移 reauth_marked_at: %w", err)
 	}
+	if err := d.dropRedundantResponseExpiryIndexes(ctx); err != nil {
+		return fmt.Errorf("迁移响应过期索引: %w", err)
+	}
 	for _, statement := range schemaIndexes {
 		if err := db.Exec(statement).Error; err != nil {
 			return fmt.Errorf("初始化数据库索引: %w", err)
@@ -156,6 +183,52 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	}
 	if err := d.ensureCanonicalModelPublicIDs(ctx); err != nil {
 		return fmt.Errorf("迁移模型 Provider 命名空间: %w", err)
+	}
+	return nil
+}
+
+// migrateBuildResponseHeaderTimeout persists the runtime default for settings
+// rows created before the Build response-header timeout became configurable.
+func (d *Database) migrateBuildResponseHeaderTimeout(ctx context.Context) error {
+	db := d.db.WithContext(ctx)
+	for range 4 {
+		var row runtimeSettingsModel
+		if err := db.Where("key = ?", runtimeSettingsKey).First(&row).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		var payload runtimeSettingsPayload
+		if err := json.Unmarshal([]byte(row.ValueJSON), &payload); err != nil {
+			return fmt.Errorf("decode runtime settings: %w", err)
+		}
+		if payload.Config.ProviderBuild.ResponseHeaderTimeout > 0 {
+			return nil
+		}
+		payload.Config.ProviderBuild.ResponseHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("encode runtime settings: %w", err)
+		}
+		result := db.Model(&runtimeSettingsModel{}).
+			Where("key = ? AND revision = ?", row.Key, row.Revision).
+			UpdateColumn("value_json", string(encoded))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 1 {
+			return nil
+		}
+	}
+	return errors.New("runtime settings changed repeatedly during migration")
+}
+
+func (d *Database) dropRedundantResponseExpiryIndexes(ctx context.Context) error {
+	for _, name := range []string{"idx_response_ownership_expires", "idx_web_response_states_expires"} {
+		if err := d.db.WithContext(ctx).Exec("DROP INDEX IF EXISTS " + name).Error; err != nil {
+			return fmt.Errorf("drop index %s: %w", name, err)
+		}
 	}
 	return nil
 }
