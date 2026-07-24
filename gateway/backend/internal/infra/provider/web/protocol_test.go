@@ -1292,6 +1292,15 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 }
 
+func TestVideoCompletionStabilizationDelay(t *testing.T) {
+	if got := videoCompletionStabilizationDelay(3500 * time.Millisecond); got != 45*time.Second {
+		t.Fatalf("fast completion delay = %v", got)
+	}
+	if got := videoCompletionStabilizationDelay(10 * time.Second); got != 0 {
+		t.Fatalf("normal completion delay = %v", got)
+	}
+}
+
 func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
 	payload := videoCreatePayload(
 		"move naturally",
