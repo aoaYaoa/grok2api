@@ -1,17 +1,21 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `41665caa21279349b4f7a6ea5f4ea512b9414c04`
-- Imported: `2026-07-23`
+- Commit: `dae50ce67b95d5cad2b4168e32332c790b2c9ce6`
+- Imported: `2026-07-24`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized from upstream `v3.0.7` through commit `41665caa21279349b4f7a6ea5f4ea512b9414c04`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream `v3.0.8-hotfix.1` at commit `dae50ce67b95d5cad2b4168e32332c790b2c9ce6`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
 - Improved spending-limit failover, account quota recovery, Codex model catalog compatibility, and cached-token accounting.
 - Provider, persistence, CLI, Console, conversation, and inference compatibility fixes after upstream `v3.0.7`.
+- Configurable Grok Build 403 account invalidation with hot-reloadable error-code matching.
+- BOM-tolerant JSON and JSONL account imports across Build, Web, and Console providers.
+- Grok Web agreement and linked-account filters, responsive settings tabs, and abortable audit detail loading.
+- Grok Build `0.2.110` recommendation and reasoning compatibility fixes from `v3.0.8-hotfix.1`.
 
 ## Updating
 
