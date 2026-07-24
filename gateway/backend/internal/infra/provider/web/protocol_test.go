@@ -1292,7 +1292,7 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 }
 
-func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
+func TestVideoCreatePayloadKeepsSingleImageReferenceExplicit(t *testing.T) {
 	payload := videoCreatePayload(
 		"move naturally",
 		"post_1",
@@ -1318,11 +1318,8 @@ func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
 	if config["parentPostId"] != "post_1" || config["isVideoEdit"] != false {
 		t.Fatalf("video config = %#v", config)
 	}
-	if _, ok := config["isReferenceToVideo"]; ok {
-		t.Fatalf("single-image payload contains isReferenceToVideo: %#v", config)
-	}
-	if _, ok := config["imageReferences"]; ok {
-		t.Fatalf("single-image payload contains imageReferences: %#v", config)
+	if config["isReferenceToVideo"] != true || !reflect.DeepEqual(config["imageReferences"], []string{"https://assets.grok.com/users/test/post_1/content"}) {
+		t.Fatalf("single-image reference is not explicit: %#v", config)
 	}
 	if _, ok := payload["toolOverrides"]; ok {
 		t.Fatalf("official video payload does not send toolOverrides: %#v", payload)
