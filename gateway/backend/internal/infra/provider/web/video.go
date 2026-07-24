@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,6 +163,15 @@ type videoRecoveryPolicy struct {
 	MaxDelay     time.Duration
 }
 
+type videoStreamDiagnostics struct {
+	FrameCount   int
+	Progress     []int
+	VideoIDs     []string
+	AssetIDs     []string
+	VideoPostIDs []string
+	ResultSource string
+}
+
 var defaultVideoRecoveryPolicy = videoRecoveryPolicy{
 	MaxWait:      5 * time.Minute,
 	InitialDelay: 5 * time.Second,
@@ -207,6 +217,18 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
+	a.log().Info("video_generation_request_prepared",
+		"reference_count", len(references),
+		"reference_hashes", uploadedSourceHashes(references),
+		"upload_ids", uploadedIDs(references),
+		"upload_uri_hashes", uploadedURIHashes(references),
+		"parent_post_id", parentID,
+		"prompt_length", len([]rune(strings.TrimSpace(request.Prompt))),
+		"duration", request.Duration,
+		"aspect_ratio", resolveAspectRatio(request.AspectRatio),
+		"resolution", request.Resolution,
+		"preset", request.Preset,
+	)
 	segments := videoSegments(request.Duration)
 	if len(segments) == 0 {
 		return provider.VideoResult{}, fmt.Errorf("duration 必须在 1 到 15 秒之间")
@@ -297,18 +319,32 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 
 func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, error) {
 	for attempt := 1; attempt <= videoModerationAttempts; attempt++ {
+		startedAt := time.Now()
 		response, err := a.postStreamingJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 		if err != nil {
 			return provider.VideoResult{}, nil, 0, err
 		}
 		lastProgress := 0
-		result, postIDs, parseErr := parseVideoStreamCandidates(response, func(value int) {
+		result, postIDs, diagnostics, parseErr := parseVideoStreamCandidatesWithDiagnostics(response, func(value int) {
 			lastProgress = max(lastProgress, value)
 			if progress != nil {
 				progress(value)
 			}
 		})
 		_ = response.Body.Close()
+		a.log().Info("video_generation_stream_summary",
+			"attempt", attempt,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"frame_count", diagnostics.FrameCount,
+			"progress", diagnostics.Progress,
+			"video_ids", diagnostics.VideoIDs,
+			"asset_ids", diagnostics.AssetIDs,
+			"video_post_ids", diagnostics.VideoPostIDs,
+			"result_source", diagnostics.ResultSource,
+			"result_url_hash", diagnosticStringHash(result.URL),
+			"poster_url_hash", diagnosticStringHash(result.PosterURL),
+			"parse_error", parseErr,
+		)
 		if !errors.Is(parseErr, errVideoModerated) {
 			return result, postIDs, lastProgress, parseErr
 		}
@@ -634,6 +670,7 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	if uploaded.ID == "" || uploaded.URI == "" {
 		return uploadedFile{}, fmt.Errorf("上传视频参考图片后未返回文件标识或 fileUri")
 	}
+	uploaded.SourceHash = diagnosticBytesHash(image.Data)
 	return uploaded, nil
 }
 
@@ -732,16 +769,22 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 }
 
 func parseVideoStreamCandidates(response *http.Response, progress func(int)) (provider.VideoResult, []string, error) {
+	result, candidates, _, err := parseVideoStreamCandidatesWithDiagnostics(response, progress)
+	return result, candidates, err
+}
+
+func parseVideoStreamCandidatesWithDiagnostics(response *http.Response, progress func(int)) (provider.VideoResult, []string, videoStreamDiagnostics, error) {
+	diagnostics := videoStreamDiagnostics{}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, webMediaDiagnosticBodyLimit+1))
 		if response.StatusCode == http.StatusUnauthorized {
-			return provider.VideoResult{}, nil, provider.ErrUnauthorized
+			return provider.VideoResult{}, nil, diagnostics, provider.ErrUnauthorized
 		}
 		truncated := len(body) > webMediaDiagnosticBodyLimit
 		if truncated {
 			body = body[:webMediaDiagnosticBodyLimit]
 		}
-		return provider.VideoResult{}, nil, newWebMediaUpstreamError(response.StatusCode, body, truncated)
+		return provider.VideoResult{}, nil, diagnostics, newWebMediaUpstreamError(response.StatusCode, body, truncated)
 	}
 	var result provider.VideoResult
 	var videoIDs []string
@@ -768,6 +811,7 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 		return candidates
 	}
 	handle := func(root map[string]any) (bool, error) {
+		diagnostics.FrameCount++
 		if errorValue, ok := root["error"].(map[string]any); ok {
 			return false, webMediaStreamError(errorValue)
 		}
@@ -779,6 +823,9 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 			addCandidate(&videoIDs, stream["videoId"])
 			addCandidate(&assetIDs, stream["assetId"])
 			addCandidate(&videoPostIDs, stream["videoPostId"])
+			diagnostics.VideoIDs = append([]string(nil), videoIDs...)
+			diagnostics.AssetIDs = append([]string(nil), assetIDs...)
+			diagnostics.VideoPostIDs = append([]string(nil), videoPostIDs...)
 			moderated, _ := stream["moderated"].(bool)
 			if moderated {
 				return true, errVideoModerated
@@ -788,6 +835,9 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 			}
 			setVideoResultURL(&result, firstString(stream, "videoUrl", "contentUrl", "contentURL", "assetUrl", "assetURL", "fileUri", "fileURL"))
 			if value, ok := numberAsInt(stream["progress"]); ok {
+				if len(diagnostics.Progress) < 64 && (len(diagnostics.Progress) == 0 || diagnostics.Progress[len(diagnostics.Progress)-1] != value) {
+					diagnostics.Progress = append(diagnostics.Progress, value)
+				}
 				if value >= 100 && result.URL == "" {
 					pendingTerminalProgress = max(pendingTerminalProgress, value)
 				} else if progress != nil {
@@ -798,11 +848,13 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 				}
 			}
 			if result.URL != "" {
+				diagnostics.ResultSource = "stream"
 				return true, nil
 			}
 		}
 		for _, attachment := range videoFileAttachments(root) {
 			if setVideoResultURL(&result, attachment) {
+				diagnostics.ResultSource = "file_attachment"
 				return true, nil
 			}
 		}
@@ -819,12 +871,52 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 		err = consumeVideoJSON(reader, handle)
 	}
 	if err != nil {
-		return provider.VideoResult{}, orderedCandidates(), err
+		return provider.VideoResult{}, orderedCandidates(), diagnostics, err
 	}
 	if pendingTerminalProgress > 0 && progress != nil {
 		progress(pendingTerminalProgress)
 	}
-	return result, orderedCandidates(), nil
+	return result, orderedCandidates(), diagnostics, nil
+}
+
+func diagnosticBytesHash(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(value)
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func diagnosticStringHash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return diagnosticBytesHash([]byte(value))
+}
+
+func uploadedSourceHashes(values []uploadedFile) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value.SourceHash)
+	}
+	return result
+}
+
+func uploadedIDs(values []uploadedFile) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value.ID)
+	}
+	return result
+}
+
+func uploadedURIHashes(values []uploadedFile) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, diagnosticStringHash(value.URI))
+	}
+	return result
 }
 
 func webMediaStreamError(value map[string]any) error {

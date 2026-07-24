@@ -39,8 +39,9 @@ var (
 )
 
 type uploadedFile struct {
-	ID  string
-	URI string
+	ID         string
+	URI        string
+	SourceHash string
 }
 
 type remoteImageTarget struct {
