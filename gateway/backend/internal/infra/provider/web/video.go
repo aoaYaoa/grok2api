@@ -961,7 +961,7 @@ func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int,
 	if len(imageURLs) > 0 {
 		config["isVideoEdit"] = false
 	}
-	if len(imageURLs) > 0 {
+	if len(imageURLs) > 1 {
 		config["isReferenceToVideo"] = true
 		config["imageReferences"] = imageURLs
 	}
