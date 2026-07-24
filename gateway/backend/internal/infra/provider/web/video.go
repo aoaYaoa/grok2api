@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -170,6 +171,7 @@ type videoStreamDiagnostics struct {
 	AssetIDs     []string
 	VideoPostIDs []string
 	ResultSource string
+	Frames       []map[string]any
 }
 
 var defaultVideoRecoveryPolicy = videoRecoveryPolicy{
@@ -341,6 +343,7 @@ func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Confi
 			"asset_ids", diagnostics.AssetIDs,
 			"video_post_ids", diagnostics.VideoPostIDs,
 			"result_source", diagnostics.ResultSource,
+			"frames", diagnostics.Frames,
 			"result_url_hash", diagnosticStringHash(result.URL),
 			"poster_url_hash", diagnosticStringHash(result.PosterURL),
 			"parse_error", parseErr,
@@ -812,6 +815,9 @@ func parseVideoStreamCandidatesWithDiagnostics(response *http.Response, progress
 	}
 	handle := func(root map[string]any) (bool, error) {
 		diagnostics.FrameCount++
+		if len(diagnostics.Frames) < 16 {
+			diagnostics.Frames = append(diagnostics.Frames, summarizeVideoFrame(root))
+		}
 		if errorValue, ok := root["error"].(map[string]any); ok {
 			return false, webMediaStreamError(errorValue)
 		}
@@ -885,6 +891,68 @@ func diagnosticBytesHash(value []byte) string {
 	}
 	sum := sha256.Sum256(value)
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+func summarizeVideoFrame(root map[string]any) map[string]any {
+	summary := map[string]any{"root_keys": sortedMapKeys(root)}
+	result := nestedMap(root, "result")
+	if result == nil {
+		return summary
+	}
+	summary["result_keys"] = sortedMapKeys(result)
+	response := nestedMap(result, "response")
+	if response == nil {
+		return summary
+	}
+	summary["response_keys"] = sortedMapKeys(response)
+	for _, key := range []string{"messageTag", "responseId", "conversationId", "modelName", "model"} {
+		if value := safeWebMediaDiagnostic(firstString(response, key), 80); value != "" {
+			summary[key] = value
+		}
+	}
+	if stream := nestedMap(response, "streamingVideoGenerationResponse"); stream != nil {
+		streamSummary := map[string]any{"keys": sortedMapKeys(stream)}
+		for _, key := range []string{"videoId", "assetId", "videoPostId", "resolutionName"} {
+			if value := safeWebMediaDiagnostic(firstString(stream, key), 80); value != "" {
+				streamSummary[key] = value
+			}
+		}
+		if value, ok := numberAsInt(stream["progress"]); ok {
+			streamSummary["progress"] = value
+		}
+		if value, ok := stream["moderated"].(bool); ok {
+			streamSummary["moderated"] = value
+		}
+		for _, key := range []string{"videoUrl", "contentUrl", "contentURL", "assetUrl", "assetURL", "fileUri", "fileURL", "thumbnailImageUrl"} {
+			if value := firstString(stream, key); value != "" {
+				streamSummary[key+"Hash"] = diagnosticStringHash(value)
+			}
+		}
+		summary["stream"] = streamSummary
+	}
+	if modelResponse := nestedMap(response, "modelResponse"); modelResponse != nil {
+		modelSummary := map[string]any{"keys": sortedMapKeys(modelResponse)}
+		if values, ok := modelResponse["fileAttachments"].([]any); ok {
+			hashes := make([]string, 0, len(values))
+			for _, value := range values {
+				if attachment, ok := value.(string); ok {
+					hashes = append(hashes, diagnosticStringHash(attachment))
+				}
+			}
+			modelSummary["file_attachment_hashes"] = hashes
+		}
+		summary["model_response"] = modelSummary
+	}
+	return summary
+}
+
+func sortedMapKeys(value map[string]any) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func diagnosticStringHash(value string) string {
