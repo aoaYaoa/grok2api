@@ -241,6 +241,13 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		resolution = "720p"
 	}
 	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
+	a.log().Info("video_generation_payload_prepared",
+		"model_name", firstString(payload, "modelName"),
+		"message_length", len([]rune(firstString(payload, "message"))),
+		"message_hash", diagnosticStringHash(firstString(payload, "message")),
+		"file_attachment_count", len(stringSliceValue(payload["fileAttachments"])),
+		"tool_override_keys", sortedMapKeys(mapValue(payload["toolOverrides"])),
+	)
 	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
@@ -917,6 +924,13 @@ func summarizeVideoFrame(root map[string]any) map[string]any {
 				streamSummary[key] = value
 			}
 		}
+		if value := safeWebMediaDiagnostic(firstString(stream, "parentPostId"), 80); value != "" {
+			streamSummary["parentPostId"] = value
+		}
+		if value := firstString(stream, "videoPrompt"); value != "" {
+			streamSummary["videoPromptLength"] = len([]rune(value))
+			streamSummary["videoPromptHash"] = diagnosticStringHash(value)
+		}
 		if value, ok := numberAsInt(stream["progress"]); ok {
 			streamSummary["progress"] = value
 		}
@@ -953,6 +967,28 @@ func sortedMapKeys(value map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func mapValue(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
+}
+
+func stringSliceValue(value any) []string {
+	switch current := value.(type) {
+	case []string:
+		return current
+	case []any:
+		result := make([]string, 0, len(current))
+		for _, item := range current {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
 
 func diagnosticStringHash(value string) string {
