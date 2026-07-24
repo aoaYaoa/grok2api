@@ -60,7 +60,7 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.match(video, /scrollIntoView/);
   assert.match(video, /source_task_id: extensionSource\.taskID/);
   assert.match(video, /extendLength/);
-  assert.match(video, /disabled=\{!prompt\.trim\(\) && !references\.length\}/);
+  assert.match(video, /disabled=\{referencesLoading \|\| \(!prompt\.trim\(\) && !references\.length\)\}/);
   assert.match(videoAPI, /matchAll/);
   assert.match(videoAPI, /matches\.at\(-1\)/);
   assert.match(videoAPI, /视频任务结束但未返回结果/);
@@ -91,11 +91,25 @@ test("cached video references keep browser preview URLs separate from backend me
 
   assert.match(media, /requestData\?: string/);
   assert.match(video, /data: item\.url, requestData: cachedReferenceSource\(item\)/);
-  assert.match(video, /references\.map\(\(item\) => item\.requestData \|\| item\.data\)/);
+  assert.match(video, /activeReferences\.map\(\(item\) => item\.requestData \|\| item\.data\)/);
   assert.match(video, /<img src=\{item\.data\}/);
   assert.match(nsfw, /setSelected\(cached\)/);
   assert.match(nsfw, /selected\?\.requestSourceURL \|\| selected\?\.sourceURL/);
   assert.doesNotMatch(nsfw, /setSelected\(\{ \.\.\.cached, sourceURL: cachedReferenceSource\(cached\) \}\)/);
+});
+
+test("video reference selection cannot race or remain only selected in the cache dialog", async () => {
+  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
+
+  assert.match(video, /const \[referencesLoading, setReferencesLoading\] = useState\(false\)/);
+  assert.match(video, /const referencesRef = useRef<UploadAsset\[\]>\(\[\]\)/);
+  assert.match(video, /referencesRef\.current = next/);
+  assert.match(video, /const activeReferences = referencesRef\.current/);
+  assert.match(video, /image_references: activeReferences\.map/);
+  assert.match(video, /if \(referencesLoading\) return toast\.error\("参考图仍在读取，请稍候"\)/);
+  assert.match(video, /function addCachedReference\(item: CachedImage\)/);
+  assert.match(video, /if \(cached\) addCachedReference\(cached\)/);
+  assert.match(video, /disabled=\{referencesLoading \|\| \(!prompt\.trim\(\) && !references\.length\)\}/);
 });
 
 test("public media uploads convert HEIC references before preview and submission", async () => {

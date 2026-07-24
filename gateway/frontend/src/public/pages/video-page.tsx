@@ -27,6 +27,7 @@ export function VideoPage() {
   const { key } = usePublicAuth();
   const [prompt, setPrompt] = useState("");
   const [references, setReferences] = useState<UploadAsset[]>([]);
+  const [referencesLoading, setReferencesLoading] = useState(false);
   const [ratio, setRatio] = useState("3:2");
   const [length, setLength] = useState("6");
   const [resolution, setResolution] = useState("480p");
@@ -50,6 +51,8 @@ export function VideoPage() {
   const [extendTime, setExtendTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const controllers = useRef(new Map<string, AbortController>());
+  const referencesRef = useRef<UploadAsset[]>([]);
+  const referenceLoadCount = useRef(0);
   const taskIDs = useRef<string[]>([]);
   const startLock = useRef(false);
   const startController = useRef<AbortController | null>(null);
@@ -57,14 +60,25 @@ export function VideoPage() {
   const pendingExtensionScroll = useRef(false);
   const { beginVideoGroup, finishVideoTask } = useVideoFailureNotice();
 
+  const commitReferences = useCallback((update: (current: UploadAsset[]) => UploadAsset[]) => {
+    const next = update(referencesRef.current);
+    referencesRef.current = next;
+    setReferences(next);
+  }, []);
+
   const appendReferenceFiles = useCallback(async (files: FileList | File[]) => {
+    referenceLoadCount.current += 1;
+    setReferencesLoading(true);
     try {
-      const items = await filesToAssets(files, Math.max(0, 8 - references.length));
-      setReferences((value) => [...value, ...items].slice(0, 8));
+      const items = await filesToAssets(files, Math.max(0, 8 - referencesRef.current.length));
+      commitReferences((value) => [...value, ...items].slice(0, 8));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取参考图失败");
+    } finally {
+      referenceLoadCount.current = Math.max(0, referenceLoadCount.current - 1);
+      if (!referenceLoadCount.current) setReferencesLoading(false);
     }
-  }, [references.length]);
+  }, [commitReferences]);
 
   useEffect(() => {
     const paste = (event: ClipboardEvent) => {
@@ -110,7 +124,10 @@ export function VideoPage() {
 
   async function generate(bodyOverride?: Record<string, unknown>, extensionRootPostID = "") {
     if (startLock.current) return;
-    if (!prompt.trim() && !references.length && !bodyOverride) return toast.error("请输入提示词或添加参考图");
+    if (referencesLoading) return toast.error("参考图仍在读取，请稍候");
+    if (referenceLoadCount.current > 0) return toast.error("参考图仍在读取，请稍候");
+    const activeReferences = referencesRef.current;
+    if (!prompt.trim() && !activeReferences.length && !bodyOverride) return toast.error("请输入提示词或添加参考图");
     startLock.current = true;
     setStarting(true);
     setRunning(true);
@@ -118,7 +135,7 @@ export function VideoPage() {
     startController.current = controller;
     const taskPrompt = bodyOverride ? extendPrompt.trim() : prompt.trim();
     try {
-      const result = await startVideo(key, { prompt: taskPrompt, aspect_ratio: ratio, video_length: Number(length), resolution_name: resolution, preset, concurrent: Number(concurrent), image_references: references.map((item) => item.requestData || item.data), source_image_urls: references.map((item) => item.requestData || item.data), ...(bodyOverride || {}) }, controller.signal);
+      const result = await startVideo(key, { prompt: taskPrompt, aspect_ratio: ratio, video_length: Number(length), resolution_name: resolution, preset, concurrent: Number(concurrent), image_references: activeReferences.map((item) => item.requestData || item.data), source_image_urls: activeReferences.map((item) => item.requestData || item.data), ...(bodyOverride || {}) }, controller.signal);
       if (controller.signal.aborted) return;
       const ids = result.task_ids?.length ? result.task_ids : [result.task_id];
       taskIDs.current = ids;
@@ -177,7 +194,18 @@ export function VideoPage() {
 
   function addCachedReferences() {
     const selected = cachedImages.filter((item) => imageCacheSelected.has(item.id));
-    setReferences((current) => [...current, ...selected.map((item) => ({ id: item.id, name: item.name, mime: "image/jpeg", data: item.url, requestData: cachedReferenceSource(item) }))].slice(0, 8));
+    commitReferences((current) => [...current, ...selected.filter((item) => !current.some((reference) => reference.id === item.id)).map(cachedReferenceAsset)].slice(0, 8));
+    setImageCacheSelected(new Set());
+    setImageCacheOpen(false);
+  }
+
+  function cachedReferenceAsset(item: CachedImage): UploadAsset {
+    return { id: item.id, name: item.name, mime: "image/jpeg", data: item.url, requestData: cachedReferenceSource(item) };
+  }
+
+  function addCachedReference(item: CachedImage) {
+    commitReferences((current) => current.some((reference) => reference.id === item.id) ? current : [...current, cachedReferenceAsset(item)].slice(0, 8));
+    setImageCacheSelected(new Set());
     setImageCacheOpen(false);
   }
 
@@ -268,7 +296,7 @@ export function VideoPage() {
           <div className="workspace-panel p-4">
             <div className="workspace-control-group">
               <div className="mb-3 flex flex-wrap gap-2"><label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"><ImagePlus className="size-4" />添加参考图<input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(event) => { const input = event.currentTarget; void appendReferenceFiles(input.files || []).finally(() => { input.value = ""; }); }} /></label><Button variant="outline" onClick={() => void openImageCache()}><Library className="size-4" />从缓存选择</Button><span className="self-center text-xs text-muted-foreground">{references.length}/8</span></div>
-            {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button data-slot="icon-button" className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => setReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
+            {references.length ? <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">{references.map((item) => <div key={item.id} className="relative aspect-square overflow-hidden rounded-md border"><img src={item.data} alt={item.name} className="size-full object-cover" /><button data-slot="icon-button" className="absolute right-0 top-0 grid size-8 place-items-center bg-background/90" onClick={() => commitReferences((values) => values.filter((value) => value.id !== item.id))} aria-label={`移除 ${item.name}`}><X className="size-4" /></button></div>)}</div> : <p className="text-sm text-muted-foreground">支持最多 8 张图片、拖放与粘贴</p>}
             </div>
             <div className="workspace-control-group">
               <label className="workspace-field-label">视频提示词</label><Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-32" placeholder="描述镜头、动作和风格" />
@@ -280,7 +308,7 @@ export function VideoPage() {
                 <label><span className="workspace-field-label">生成模式</span><Select value={preset} onValueChange={setPreset}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["normal", "fun", "spicy", "custom"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></label>
                 <label className="col-span-2"><span className="workspace-field-label">并发任务</span><Select value={concurrent} onValueChange={setConcurrent}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["1", "2", "3", "4"].map((value) => <SelectItem key={value} value={value}>{value} 路</SelectItem>)}</SelectContent></Select></label>
               </div>
-              {starting ? <Button className="mt-4 w-full" disabled><Play className="size-4" />创建中...</Button> : running ? <Button variant="destructive" className="mt-4 w-full" onClick={() => void stop()}><Square className="size-4" />停止任务</Button> : <Button className="mt-4 w-full" onClick={() => void generate()} disabled={!prompt.trim() && !references.length}><Play className="size-4" />生成视频</Button>}
+              {starting ? <Button className="mt-4 w-full" disabled><Play className="size-4" />创建中...</Button> : running ? <Button variant="destructive" className="mt-4 w-full" onClick={() => void stop()}><Square className="size-4" />停止任务</Button> : <Button className="mt-4 w-full" onClick={() => void generate()} disabled={referencesLoading || (!prompt.trim() && !references.length)}><Play className="size-4" />{referencesLoading ? "正在读取参考图..." : "生成视频"}</Button>}
             </div>
           </div>
 
@@ -306,7 +334,7 @@ export function VideoPage() {
       </div>
 
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><DialogHeader><DialogTitle>重命名视频</DialogTitle></DialogHeader><Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button onClick={() => void saveRename()}>保存</Button></DialogContent></Dialog>
-      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>选择缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {imageCacheSelected.size} 张，最多添加至 8 张</span><div className="flex gap-2"><Button variant="outline" disabled={!imageCacheSelected.size} onClick={() => void removeCachedImages()}><Trash2 className="size-4" />删除所选</Button><Button disabled={!imageCacheSelected.size || references.length >= 8} onClick={addCachedReferences}><ImagePlus className="size-4" />添加所选</Button></div></div><ImageGrid images={cachedImages} selected={imageCacheSelected} onSelect={(id) => setImageCacheSelected((current) => toggleCacheSelection(current, id))} onOpen={(image) => setImageCacheSelected((current) => toggleCacheSelection(current, image.id))} /></div></DialogContent></Dialog>
+      <Dialog open={imageCacheOpen} onOpenChange={setImageCacheOpen}><DialogContent className="max-w-5xl"><DialogHeader><DialogTitle>选择缓存图片</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">点击大图直接使用，或勾选多张后添加</span><div className="flex gap-2"><Button variant="outline" disabled={!imageCacheSelected.size} onClick={() => void removeCachedImages()}><Trash2 className="size-4" />删除所选</Button><Button disabled={!imageCacheSelected.size || references.length >= 8} onClick={addCachedReferences}><ImagePlus className="size-4" />添加所选</Button></div></div><ImageGrid images={cachedImages} selected={imageCacheSelected} onSelect={(id) => setImageCacheSelected((current) => toggleCacheSelection(current, id))} onOpen={(image) => { const cached = cachedImages.find((item) => item.id === image.id); if (cached) addCachedReference(cached); }} /></div></DialogContent></Dialog>
       <Dialog open={cacheOpen} onOpenChange={setCacheOpen}><DialogContent className="max-w-5xl" onAnimationEnd={finishCacheDialogClose}><DialogHeader><DialogTitle>缓存视频</DialogTitle></DialogHeader><div className="max-h-[70dvh] overflow-auto"><div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 border-b bg-background py-2"><span className="text-sm text-muted-foreground">已选 {cacheSelected.size} 个</span><Button variant="outline" disabled={!cacheSelected.size} onClick={() => void removeCachedVideos()}><Trash2 className="size-4" />删除所选</Button></div><VideoGrid videos={cachedVideos} activeID={active?.id} selected={cacheSelected} onSelect={(id) => setCacheSelected((current) => toggleCacheSelection(current, id))} onActivate={(item) => { setCacheOpen(false); activate(item, true, true); }} onExtend={(item) => { setCacheOpen(false); activate(item, true, true); }} /></div></DialogContent></Dialog>
     </section>
   );
