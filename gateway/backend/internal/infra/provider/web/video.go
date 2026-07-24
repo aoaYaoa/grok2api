@@ -1070,8 +1070,7 @@ func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int,
 		}
 	}
 	payload := map[string]any{
-		"temporary": true, "modelName": "grok-3", "message": message, "enableSideBySide": !isSingleReference,
-		"toolOverrides":    map[string]any{"videoGen": true},
+		"temporary": true, "modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
 	if isSingleReference && len(attachments) > 0 {
