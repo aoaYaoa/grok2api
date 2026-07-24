@@ -38,6 +38,8 @@ services:
       WARP_SLEEP: "2"
     cap_add:
       - NET_ADMIN
+    volumes:
+      - warp_state:/var/lib/cloudflare-warp
     restart: unless-stopped
 
   flaresolverr:
@@ -50,3 +52,4 @@ services:
 
 volumes:
   grok2api_gateway_data:
+  warp_state:

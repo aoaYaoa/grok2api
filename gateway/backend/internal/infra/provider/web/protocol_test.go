@@ -1479,6 +1479,52 @@ func TestVideoMissingURLRetrySafetyUsesObservedProgress(t *testing.T) {
 	}
 }
 
+func TestFastVideoFallbackIsTerminalAndAccountNeutral(t *testing.T) {
+	err := validateFastVideoResult(provider.VideoResult{URL: "https://assets.grok.com/video.mp4"}, 9*time.Second, "stream")
+	if err == nil {
+		t.Fatal("fast playable result must be rejected")
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusBadGateway || provider.IsMediaJobRetrySafe(err) || !provider.IsAccountHealthNeutral(err) {
+		t.Fatalf("status=%d classified=%v retry=%v neutral=%v error=%v", status, ok, provider.IsMediaJobRetrySafe(err), provider.IsAccountHealthNeutral(err), err)
+	}
+	if message, ok := provider.MediaJobPublicMessage(err); !ok || message != "上游返回了异常快速的兜底视频，已停止任务且不会自动重试" {
+		t.Fatalf("public message = %q, classified=%v", message, ok)
+	}
+	if strings.Contains(err.Error(), "assets.grok.com") {
+		t.Fatalf("fast fallback error leaked upstream URL: %v", err)
+	}
+}
+
+func TestFastRecoveredVideoFallbackIsAlsoTerminal(t *testing.T) {
+	err := validateFastVideoResult(provider.VideoResult{URL: "https://assets.grok.com/recovered.mp4"}, 5*time.Second, "recovered")
+	if err == nil || provider.IsMediaJobRetrySafe(err) {
+		t.Fatalf("recovered fast result must be terminal: %v", err)
+	}
+}
+
+func TestVideoFallbackElapsedIncludesRecoveryTime(t *testing.T) {
+	if elapsed := videoFallbackElapsed("stream", 5*time.Second, 35*time.Second); elapsed != 5*time.Second {
+		t.Fatalf("stream elapsed = %s", elapsed)
+	}
+	if elapsed := videoFallbackElapsed("recovered", 5*time.Second, 30*time.Second); elapsed != 35*time.Second {
+		t.Fatalf("recovered elapsed = %s", elapsed)
+	}
+}
+
+func TestFinalizeVideoResultRejectsFastResultBeforeArchive(t *testing.T) {
+	adapter := &Adapter{}
+	for _, source := range []string{"stream", "recovered"} {
+		_, err := adapter.finalizeVideoResult(context.Background(), nil, account.Credential{}, provider.VideoResult{
+			URL: "https://assets.grok.com/generated/video.mp4",
+		}, 5*time.Second, source)
+		var fallbackErr *videoFastFallbackError
+		if !errors.As(err, &fallbackErr) || provider.IsMediaPostProcessingError(err) {
+			t.Fatalf("source=%s error=%T %v", source, err, err)
+		}
+	}
+}
+
 func TestParseVideoPostResultFindsCompletedNestedVideo(t *testing.T) {
 	result, err := parseVideoPostResult(http.StatusOK, []byte(`{
 		"post": {

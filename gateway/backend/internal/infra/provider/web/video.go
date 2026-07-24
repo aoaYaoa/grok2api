@@ -139,6 +139,27 @@ type videoMissingURLError struct {
 	progress int
 }
 
+const fastVideoFallbackThreshold = 10 * time.Second
+
+type videoFastFallbackError struct {
+	elapsed time.Duration
+	source  string
+}
+
+func (e *videoFastFallbackError) Error() string {
+	return "视频结果疑似上游安全降级，未保存该结果"
+}
+
+func (e *videoFastFallbackError) HTTPStatusCode() int { return http.StatusBadGateway }
+
+func (e *videoFastFallbackError) MediaJobRetrySafe() bool { return false }
+
+func (e *videoFastFallbackError) AccountHealthNeutral() bool { return true }
+
+func (e *videoFastFallbackError) MediaJobPublicMessage() string {
+	return "上游返回了异常快速的兜底视频，已停止任务且不会自动重试"
+}
+
 var errVideoRecoveryTimeout = errors.New("视频结果恢复超过等待时限")
 var errVideoModerated = errors.New("视频生成触发审核")
 
@@ -187,6 +208,13 @@ func (e *videoMissingURLError) Error() string {
 func (e *videoMissingURLError) HTTPStatusCode() int { return http.StatusBadGateway }
 
 func (e *videoMissingURLError) MediaJobRetrySafe() bool { return e.progress <= 1 }
+
+func validateFastVideoResult(result provider.VideoResult, elapsed time.Duration, source string) error {
+	if strings.TrimSpace(result.URL) == "" || elapsed >= fastVideoFallbackThreshold {
+		return nil
+	}
+	return &videoFastFallbackError{elapsed: elapsed, source: source}
+}
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
 	cfg := a.config()
@@ -248,11 +276,14 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		"file_attachment_count", len(stringSliceValue(payload["fileAttachments"])),
 		"tool_override_keys", sortedMapKeys(mapValue(payload["toolOverrides"])),
 	)
-	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
+	result, postIDs, lastProgress, streamElapsed, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
+	resultSource := "stream"
+	resultElapsed := streamElapsed
 	if result.URL == "" && lastProgress >= 100 && len(postIDs) > 0 {
+		recoveryStartedAt := time.Now()
 		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postIDs)
 		if err != nil {
 			if errors.Is(err, provider.ErrUnauthorized) {
@@ -260,6 +291,8 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 			}
 			return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postIDs[0], progress: lastProgress}
 		}
+		resultSource = "recovered"
+		resultElapsed = videoFallbackElapsed(resultSource, streamElapsed, time.Since(recoveryStartedAt))
 	}
 	if result.URL == "" {
 		postID := ""
@@ -268,7 +301,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		}
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
 	}
-	return a.ArchiveVideo(ctx, request.Credential, result)
+	return a.finalizeVideoResult(ctx, lease, request.Credential, result, resultElapsed, resultSource)
 }
 
 func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *egress.Lease, token string, request provider.VideoRequest) (provider.VideoResult, error) {
@@ -303,11 +336,14 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 		"toolOverrides": map[string]any{"videoGen": true}, "enableSideBySide": true,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
-	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
+	result, postIDs, lastProgress, streamElapsed, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
+	resultSource := "stream"
+	resultElapsed := streamElapsed
 	if result.URL == "" && lastProgress >= 100 && len(postIDs) > 0 {
+		recoveryStartedAt := time.Now()
 		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postIDs)
 		if err != nil {
 			if errors.Is(err, provider.ErrUnauthorized) {
@@ -315,6 +351,8 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 			}
 			return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postIDs[0], progress: lastProgress}
 		}
+		resultSource = "recovered"
+		resultElapsed = videoFallbackElapsed(resultSource, streamElapsed, time.Since(recoveryStartedAt))
 	}
 	if result.URL == "" {
 		postID := ""
@@ -323,15 +361,50 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 		}
 		return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
 	}
-	return a.ArchiveVideo(ctx, request.Credential, result)
+	return a.finalizeVideoResult(ctx, lease, request.Credential, result, resultElapsed, resultSource)
 }
 
-func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, error) {
+func videoFallbackElapsed(source string, streamElapsed, recoveryElapsed time.Duration) time.Duration {
+	if source == "recovered" {
+		return streamElapsed + recoveryElapsed
+	}
+	return streamElapsed
+}
+
+func (a *Adapter) finalizeVideoResult(ctx context.Context, lease *egress.Lease, credential account.Credential, result provider.VideoResult, elapsed time.Duration, source string) (provider.VideoResult, error) {
+	if err := a.rejectFastVideoFallback(ctx, lease, result, elapsed, source); err != nil {
+		return provider.VideoResult{}, err
+	}
+	return a.ArchiveVideo(ctx, credential, result)
+}
+
+func (a *Adapter) rejectFastVideoFallback(ctx context.Context, lease *egress.Lease, result provider.VideoResult, elapsed time.Duration, source string) error {
+	err := validateFastVideoResult(result, elapsed, source)
+	if err == nil {
+		return nil
+	}
+	if lease != nil {
+		if quarantineErr := a.egress.QuarantineForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, "fast video fallback"); quarantineErr != nil {
+			a.log().Warn("video_fast_fallback_quarantine_failed", "egress_node_id", lease.NodeID, "error", quarantineErr)
+		}
+	}
+	a.log().Warn("video_fast_fallback_rejected", "elapsed_ms", elapsed.Milliseconds(), "source", source, "egress_node_id", leaseNodeID(lease))
+	return err
+}
+
+func leaseNodeID(lease *egress.Lease) uint64 {
+	if lease == nil {
+		return 0
+	}
+	return lease.NodeID
+}
+
+func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, time.Duration, error) {
 	for attempt := 1; attempt <= videoModerationAttempts; attempt++ {
 		startedAt := time.Now()
 		response, err := a.postStreamingJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 		if err != nil {
-			return provider.VideoResult{}, nil, 0, err
+			return provider.VideoResult{}, nil, 0, time.Since(startedAt), err
 		}
 		lastProgress := 0
 		result, postIDs, diagnostics, parseErr := parseVideoStreamCandidatesWithDiagnostics(response, func(value int) {
@@ -341,9 +414,10 @@ func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Confi
 			}
 		})
 		_ = response.Body.Close()
+		streamElapsed := time.Since(startedAt)
 		a.log().Info("video_generation_stream_summary",
 			"attempt", attempt,
-			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"duration_ms", streamElapsed.Milliseconds(),
 			"frame_count", diagnostics.FrameCount,
 			"progress", diagnostics.Progress,
 			"video_ids", diagnostics.VideoIDs,
@@ -356,21 +430,21 @@ func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Confi
 			"parse_error", parseErr,
 		)
 		if !errors.Is(parseErr, errVideoModerated) {
-			return result, postIDs, lastProgress, parseErr
+			return result, postIDs, lastProgress, streamElapsed, parseErr
 		}
 		a.log().Warn("video_generation_moderated", "attempt", attempt, "max_attempts", videoModerationAttempts, "post_ids", postIDs)
 		if attempt == videoModerationAttempts {
-			return provider.VideoResult{}, postIDs, lastProgress, &videoModerationError{attempts: attempt}
+			return provider.VideoResult{}, postIDs, lastProgress, streamElapsed, &videoModerationError{attempts: attempt}
 		}
 		timer := time.NewTimer(1200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return provider.VideoResult{}, postIDs, lastProgress, ctx.Err()
+			return provider.VideoResult{}, postIDs, lastProgress, streamElapsed, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return provider.VideoResult{}, nil, 0, &videoModerationError{attempts: videoModerationAttempts}
+	return provider.VideoResult{}, nil, 0, 0, &videoModerationError{attempts: videoModerationAttempts}
 }
 
 func (a *Adapter) recoverVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token string, postIDs []string) (provider.VideoResult, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -38,6 +39,11 @@ type accountHealthNeutralError interface {
 	AccountHealthNeutral() bool
 }
 
+type mediaJobPublicMessageError interface {
+	error
+	MediaJobPublicMessage() string
+}
+
 func IsMediaJobRetrySafe(err error) bool {
 	var retrySafe mediaJobRetrySafeError
 	return errors.As(err, &retrySafe) && retrySafe.MediaJobRetrySafe()
@@ -48,6 +54,15 @@ func IsMediaJobRetrySafe(err error) bool {
 func IsAccountHealthNeutral(err error) bool {
 	var neutral accountHealthNeutralError
 	return errors.As(err, &neutral) && neutral.AccountHealthNeutral()
+}
+
+func MediaJobPublicMessage(err error) (string, bool) {
+	var publicMessage mediaJobPublicMessageError
+	if !errors.As(err, &publicMessage) {
+		return "", false
+	}
+	message := strings.TrimSpace(publicMessage.MediaJobPublicMessage())
+	return message, message != ""
 }
 
 // ErrorHTTPStatus 从 Provider 错误链中提取上游 HTTP 状态。
