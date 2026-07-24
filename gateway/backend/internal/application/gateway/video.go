@@ -1068,9 +1068,6 @@ func publicVideoFailureMessage(err error) string {
 	if errors.Is(err, provider.ErrUnauthorized) {
 		return "上游认证失败，请检查账号状态"
 	}
-	if message, ok := provider.MediaJobPublicMessage(err); ok {
-		return message
-	}
 	if provider.IsAccountHealthNeutral(err) {
 		return "内容未通过上游审核，请调整提示词或素材后重试"
 	}

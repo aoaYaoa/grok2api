@@ -98,7 +98,6 @@ type Manager struct {
 	inflight             sync.Map
 	nodes                map[domain.Scope]cachedNodeSnapshot
 	healthyNodes         map[uint64]time.Time
-	quarantinedNodes     map[uint64]time.Time
 	nodeVersions         map[domain.Scope]uint64
 	nodeLoads            singleflight.Group
 	clientLoads          singleflight.Group
@@ -171,7 +170,7 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 	manager := &Manager{
 		repository: repository, cipher: cipher,
 		clients: make(map[clientCacheKey]cachedClient),
-		nodes:   make(map[domain.Scope]cachedNodeSnapshot), healthyNodes: make(map[uint64]time.Time), quarantinedNodes: make(map[uint64]time.Time),
+		nodes:   make(map[domain.Scope]cachedNodeSnapshot), healthyNodes: make(map[uint64]time.Time),
 		nodeVersions: make(map[domain.Scope]uint64), clientVersions: make(map[uint64]uint64), clearances: make(map[string]clearanceState),
 		newBuildClient: newBuildRequestClient, newBrowserClient: newBrowserClient,
 		solver:          flaresolverrSolver{},
@@ -374,9 +373,6 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 未配置代理地址", boundNodeID))
 		}
 		proxyPool := m.isProxyPoolNode(selected)
-		if m.nodeQuarantined(selected.ID, now) {
-			return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 正在隔离", boundNodeID))
-		}
 		if !proxyPool && selected.CooldownUntil != nil && now.Before(*selected.CooldownUntil) {
 			return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 正在冷却", boundNodeID))
 		}
@@ -402,10 +398,6 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		candidateAvailable := make([]domain.Node, 0, len(nodes))
 		for _, node := range nodes {
 			if !node.Enabled {
-				continue
-			}
-			if m.nodeQuarantined(node.ID, now) {
-				configured = true
 				continue
 			}
 			// A fixed fallback is a reserved last resort, not another member of
@@ -573,9 +565,6 @@ func (m *Manager) fixedFallbackNode(ctx context.Context, scope domain.Scope, nod
 	}
 	if selected.ProxyPool {
 		return domain.Node{}, fmt.Errorf("固定回退节点 %d 使用代理池模式", nodeID)
-	}
-	if m.nodeQuarantined(selected.ID, time.Now().UTC()) {
-		return domain.Node{}, fmt.Errorf("固定回退节点 %d 正在隔离", nodeID)
 	}
 	if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
 		return domain.Node{}, fmt.Errorf("固定回退节点 %d 未配置代理地址", nodeID)
@@ -1075,74 +1064,6 @@ func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, trans
 	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
 }
 
-// QuarantineForScope marks an egress identity as temporarily unsafe for a
-// request-level soft fallback, without changing account health or triggering a
-// media-job retry on another account.
-func (m *Manager) QuarantineForScope(ctx context.Context, scope domain.Scope, nodeID uint64, reason string) error {
-	if nodeID == 0 {
-		m.clientMu.Lock()
-		stale := m.invalidateClientForScopeLocked(0, scope)
-		m.clientMu.Unlock()
-		closeRequestClients(stale)
-		return nil
-	}
-	now := time.Now().UTC()
-	until := now.Add(10 * time.Minute)
-	m.nodeMu.Lock()
-	if m.quarantinedNodes == nil {
-		m.quarantinedNodes = make(map[uint64]time.Time)
-	}
-	m.quarantinedNodes[nodeID] = until
-	m.nodeVersions[scope]++
-	delete(m.nodes, scope)
-	delete(m.healthyNodes, nodeID)
-	m.nodeMu.Unlock()
-	m.clientMu.Lock()
-	stale := m.invalidateClientLocked(nodeID)
-	m.clientMu.Unlock()
-	closeRequestClients(stale)
-	value, err := m.repository.GetEgressNode(ctx, nodeID)
-	if err != nil {
-		return fmt.Errorf("读取隔离出口节点 %d: %w", nodeID, err)
-	}
-	value.FailureCount++
-	value.Health = max(0.05, value.Health*0.5)
-	value.CooldownUntil = &until
-	value.LastError = boundEgressReason(reason)
-	if stateRepository, ok := m.repository.(egressStateRepository); ok {
-		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err != nil {
-			return fmt.Errorf("保存隔离出口节点 %d: %w", nodeID, err)
-		}
-		return nil
-	}
-	if _, err := m.repository.UpdateEgressNode(ctx, value); err != nil {
-		return fmt.Errorf("保存隔离出口节点 %d: %w", nodeID, err)
-	}
-	return nil
-}
-
-func (m *Manager) nodeQuarantined(nodeID uint64, now time.Time) bool {
-	if nodeID == 0 {
-		return false
-	}
-	m.nodeMu.Lock()
-	until, ok := m.quarantinedNodes[nodeID]
-	if ok && !now.Before(until) {
-		delete(m.quarantinedNodes, nodeID)
-		ok = false
-	}
-	m.nodeMu.Unlock()
-	return ok
-}
-
-func boundEgressReason(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
-	if len(value) > 160 {
-		return value[:160]
-	}
-	return value
-}
-
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
 	if scope == domain.ScopeBuild && neterrorpkg.IsResponseHeaderTimeout(transportErr) {
 		return
@@ -1632,7 +1553,6 @@ func (m *Manager) ForgetClearance(nodeID uint64) {
 	}
 	clear(m.nodes)
 	clear(m.healthyNodes)
-	delete(m.quarantinedNodes, nodeID)
 	stale := m.invalidateClientLocked(nodeID)
 	m.clientMu.Unlock()
 	m.nodeMu.Unlock()

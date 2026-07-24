@@ -47,32 +47,6 @@ func TestVideoIncompleteStreamRetryPlanUsesBoundedBackoff(t *testing.T) {
 	}
 }
 
-func TestFastVideoFallbackIsNeverDeferredOrRetried(t *testing.T) {
-	err := &terminalVideoError{}
-	status, ok := provider.ErrorHTTPStatus(err)
-	if !ok || status != http.StatusBadGateway || provider.IsMediaJobRetrySafe(err) || !provider.IsAccountHealthNeutral(err) {
-		t.Fatalf("status=%d classified=%v retry=%v neutral=%v", status, ok, provider.IsMediaJobRetrySafe(err), provider.IsAccountHealthNeutral(err))
-	}
-	if _, retry := videoRetryPlan(status, 0, provider.IsMediaJobRetrySafe(err)); retry {
-		t.Fatal("fast fallback must not trigger an automatic account retry")
-	}
-	if message := publicVideoFailureMessage(err); message != "上游返回了异常快速的兜底视频，已停止任务且不会自动重试" {
-		t.Fatalf("public message = %q", message)
-	}
-}
-
-type terminalVideoError struct{}
-
-func (*terminalVideoError) Error() string           { return "fast video fallback" }
-func (*terminalVideoError) HTTPStatusCode() int     { return http.StatusBadGateway }
-func (*terminalVideoError) MediaJobRetrySafe() bool { return false }
-func (*terminalVideoError) AccountHealthNeutral() bool {
-	return true
-}
-func (*terminalVideoError) MediaJobPublicMessage() string {
-	return "上游返回了异常快速的兜底视频，已停止任务且不会自动重试"
-}
-
 func TestPublicVideoFailureMessageHidesUpstreamHTML(t *testing.T) {
 	err := errors.New("上传图片失败，上游返回 403: <!DOCTYPE html><html><title>Just a moment...</title></html>")
 	message := publicVideoFailureMessage(err)

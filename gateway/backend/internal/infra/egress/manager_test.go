@@ -84,42 +84,6 @@ func TestDirectFallbackRebuildsClientAfterAntiBotRejection(t *testing.T) {
 	}
 }
 
-func TestQuarantineForScopePersistsSoftFallbackAndInvalidatesClient(t *testing.T) {
-	repository := &statefulEgressRepository{mutableEgressRepository: mutableEgressRepository{node: domain.Node{ID: 1, Name: "warp", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}}
-	manager := NewManager(repository, nil)
-	client := &scriptedRequestClient{}
-	manager.clients[clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "web"}] = cachedClient{client: client}
-
-	if err := manager.QuarantineForScope(context.Background(), domain.ScopeWeb, 1, "fast video fallback"); err != nil {
-		t.Fatal(err)
-	}
-
-	if repository.healthUpdates != 1 || repository.node.LastError != "fast video fallback" || repository.node.CooldownUntil == nil || !repository.node.CooldownUntil.After(time.Now().UTC()) {
-		t.Fatalf("soft fallback quarantine = updates=%d node=%#v", repository.healthUpdates, repository.node)
-	}
-	if repository.node.Health >= 1 || client.closedIdle != 1 || managerHasClientForNode(manager, 1) {
-		t.Fatalf("quarantine did not reduce health and evict client: health=%v closed=%d", repository.node.Health, client.closedIdle)
-	}
-}
-
-func TestQuarantineForScopeRemainsEffectiveWhenPersistenceFails(t *testing.T) {
-	repository := &statefulEgressRepository{
-		mutableEgressRepository: mutableEgressRepository{node: domain.Node{ID: 1, Name: "warp", Scope: domain.ScopeWeb, Enabled: true, Health: 1}},
-		healthErr:               errors.New("database unavailable"),
-	}
-	manager := NewManager(repository, nil)
-	client := &scriptedRequestClient{}
-	manager.clients[clientCacheKey{nodeID: 1, scope: domain.ScopeWeb, fingerprint: "web"}] = cachedClient{client: client}
-
-	err := manager.QuarantineForScope(context.Background(), domain.ScopeWeb, 1, "fast video fallback")
-	if err == nil || !manager.nodeQuarantined(1, time.Now().UTC()) {
-		t.Fatalf("error=%v quarantined=%v", err, manager.nodeQuarantined(1, time.Now().UTC()))
-	}
-	if client.closedIdle != 1 || managerHasClientForNode(manager, 1) {
-		t.Fatal("persistence failure reused the quarantined client")
-	}
-}
-
 func TestClientCacheEvictsIdleEntriesAndEnforcesCapacity(t *testing.T) {
 	now := time.Now()
 	idleClient := &scriptedRequestClient{}
@@ -1672,32 +1636,6 @@ type mutableEgressRepository struct {
 	node    domain.Node
 	reads   int
 	updates int
-}
-
-type statefulEgressRepository struct {
-	mutableEgressRepository
-	healthUpdates int
-	healthErr     error
-}
-
-func (r *statefulEgressRepository) UpdateEgressNodeClearance(context.Context, uint64, string, string, string, string, time.Time) error {
-	return nil
-}
-
-func (r *statefulEgressRepository) UpdateEgressNodeHealth(_ context.Context, _ uint64, health float64, failureCount int, cooldownUntil *time.Time, lastError string) error {
-	r.healthUpdates++
-	if r.healthErr != nil {
-		return r.healthErr
-	}
-	r.node.Health = health
-	r.node.FailureCount = failureCount
-	r.node.CooldownUntil = cooldownUntil
-	r.node.LastError = lastError
-	return nil
-}
-
-func (r *statefulEgressRepository) UpdateEgressNodeLastError(context.Context, uint64, string) error {
-	return nil
 }
 
 type blockingEgressRepository struct {
