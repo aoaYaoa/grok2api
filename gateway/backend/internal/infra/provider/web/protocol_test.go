@@ -1292,7 +1292,7 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 }
 
-func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
+func TestVideoCreatePayloadUsesVideoToolRouteForSingleImage(t *testing.T) {
 	payload := videoCreatePayload(
 		"move naturally",
 		"post_1",
@@ -1302,8 +1302,11 @@ func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
 		[]uploadedFile{{ID: "file_1", URI: "https://assets.grok.com/users/test/post_1/content"}},
 		"normal",
 	)
-	if payload["modelName"] != "imagine-video-gen" || payload["enableSideBySide"] != false {
+	if payload["modelName"] != "grok-3" || payload["enableSideBySide"] != false {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if got := payload["toolOverrides"]; !reflect.DeepEqual(got, map[string]any{"videoGen": true}) {
+		t.Fatalf("toolOverrides = %#v", got)
 	}
 	if got := payload["message"]; got != "https://assets.grok.com/users/test/post_1/content  move naturally --mode=custom" {
 		t.Fatalf("message = %#v", got)
@@ -1323,9 +1326,6 @@ func TestVideoCreatePayloadMatchesOfficialSingleImageRequest(t *testing.T) {
 	}
 	if _, ok := config["imageReferences"]; ok {
 		t.Fatalf("single-image payload contains imageReferences: %#v", config)
-	}
-	if _, ok := payload["toolOverrides"]; ok {
-		t.Fatalf("official video payload does not send toolOverrides: %#v", payload)
 	}
 }
 
@@ -1357,8 +1357,11 @@ func TestVideoCreatePayloadPreservesMultiReferenceProtocol(t *testing.T) {
 		},
 		"normal",
 	)
-	if payload["modelName"] != "imagine-video-gen" || payload["enableSideBySide"] != true {
+	if payload["modelName"] != "grok-3" || payload["enableSideBySide"] != true {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if got := payload["toolOverrides"]; !reflect.DeepEqual(got, map[string]any{"videoGen": true}) {
+		t.Fatalf("toolOverrides = %#v", got)
 	}
 	if got := payload["message"]; got != "combine both references --mode=custom" {
 		t.Fatalf("message = %#v", got)
@@ -1380,8 +1383,11 @@ func TestVideoCreatePayloadPreservesMultiReferenceProtocol(t *testing.T) {
 
 func TestVideoCreatePayloadPreservesZeroReferenceProtocol(t *testing.T) {
 	payload := videoCreatePayload("camera orbit", "post_1", "16:9", "720p", 6, nil, "normal")
-	if payload["modelName"] != "imagine-video-gen" || payload["enableSideBySide"] != true || payload["message"] != "camera orbit --mode=custom" {
+	if payload["modelName"] != "grok-3" || payload["enableSideBySide"] != true || payload["message"] != "camera orbit --mode=custom" {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if got := payload["toolOverrides"]; !reflect.DeepEqual(got, map[string]any{"videoGen": true}) {
+		t.Fatalf("toolOverrides = %#v", got)
 	}
 	if _, ok := payload["fileAttachments"]; ok {
 		t.Fatalf("zero-reference payload contains attachments: %#v", payload)
