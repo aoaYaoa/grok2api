@@ -144,11 +144,6 @@ var errVideoModerated = errors.New("视频生成触发审核")
 
 const videoModerationAttempts = 5
 
-const (
-	videoFastCompletionThreshold = 10 * time.Second
-	videoStabilizationWait       = 45 * time.Second
-)
-
 type videoModerationError struct {
 	attempts int
 }
@@ -253,11 +248,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		"file_attachment_count", len(stringSliceValue(payload["fileAttachments"])),
 		"tool_override_keys", sortedMapKeys(mapValue(payload["toolOverrides"])),
 	)
-	result, postIDs, lastProgress, completionTime, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
-	if err != nil {
-		return provider.VideoResult{}, err
-	}
-	result, err = a.stabilizeFastVideoResult(ctx, cfg, lease, token, result, postIDs, completionTime)
+	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
@@ -312,11 +303,7 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 		"toolOverrides": map[string]any{"videoGen": true}, "enableSideBySide": true,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
-	result, postIDs, lastProgress, completionTime, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
-	if err != nil {
-		return provider.VideoResult{}, err
-	}
-	result, err = a.stabilizeFastVideoResult(ctx, cfg, lease, token, result, postIDs, completionTime)
+	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
@@ -339,12 +326,12 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }
 
-func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, time.Duration, error) {
+func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Config, lease *egress.Lease, token string, payload map[string]any, progress func(int)) (provider.VideoResult, []string, int, error) {
 	for attempt := 1; attempt <= videoModerationAttempts; attempt++ {
 		startedAt := time.Now()
 		response, err := a.postStreamingJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 		if err != nil {
-			return provider.VideoResult{}, nil, 0, 0, err
+			return provider.VideoResult{}, nil, 0, err
 		}
 		lastProgress := 0
 		result, postIDs, diagnostics, parseErr := parseVideoStreamCandidatesWithDiagnostics(response, func(value int) {
@@ -369,58 +356,21 @@ func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Confi
 			"parse_error", parseErr,
 		)
 		if !errors.Is(parseErr, errVideoModerated) {
-			return result, postIDs, lastProgress, time.Since(startedAt), parseErr
+			return result, postIDs, lastProgress, parseErr
 		}
 		a.log().Warn("video_generation_moderated", "attempt", attempt, "max_attempts", videoModerationAttempts, "post_ids", postIDs)
 		if attempt == videoModerationAttempts {
-			return provider.VideoResult{}, postIDs, lastProgress, time.Since(startedAt), &videoModerationError{attempts: attempt}
+			return provider.VideoResult{}, postIDs, lastProgress, &videoModerationError{attempts: attempt}
 		}
 		timer := time.NewTimer(1200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return provider.VideoResult{}, postIDs, lastProgress, time.Since(startedAt), ctx.Err()
+			return provider.VideoResult{}, postIDs, lastProgress, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return provider.VideoResult{}, nil, 0, 0, &videoModerationError{attempts: videoModerationAttempts}
-}
-
-func videoCompletionStabilizationDelay(completionTime time.Duration) time.Duration {
-	if completionTime > 0 && completionTime < videoFastCompletionThreshold {
-		return videoStabilizationWait
-	}
-	return 0
-}
-
-func (a *Adapter) stabilizeFastVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token string, result provider.VideoResult, postIDs []string, completionTime time.Duration) (provider.VideoResult, error) {
-	delay := videoCompletionStabilizationDelay(completionTime)
-	if delay == 0 || result.URL == "" || len(postIDs) == 0 {
-		return result, nil
-	}
-	a.log().Warn("video_fast_completion_stabilization_started", "duration_ms", completionTime.Milliseconds(), "wait", delay, "post_ids", postIDs)
-	timer := time.NewTimer(delay)
-	select {
-	case <-ctx.Done():
-		timer.Stop()
-		return provider.VideoResult{}, ctx.Err()
-	case <-timer.C:
-	}
-	for _, postID := range postIDs {
-		refreshed, err := a.lookupVideoPost(ctx, cfg, lease, token, postID)
-		if err != nil {
-			if errors.Is(err, provider.ErrUnauthorized) {
-				return provider.VideoResult{}, err
-			}
-			continue
-		}
-		if refreshed.URL != "" {
-			a.log().Info("video_fast_completion_stabilized", "post_id", postID, "url_changed", refreshed.URL != result.URL, "poster_changed", refreshed.PosterURL != result.PosterURL)
-			return refreshed, nil
-		}
-	}
-	a.log().Warn("video_fast_completion_stabilization_lookup_empty", "post_ids", postIDs)
-	return result, nil
+	return provider.VideoResult{}, nil, 0, &videoModerationError{attempts: videoModerationAttempts}
 }
 
 func (a *Adapter) recoverVideoResult(ctx context.Context, cfg Config, lease *egress.Lease, token string, postIDs []string) (provider.VideoResult, error) {
