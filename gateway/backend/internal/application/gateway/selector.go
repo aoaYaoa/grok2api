@@ -65,6 +65,7 @@ func newCandidateSnapshot(values []account.RoutingCandidate, expiresAt time.Time
 
 type candidateCacheKey struct {
 	provider      account.Provider
+	modelRouteID  uint64
 	upstreamModel string
 	quotaMode     string
 }
@@ -76,6 +77,7 @@ type routingBaseCacheKey struct {
 
 type routingOverlayCacheKey struct {
 	provider      account.Provider
+	modelRouteID  uint64
 	upstreamModel string
 }
 
@@ -240,11 +242,11 @@ func (s *Selector) preferFreeBuildEnabled() bool {
 	return s.preferFreeBuild
 }
 
-func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
+func (s *Selector) Acquire(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
 	now := time.Now().UTC()
 	stickyKey := stickySessionKey(affinityKey)
 	quotaProduct, quotaProductKnown := s.resolveQuotaProduct(provider, upstreamModel)
-	values, err := s.loadCandidates(ctx, provider, upstreamModel, quotaMode, now)
+	values, err := s.loadCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode, now)
 	if err != nil {
 		return nil, err
 	}
@@ -491,10 +493,10 @@ func isSelectionUnavailable(err error, reason SelectionUnavailableReason) bool {
 }
 
 // AcquirePinned 为 previous_response_id 等账号归属请求获取指定账号租约。
-func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider, accountID uint64, upstreamModel, quotaMode string, inference bool) (*accountLease, error) {
+func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider, accountID, modelRouteID uint64, upstreamModel, quotaMode string, inference bool) (*accountLease, error) {
 	now := time.Now().UTC()
 	quotaProduct, quotaProductKnown := s.resolveQuotaProduct(provider, upstreamModel)
-	values, err := s.loadCandidates(ctx, provider, upstreamModel, quotaMode, now)
+	values, err := s.loadCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode, now)
 	if err != nil {
 		return nil, err
 	}
@@ -639,13 +641,14 @@ func (s *Selector) markFreeQuotaExhaustedAt(ctx context.Context, credential acco
 	s.invalidateCandidates(credential.Provider)
 }
 
-func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential account.Credential, upstreamModel string, retryAfter time.Duration) {
+func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential account.Credential, billing *account.Billing, upstreamModel string, retryAfter time.Duration) {
 	upstreamModel = strings.TrimSpace(upstreamModel)
 	if upstreamModel == "" {
-		s.MarkFreeQuotaExhausted(ctx, credential, 0, 0, quotaRecoveryHints{})
+		s.MarkFreeQuotaExhausted(ctx, credential, 0, 0, quotaRecoveryHints{Billing: billing, RetryAfter: retryAfter})
 		return
 	}
-	if retryAfter <= 0 {
+	knownFreeBuild := (account.RoutingCandidate{Credential: credential, Billing: billing}).IsKnownFreeBuild()
+	if knownFreeBuild || retryAfter <= 0 {
 		retryAfter = defaultFreeQuotaRecoveryPause
 	}
 	until := time.Now().UTC().Add(retryAfter)
@@ -674,8 +677,9 @@ func (s *Selector) MarkModelAccessDenied(ctx context.Context, credential account
 	s.invalidateCandidates(credential.Provider)
 }
 
-// MarkPaymentQuotaExhausted 将 402/spending-limit 账号移出号池。付费账号按真实账期
-// 进行 Billing 探测；Free/Unknown 依次采用上游 ResetAt、Retry-After、账期时间和 20h fallback。
+// MarkPaymentQuotaExhausted removes a spending-limited account from routing.
+// Paid accounts follow their upstream billing period; Free or unknown accounts
+// prefer the upstream reset, Retry-After, billing period, and finally the local fallback.
 func (s *Selector) MarkPaymentQuotaExhausted(ctx context.Context, credential account.Credential, hints quotaRecoveryHints) {
 	now := time.Now().UTC()
 	if hints.Billing != nil && hints.Billing.IsPaid() {
@@ -796,22 +800,22 @@ func (s *Selector) MarkFailure(ctx context.Context, credential account.Credentia
 	}
 }
 
-func (s *Selector) loadCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
+func (s *Selector) loadCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
 	if _, ok := s.accounts.(repository.RoutingLayerRepository); ok {
-		return s.loadLayeredCandidates(ctx, provider, upstreamModel, quotaMode, now)
+		return s.loadLayeredCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode, now)
 	}
-	return s.loadCombinedCandidates(ctx, provider, upstreamModel, quotaMode, now)
+	return s.loadCombinedCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode, now)
 }
 
-func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
-	key := candidateCacheKey{provider: provider, upstreamModel: upstreamModel, quotaMode: quotaMode}
+func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
+	key := candidateCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel, quotaMode: quotaMode}
 	s.candidateMu.Lock()
 	if snapshot, ok := s.candidates[key]; ok && now.Before(snapshot.expiresAt) {
 		s.candidateMu.Unlock()
 		return snapshot.values, nil
 	}
 	s.candidateMu.Unlock()
-	loadKey := string(provider) + "\x00" + upstreamModel + "\x00" + quotaMode
+	loadKey := fmt.Sprintf("%s\x00%d\x00%s\x00%s", provider, modelRouteID, upstreamModel, quotaMode)
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
 		checkTime := time.Now().UTC()
 		s.candidateMu.Lock()
@@ -820,7 +824,7 @@ func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.
 			return snapshot.values, nil
 		}
 		s.candidateMu.Unlock()
-		values, err := s.accounts.ListRoutingCandidates(ctx, provider, upstreamModel, quotaMode)
+		values, err := s.accounts.ListRoutingCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode)
 		if err != nil {
 			return nil, err
 		}
@@ -835,15 +839,15 @@ func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.
 	return loaded.([]account.RoutingCandidate), nil
 }
 
-func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
-	key := candidateCacheKey{provider: provider, upstreamModel: upstreamModel, quotaMode: quotaMode}
+func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time) ([]account.RoutingCandidate, error) {
+	key := candidateCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel, quotaMode: quotaMode}
 	s.candidateMu.Lock()
 	if snapshot, ok := s.candidates[key]; ok && now.Before(snapshot.expiresAt) {
 		s.candidateMu.Unlock()
 		return snapshot.values, nil
 	}
 	s.candidateMu.Unlock()
-	loadKey := "assembled\x00" + string(provider) + "\x00" + upstreamModel + "\x00" + quotaMode
+	loadKey := fmt.Sprintf("assembled\x00%s\x00%d\x00%s\x00%s", provider, modelRouteID, upstreamModel, quotaMode)
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
 		checkTime := time.Now().UTC()
 		s.candidateMu.Lock()
@@ -858,7 +862,7 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 			if loadErr != nil {
 				return nil, loadErr
 			}
-			overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, upstreamModel, checkTime)
+			overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, modelRouteID, upstreamModel, checkTime)
 			if loadErr != nil {
 				return nil, loadErr
 			}
@@ -880,7 +884,7 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 		}
 		// Sustained account synchronization must not turn cache churn into user-facing
 		// failures. Fall back to the established authoritative combined query.
-		return s.accounts.ListRoutingCandidates(ctx, provider, upstreamModel, quotaMode)
+		return s.accounts.ListRoutingCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode)
 	})
 	if err != nil {
 		return nil, err
@@ -928,8 +932,8 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 	return result.values, result.version, nil
 }
 
-func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, upstreamModel string, now time.Time) (account.RoutingOverlaySnapshot, routingLayerVersion, error) {
-	key := routingOverlayCacheKey{provider: provider, upstreamModel: upstreamModel}
+func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, modelRouteID uint64, upstreamModel string, now time.Time) (account.RoutingOverlaySnapshot, routingLayerVersion, error) {
+	key := routingOverlayCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel}
 	version := s.routingOverlayVersion(provider)
 	s.candidateMu.Lock()
 	if snapshot, ok := s.routingOverlays[key]; ok && now.Before(snapshot.expiresAt) && snapshot.version == version {
@@ -938,7 +942,7 @@ func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.Ro
 		return value, version, nil
 	}
 	s.candidateMu.Unlock()
-	loadKey := "overlay\x00" + string(provider) + "\x00" + upstreamModel
+	loadKey := fmt.Sprintf("overlay\x00%s\x00%d\x00%s", provider, modelRouteID, upstreamModel)
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
 		checkTime := time.Now().UTC()
 		checkVersion := s.routingOverlayVersion(provider)
@@ -949,7 +953,7 @@ func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.Ro
 			return routingOverlayLoadResult{value: value, version: checkVersion}, nil
 		}
 		s.candidateMu.Unlock()
-		value, loadErr := layered.ListRoutingAccountOverlays(ctx, provider, upstreamModel)
+		value, loadErr := layered.ListRoutingAccountOverlays(ctx, provider, modelRouteID, upstreamModel)
 		if loadErr != nil {
 			return nil, loadErr
 		}

@@ -81,12 +81,12 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	if input.IsExtension && sourceFound {
 		metadata.markAccountAttempt(sourceAccountID)
-		lease, err = s.selector.AcquirePinned(ctx, route.Provider, sourceAccountID, route.UpstreamModel, quotaMode, true)
+		lease, err = s.selector.AcquirePinned(ctx, route.Provider, sourceAccountID, route.ID, route.UpstreamModel, quotaMode, true)
 		if err != nil && metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
 		}
 	} else {
-		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
+		lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", nil, false)
 	}
 	if err != nil {
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
@@ -359,7 +359,7 @@ func (s *Service) repairCompletedVideoOutputs(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		lease, leaseErr := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", false)
+		lease, leaseErr := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, "", false)
 		if leaseErr != nil {
 			result = firstError(result, fmt.Errorf("任务 %s 获取原账号: %w", job.ID, leaseErr))
 			continue
@@ -520,7 +520,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		s.logger.Warn("video_job_progress_write_failed", "job_id", job.ID, "error", err)
 	}
 	metadata := videoMetadataForJob(job)
-	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
+	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, "", true)
 	if err != nil {
 		if s.videoCancelled(job.ID) {
 			return
@@ -902,7 +902,7 @@ func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Jo
 	if !metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
 		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 	}
-	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+	lease, err := s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
 	if err != nil {
 		return nil, err
 	}

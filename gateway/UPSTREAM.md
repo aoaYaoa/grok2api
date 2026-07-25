@@ -1,12 +1,12 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `dae50ce67b95d5cad2b4168e32332c790b2c9ce6`
-- Imported: `2026-07-24`
+- Commit: `d2a8b4f743562d8a162f14aadf060f1e6f51faa3`
+- Imported: `2026-07-25`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream `v3.0.8-hotfix.1` at commit `dae50ce67b95d5cad2b4168e32332c790b2c9ce6`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream `v3.0.9` plus the Web stream fix at commit `d2a8b4f743562d8a162f14aadf060f1e6f51faa3`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
@@ -15,7 +15,11 @@ The Go and React sources were three-way synchronized through upstream `v3.0.8-ho
 - Configurable Grok Build 403 account invalidation with hot-reloadable error-code matching.
 - BOM-tolerant JSON and JSONL account imports across Build, Web, and Console providers.
 - Grok Web agreement and linked-account filters, responsive settings tabs, and abortable audit detail loading.
-- Grok Build `0.2.110` recommendation and reasoning compatibility fixes from `v3.0.8-hotfix.1`.
+- Grok Build `0.2.111`, nullable tool-schema normalization, OAuth compatibility, and generated tool declarations.
+- Blocked-account detection across Web session, quota, and chat 403 responses with SSO invalidation.
+- Route-aware account selection and SQLite support for multiple public model names targeting one upstream model.
+- Build quota-state reset operations, updated account egress binding controls, and Creative Console message regenerate/edit/delete actions.
+- Client-visible Web stream phase tracking that suppresses late reasoning after visible output begins.
 
 ## Updating
 
