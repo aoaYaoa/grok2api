@@ -883,11 +883,14 @@ func (m videoInputMetadata) excludedAccounts() map[uint64]bool {
 }
 
 func (m videoInputMetadata) canTryAnotherAccount(limit int) bool {
-	return limit > 0 && len(m.excludedAccounts()) < limit
+	return limit == unlimitedRoutingAttempts || (limit > 0 && len(m.excludedAccounts()) < limit)
 }
 
 func (s *Service) videoAccountAttemptLimit() int {
 	limit := int(s.maxAttempts.Load())
+	if limit == unlimitedRoutingAttempts {
+		return limit
+	}
 	if limit <= 0 {
 		return 3
 	}

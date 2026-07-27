@@ -376,3 +376,16 @@ func TestVideoMetadataCombinesImmutableReferencesAndMutableState(t *testing.T) {
 		t.Fatalf("combined metadata = %#v", metadata)
 	}
 }
+
+func TestVideoUnlimitedAccountAttemptsRemainUnbounded(t *testing.T) {
+	service := &Service{}
+	service.maxAttempts.Store(unlimitedRoutingAttempts)
+	limit := service.videoAccountAttemptLimit()
+	if limit != unlimitedRoutingAttempts {
+		t.Fatalf("attempt limit = %d, want %d", limit, unlimitedRoutingAttempts)
+	}
+	metadata := videoInputMetadata{AttemptedAccountIDs: []uint64{1, 2, 3}}
+	if !metadata.canTryAnotherAccount(limit) {
+		t.Fatal("unlimited video routing must continue until the selector exhausts candidates")
+	}
+}
