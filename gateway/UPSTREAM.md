@@ -1,12 +1,12 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `5131698b40ede2dfc6c1d42e0d393e43a0a27bd2`
-- Imported: `2026-07-27`
+- Commit: `d3686a1cfb63038a594baafb5170dcadffacf126`
+- Imported: `2026-07-28`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `5131698b40ede2dfc6c1d42e0d393e43a0a27bd2`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `d3686a1cfb63038a594baafb5170dcadffacf126`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
@@ -24,6 +24,10 @@ The Go and React sources were three-way synchronized through upstream commit `51
 - Unlimited account-routing attempts with request-level stop conditions and configurable management controls.
 - Build safety, quota, and account-scoped failure classification improvements.
 - Client-key-gated reasoning-effort model aliases for supported Build and Console models.
+- Grok2API v3.0.10 account export with provider selection, stable cursor pagination, and deferred credential hydration.
+- Dual-stack egress probes, selectable probe providers, cancellation-aware proxy health, and safer clearance refresh handling.
+- Lower-I/O layered account selection with preserved diagnostics, stale-credential detection, and post-success failure health updates.
+- Response timing metrics, token throughput, detailed billing breakdowns, and matching dashboard and request-audit presentation.
 
 ## Updating
 

@@ -542,6 +542,32 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	defer lease.Release()
+	credential, err := s.accounts.EnsureCredential(ctx, lease.Credential, false)
+	if err != nil {
+		if s.videoCancelled(job.ID) {
+			return
+		}
+		if parent.Err() != nil {
+			s.deferVideoJob(parent, job)
+			return
+		}
+		lease.Release()
+		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata)
+		if fallbackErr == nil {
+			if s.logger != nil {
+				s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
+			}
+			fallback.Release()
+			s.runVideoJob(parent, job, route)
+			return
+		}
+		if s.logger != nil {
+			s.logger.Warn("video_account_switch_failed", "job_id", job.ID, "extension", metadata.IsExtension, "error", fallbackErr)
+		}
+		s.failVideoJob(parent, job, "account_unavailable", err)
+		return
+	}
+	lease.Credential = credential
 	adapter, ok := s.providers.Videos(route.Provider)
 	if !ok {
 		s.failVideoJob(parent, job, "provider_unavailable", ErrNoAvailableAccount)

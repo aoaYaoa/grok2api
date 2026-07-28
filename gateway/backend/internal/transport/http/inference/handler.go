@@ -1140,7 +1140,7 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	}
 	var err error
 	if stream {
-		metadata, copyErr := copyStream(c.Writer, result.Body, protocol)
+		metadata, copyErr := copyStream(c.Writer, result.Body, protocol, result.MarkFirstToken)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
 		if metadata.StreamFailure != nil && result.RecordStreamFailure != nil {
 			result.RecordStreamFailure(*metadata.StreamFailure)
@@ -1173,8 +1173,8 @@ type responseMetadata struct {
 	StreamFailure            *gateway.StreamFailureDiagnostic
 }
 
-func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (responseMetadata, error) {
-	inspector := &responseInspector{protocol: protocol}
+func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func()) (responseMetadata, error) {
+	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
 	buffer := make([]byte, responseCopyBufferBytes)
 	transferred := 0
 	for {
@@ -1192,6 +1192,7 @@ func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProt
 				return inspector.Metadata(), err
 			}
 			writer.Flush()
+			inspector.markFirstTokenForwarded()
 			transferred += n
 		}
 		if readErr != nil {
@@ -1251,6 +1252,9 @@ type responseInspector struct {
 	protocol        streamProtocol
 	pending         []byte
 	metadata        responseMetadata
+	onFirstToken    func()
+	firstTokenSeen  bool
+	firstTokenReady bool
 	terminalSuccess bool
 	terminalFailure bool
 }
@@ -1269,6 +1273,7 @@ func (i *responseInspector) Inspect(chunk []byte) {
 		i.pending = i.pending[index+1:]
 		if bytes.HasPrefix(line, []byte("data:")) {
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			i.observeFirstToken(value)
 			i.observeTerminal(value)
 			if !bytes.Equal(value, []byte("[DONE]")) {
 				metadata := extractMetadata(value)
@@ -1291,6 +1296,95 @@ func (i *responseInspector) Inspect(chunk []byte) {
 			}
 		}
 	}
+}
+
+func (i *responseInspector) observeFirstToken(data []byte) {
+	if i.firstTokenSeen || i.firstTokenReady || i.onFirstToken == nil || len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+	if !containsGeneratedDelta(data, i.protocol) {
+		return
+	}
+	i.firstTokenReady = true
+}
+
+func (i *responseInspector) markFirstTokenForwarded() {
+	if i.firstTokenSeen || !i.firstTokenReady || i.onFirstToken == nil {
+		return
+	}
+	i.firstTokenReady = false
+	i.firstTokenSeen = true
+	i.onFirstToken()
+	i.onFirstToken = nil
+}
+
+func containsGeneratedDelta(data []byte, protocol streamProtocol) bool {
+	switch protocol {
+	case streamProtocolResponses:
+		var event struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal(data, &event) != nil || event.Delta == "" {
+			return false
+		}
+		switch event.Type {
+		case "response.output_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+			return true
+		}
+	case streamProtocolChat:
+		var event struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					Reasoning        string `json:"reasoning"`
+					ReasoningContent string `json:"reasoning_content"`
+					Refusal          string `json:"refusal"`
+					ToolCalls        []struct {
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(data, &event) != nil {
+			return false
+		}
+		for _, choice := range event.Choices {
+			delta := choice.Delta
+			if delta.Content != "" || delta.Reasoning != "" || delta.ReasoningContent != "" || delta.Refusal != "" {
+				return true
+			}
+			for _, call := range delta.ToolCalls {
+				if call.Function.Arguments != "" {
+					return true
+				}
+			}
+		}
+	case streamProtocolAnthropic:
+		var event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
+				PartialJSON string `json:"partial_json"`
+			} `json:"delta"`
+		}
+		if json.Unmarshal(data, &event) != nil || event.Type != "content_block_delta" {
+			return false
+		}
+		switch event.Delta.Type {
+		case "text_delta":
+			return event.Delta.Text != ""
+		case "thinking_delta":
+			return event.Delta.Thinking != ""
+		case "input_json_delta":
+			return event.Delta.PartialJSON != ""
+		}
+	}
+	return false
 }
 
 func (i *responseInspector) Metadata() responseMetadata {
@@ -1806,17 +1900,18 @@ func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailabl
 	if failure == nil {
 		return status, code, message
 	}
+	status, code = failure.HTTPStatus(), failure.Code()
 	switch failure.Reason {
 	case gateway.SelectionCooling:
-		status, code, message = http.StatusTooManyRequests, "upstream_cooling", "上游账号正在冷却"
+		message = "上游账号正在冷却"
 	case gateway.SelectionModelCooling:
-		status, code, message = http.StatusTooManyRequests, "upstream_model_cooling", "上游账号的目标模型正在冷却"
+		message = "上游账号的目标模型正在冷却"
 	case gateway.SelectionQuotaExhausted:
-		status, code, message = http.StatusTooManyRequests, "upstream_quota_exhausted", "上游账号额度等待恢复"
+		message = "上游账号额度等待恢复"
 	case gateway.SelectionSaturated:
-		code, message = "upstream_saturated", "上游账号当前均达到并发上限"
+		message = "上游账号当前均达到并发上限"
 	case gateway.SelectionUnsupportedModel:
-		code, message = "upstream_model_unavailable", "当前账号池不支持该模型"
+		message = "当前账号池不支持该模型"
 	}
 	if failure.RetryAfter > 0 {
 		seconds := max(int64(1), int64((failure.RetryAfter+time.Second-1)/time.Second))

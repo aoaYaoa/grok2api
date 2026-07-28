@@ -8,15 +8,21 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -388,4 +394,97 @@ func TestVideoUnlimitedAccountAttemptsRemainUnbounded(t *testing.T) {
 	if !metadata.canTryAnotherAccount(limit) {
 		t.Fatal("unlimited video routing must continue until the selector exhausts candidates")
 	}
+}
+
+func TestRunVideoJobSwitchesAccountAfterCredentialRefreshFailure(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-credential-failover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	first, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "expired", SourceKey: "expired", EncryptedAccessToken: "expired-access", EncryptedRefreshToken: "expired-refresh",
+		ExpiresAt: time.Now().Add(-time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "ready", SourceKey: "ready", EncryptedAccessToken: "ready-access", EncryptedRefreshToken: "ready-refresh",
+		ExpiresAt: time.Now().Add(time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &videoCredentialFailoverAdapter{refreshFailureID: first.ID}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	jobs := &videoRunRepository{}
+	service := &Service{
+		accounts: accountService, providers: registry, selector: selector, mediaJobs: jobs,
+		audits: &durableVideoAuditRecorder{}, clientKeys: clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), logger: slog.Default(),
+	}
+	service.maxAttempts.Store(2)
+	job := media.Job{
+		ID: "video-credential-failover", RequestID: "request-credential-failover", ClientKeyID: 1, ClientKeyName: "client",
+		AccountID: first.ID, AccountName: first.Name, Provider: string(account.ProviderBuild), Model: "video-test", ModelRouteID: 1, UpstreamModel: "video-test",
+		Seconds: 6, Quality: "720p", Status: media.StatusInProgress, Progress: 1, CreatedAt: time.Now().UTC(), MetadataJSON: encodeVideoJobMetadata(videoInputMetadata{}),
+	}
+	service.runVideoJob(ctx, job, model.Route{ID: 1, Provider: account.ProviderBuild, PublicID: "video-test", UpstreamModel: "video-test"})
+	if jobs.job.Status != media.StatusCompleted || jobs.job.AccountID != second.ID {
+		t.Fatalf("job = %#v, want completed on account %d", jobs.job, second.ID)
+	}
+	if len(adapter.generateAccountIDs) != 1 || adapter.generateAccountIDs[0] != second.ID {
+		t.Fatalf("generated accounts = %#v, want [%d]", adapter.generateAccountIDs, second.ID)
+	}
+}
+
+type videoCredentialFailoverAdapter struct {
+	refreshFailureID   uint64
+	generateAccountIDs []uint64
+}
+
+func (a *videoCredentialFailoverAdapter) Provider() account.Provider { return account.ProviderBuild }
+
+func (a *videoCredentialFailoverAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider:   account.ProviderBuild,
+		Credential: provider.CredentialSurface{Refresh: true},
+		Media:      provider.MediaSurface{VideoGeneration: true},
+	}
+}
+
+func (a *videoCredentialFailoverAdapter) RefreshCredential(_ context.Context, credential account.Credential) (provider.RefreshedCredential, error) {
+	if credential.ID == a.refreshFailureID {
+		return provider.RefreshedCredential{}, errors.New("temporary credential refresh failure")
+	}
+	return provider.RefreshedCredential{EncryptedAccessToken: credential.EncryptedAccessToken, EncryptedRefreshToken: credential.EncryptedRefreshToken, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (a *videoCredentialFailoverAdapter) GenerateVideo(_ context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	a.generateAccountIDs = append(a.generateAccountIDs, request.Credential.ID)
+	return provider.VideoResult{URL: "https://cdn.example.com/video.mp4", ContentType: "video/mp4"}, nil
+}
+
+type videoRunRepository struct {
+	repository.MediaJobRepository
+	job media.Job
+}
+
+func (r *videoRunRepository) UpdateMediaJob(_ context.Context, job media.Job) error {
+	r.job = job
+	return nil
+}
+
+func (r *videoRunRepository) MarkMediaJobUsageRecorded(_ context.Context, _ string, recordedAt time.Time) error {
+	r.job.UsageRecordedAt = &recordedAt
+	return nil
 }
