@@ -87,6 +87,20 @@ func TestWriteServiceErrorUsesCredentialLimitCodes(t *testing.T) {
 	}
 }
 
+func TestBatchUpdateRejectsInvalidProviderWithStableCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest("PATCH", "/api/admin/v1/accounts/batch", strings.NewReader(`{"ids":["1"],"provider":"invalid","maxConcurrent":1}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	new(Handler).batchUpdate(ctx)
+
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidProvider"`) {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestCredentialExportRejectsOffsetPagination(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

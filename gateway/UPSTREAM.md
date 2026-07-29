@@ -1,12 +1,12 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `d3686a1cfb63038a594baafb5170dcadffacf126`
-- Imported: `2026-07-28`
+- Commit: `c1e29e1ad401b7c21adbf0b42be0e0d04925445f`
+- Imported: `2026-07-29`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `d3686a1cfb63038a594baafb5170dcadffacf126`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `c1e29e1ad401b7c21adbf0b42be0e0d04925445f`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
@@ -28,6 +28,7 @@ The Go and React sources were three-way synchronized through upstream commit `d3
 - Dual-stack egress probes, selectable probe providers, cancellation-aware proxy health, and safer clearance refresh handling.
 - Lower-I/O layered account selection with preserved diagnostics, stale-credential detection, and post-success failure health updates.
 - Response timing metrics, token throughput, detailed billing breakdowns, and matching dashboard and request-audit presentation.
+- Grok Build free quota estimate correction, provider-safe concurrent account batch updates, and streamed integer tool-argument normalization for Responses clients.
 
 ## Updating
 

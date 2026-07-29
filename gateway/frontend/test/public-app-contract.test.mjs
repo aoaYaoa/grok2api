@@ -35,6 +35,14 @@ test("frontend has separate admin and public Vite builds", async () => {
   assert.doesNotMatch(publicHTML, /static\/public\/js|static\/common\/js/);
 });
 
+test("account batch concurrency controls have Chinese translations", async () => {
+  const i18n = await readFile(path.join(root, "src/shared/i18n/index.ts"), "utf8");
+  assert.match(i18n, /batchSetConcurrency: "设置并发"/);
+  assert.match(i18n, /batchConcurrencyTitle: "设置所选 \{\{count\}\} 个账号的并发？"/);
+  assert.match(i18n, /batchConcurrencyDescription: "同一账号同时处理的请求数/);
+  assert.match(i18n, /batchConcurrencyUpdated: "所选账号并发已更新"/);
+});
+
 test("public source does not execute legacy imperative page scripts", async () => {
   const publicMain = await readFile(path.join(root, "src/public-main.tsx"), "utf8");
   assert.doesNotMatch(publicMain, /legacy|static\/public|\.html/);
