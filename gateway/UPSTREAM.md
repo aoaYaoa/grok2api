@@ -1,12 +1,12 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `c1e29e1ad401b7c21adbf0b42be0e0d04925445f`
-- Imported: `2026-07-29`
+- Commit: `090104504b403d65675a01dab9c92b3a235ee832`
+- Imported: `2026-07-30`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `c1e29e1ad401b7c21adbf0b42be0e0d04925445f`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `090104504b403d65675a01dab9c92b3a235ee832`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.
@@ -29,6 +29,7 @@ The Go and React sources were three-way synchronized through upstream commit `c1
 - Lower-I/O layered account selection with preserved diagnostics, stale-credential detection, and post-success failure health updates.
 - Response timing metrics, token throughput, detailed billing breakdowns, and matching dashboard and request-audit presentation.
 - Grok Build free quota estimate correction, provider-safe concurrent account batch updates, and streamed integer tool-argument normalization for Responses clients.
+- Grok2API v3.0.11 client-key account-pool scopes, per-request Build proxy rotation, batch clearance controls, detailed credential-refresh diagnostics, Web media upload diagnostics, and mobile admin layout fixes.
 
 ## Updating
 

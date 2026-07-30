@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -36,12 +35,6 @@ const (
 )
 
 var errLiteImageReady = errors.New("Lite 图片已完成")
-
-type directFileUploadUnsupportedError struct{ statusCode int }
-
-func (e *directFileUploadUnsupportedError) Error() string {
-	return fmt.Sprintf("Grok Web V2 文件上传接口不可用: HTTP %d", e.statusCode)
-}
 
 type imagineModelConfig struct {
 	Pro             bool
@@ -751,10 +744,8 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	}
 	refs := make([]string, 0, len(images))
 	parentID := ""
-	directUploadAvailable := true
 	for _, image := range images {
-		uploaded, directAvailable, uploadErr := a.uploadFileWithFallback(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, directUploadAvailable)
-		directUploadAvailable = directAvailable
+		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "image_edit_upload")
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
@@ -762,7 +753,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 			return nil, fmt.Errorf("上传图片成功但上游未返回 fileUri")
 		}
 		refs = append(refs, uploaded.URI)
-		postID, postErr := a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", uploaded.URI, "")
+		postID, postErr := a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", uploaded.URI, "", "image_edit_media_post")
 		if postErr != nil {
 			return nil, postErr
 		}
@@ -1169,21 +1160,7 @@ func appendCapturedImageURL(results *[]string, value string) {
 	}
 }
 
-func (a *Adapter) uploadFileWithFallback(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource string, directAvailable bool) (uploadedFile, bool, error) {
-	if directAvailable {
-		uploaded, err := a.uploadFileV2Direct(ctx, cfg, lease, token, file, referer, fileSource)
-		var unsupported *directFileUploadUnsupportedError
-		if !errors.As(err, &unsupported) {
-			return uploaded, true, err
-		}
-		a.log().Warn("web_file_upload_v2_unsupported", "status", unsupported.statusCode)
-		directAvailable = false
-	}
-	uploaded, err := a.uploadFileLegacy(ctx, cfg, lease, token, file, referer)
-	return uploaded, directAvailable, err
-}
-
-func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource string) (uploadedFile, error) {
+func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource, stage string) (uploadedFile, error) {
 	body, contentType, err := buildDirectFileUploadBody(file, fileSource)
 	if err != nil {
 		return uploadedFile{}, err
@@ -1202,16 +1179,21 @@ func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egr
 		return uploadedFile{}, err
 	}
 	defer response.Body.Close()
-	if directFileUploadFallbackStatus(response.StatusCode) {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, directFileUploadResponseLimit))
-		return uploadedFile{}, &directFileUploadUnsupportedError{statusCode: response.StatusCode}
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, webMediaDiagnosticBodyLimit+1))
+		if readErr != nil {
+			return uploadedFile{}, fmt.Errorf("读取 V2 上传文件错误响应: %w", readErr)
+		}
+		truncated := len(responseBody) > webMediaDiagnosticBodyLimit
+		if truncated {
+			responseBody = responseBody[:webMediaDiagnosticBodyLimit]
+		}
 		if response.StatusCode == http.StatusForbidden {
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, directFileUploadResponseLimit))
-		return uploadedFile{}, fmt.Errorf("V2 上传文件返回 %d", response.StatusCode)
+		upstreamErr := newWebMediaUpstreamError(response.StatusCode, responseBody, truncated)
+		a.logWebMediaUpstreamRejection(stage, response, upstreamErr)
+		return uploadedFile{}, upstreamErr
 	}
 	uploaded, err := decodeDirectFileUploadResponse(io.LimitReader(response.Body, directFileUploadResponseLimit))
 	if err != nil {
@@ -1223,9 +1205,8 @@ func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egr
 func buildDirectFileUploadBody(file provider.ImageInput, fileSource string) ([]byte, string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	disposition := mime.FormatMediaType("form-data", map[string]string{"name": "file", "filename": file.Filename})
 	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", disposition)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, browserMultipartFilename(file.Filename)))
 	header.Set("Content-Type", file.MIMEType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
@@ -1243,6 +1224,23 @@ func buildDirectFileUploadBody(file provider.ImageInput, fileSource string) ([]b
 		return nil, "", err
 	}
 	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func browserMultipartFilename(value string) string {
+	value = strings.Map(func(character rune) rune {
+		switch {
+		case character == '\r' || character == '\n':
+			return -1
+		case character < 0x20 || character == 0x7f:
+			return '_'
+		default:
+			return character
+		}
+	}, value)
+	if strings.TrimSpace(value) == "" {
+		value = "upload.bin"
+	}
+	return strings.NewReplacer("\\", "\\\\", `"`, `\"`).Replace(value)
 }
 
 func decodeDirectFileUploadResponse(source io.Reader) (uploadedFile, error) {
@@ -1441,7 +1439,7 @@ func uploadResponseMessage(value any) string {
 	return ""
 }
 
-func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress.Lease, token, mediaType, mediaURL, prompt string) (string, error) {
+func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress.Lease, token, mediaType, mediaURL, prompt, stage string) (string, error) {
 	payload := map[string]any{"mediaType": mediaType}
 	if mediaURL != "" {
 		payload["mediaUrl"] = mediaURL
@@ -1454,10 +1452,16 @@ func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress
 		return "", err
 	}
 	defer response.Body.Close()
-	return parseMediaPostResponse(response)
+	return parseMediaPostResponseWithDiagnostics(response, func(upstreamErr *webMediaUpstreamError) {
+		a.logWebMediaUpstreamRejection(stage, response, upstreamErr)
+	})
 }
 
 func parseMediaPostResponse(response *http.Response) (string, error) {
+	return parseMediaPostResponseWithDiagnostics(response, nil)
+}
+
+func parseMediaPostResponseWithDiagnostics(response *http.Response, onUpstreamError func(*webMediaUpstreamError)) (string, error) {
 	const responseLimit = 2 << 20
 	readLimit := responseLimit
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -1478,7 +1482,11 @@ func parseMediaPostResponse(response *http.Response) (string, error) {
 		return "", provider.ErrUnauthorized
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", newWebMediaUpstreamError(response.StatusCode, body, truncated)
+		upstreamErr := newWebMediaUpstreamError(response.StatusCode, body, truncated)
+		if onUpstreamError != nil {
+			onUpstreamError(upstreamErr)
+		}
+		return "", upstreamErr
 	}
 	var value struct {
 		Post struct {

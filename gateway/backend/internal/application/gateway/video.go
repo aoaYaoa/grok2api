@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -75,18 +76,19 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	metadata := videoMetadataFromInput(input)
 	var lease *accountLease
+	accountScope := input.ClientKey.AccountScope()
 	sourceAccountID, sourceFound, sourceErr := s.findExtensionSourceAccountID(ctx, input.ClientKey.ID, input.SourceTaskID)
 	if sourceErr != nil {
 		return media.Job{}, sourceErr
 	}
 	if input.IsExtension && sourceFound {
 		metadata.markAccountAttempt(sourceAccountID)
-		lease, err = s.selector.AcquirePinned(ctx, route.Provider, sourceAccountID, route.ID, route.UpstreamModel, quotaMode, true)
+		lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, sourceAccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 		if err != nil && metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+			lease, err = s.selector.AcquireForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false, accountScope)
 		}
 	} else {
-		lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", nil, false)
+		lease, err = s.selector.AcquireForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", nil, false, accountScope)
 	}
 	if err != nil {
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
@@ -520,7 +522,17 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		s.logger.Warn("video_job_progress_write_failed", "job_id", job.ID, "error", err)
 	}
 	metadata := videoMetadataForJob(job)
-	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, "", true)
+	key, err := s.clientKeys.GetAvailableByID(ctx, job.ClientKeyID)
+	if err != nil {
+		if errors.Is(err, clientkeyapp.ErrRuntimeUnavailable) {
+			s.deferVideoJob(parent, job)
+			return
+		}
+		s.failVideoJob(parent, job, "account_unavailable", err)
+		return
+	}
+	accountScope := key.AccountScope()
+	lease, err := s.selector.AcquirePinnedForKey(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, "", true, accountScope)
 	if err != nil {
 		if s.videoCancelled(job.ID) {
 			return
@@ -529,7 +541,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			s.deferVideoJob(parent, job)
 			return
 		}
-		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, "", &metadata)
+		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, "", &metadata, accountScope)
 		if fallbackErr == nil {
 			if s.logger != nil {
 				s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
@@ -552,7 +564,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			return
 		}
 		lease.Release()
-		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata)
+		fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata, accountScope)
 		if fallbackErr == nil {
 			if s.logger != nil {
 				s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
@@ -668,7 +680,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		s.logVideoGenerationFailure(job, lease.Credential, err)
 		if shouldSwitchVideoAccount(err) {
 			lease.Release()
-			fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata)
+			fallback, fallbackErr := s.acquireVideoAccountFallback(parent, &job, route, lease.QuotaMode, &metadata, accountScope)
 			if fallbackErr == nil {
 				if s.logger != nil {
 					s.logger.Warn("video_account_switched", "job_id", job.ID, "account_id", job.AccountID, "account_retry", metadata.AccountRetryCount, "extension", metadata.IsExtension, "error", err)
@@ -923,7 +935,7 @@ func (s *Service) videoAccountAttemptLimit() int {
 	return limit
 }
 
-func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Job, route model.Route, quotaMode string, metadata *videoInputMetadata) (*accountLease, error) {
+func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Job, route model.Route, quotaMode string, metadata *videoInputMetadata, accountScope clientkey.AccountScope) (*accountLease, error) {
 	if job == nil || metadata == nil {
 		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 	}
@@ -931,7 +943,7 @@ func (s *Service) acquireVideoAccountFallback(ctx context.Context, job *media.Jo
 	if !metadata.canTryAnotherAccount(s.videoAccountAttemptLimit()) {
 		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts}
 	}
-	lease, err := s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false)
+	lease, err := s.selector.AcquireForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", metadata.excludedAccounts(), false, accountScope)
 	if err != nil {
 		return nil, err
 	}

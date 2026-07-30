@@ -427,14 +427,19 @@ func TestRunVideoJobSwitchesAccountAfterCredentialRefreshFailure(t *testing.T) {
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	keyService := clientkeyapp.NewService(relational.NewClientKeyRepository(database), nil, nil, 60, 4, testCipher(t))
+	createdKey, err := keyService.Create(ctx, clientkeyapp.CreateInput{Name: "client", Enabled: true, ProviderScope: clientkey.ProviderScopeAll, TierScope: clientkey.TierScopeAll})
+	if err != nil {
+		t.Fatal(err)
+	}
 	jobs := &videoRunRepository{}
 	service := &Service{
 		accounts: accountService, providers: registry, selector: selector, mediaJobs: jobs,
-		audits: &durableVideoAuditRecorder{}, clientKeys: clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), logger: slog.Default(),
+		audits: &durableVideoAuditRecorder{}, clientKeys: keyService, logger: slog.Default(),
 	}
 	service.maxAttempts.Store(2)
 	job := media.Job{
-		ID: "video-credential-failover", RequestID: "request-credential-failover", ClientKeyID: 1, ClientKeyName: "client",
+		ID: "video-credential-failover", RequestID: "request-credential-failover", ClientKeyID: createdKey.Key.ID, ClientKeyName: createdKey.Key.Name,
 		AccountID: first.ID, AccountName: first.Name, Provider: string(account.ProviderBuild), Model: "video-test", ModelRouteID: 1, UpstreamModel: "video-test",
 		Seconds: 6, Quality: "720p", Status: media.StatusInProgress, Progress: 1, CreatedAt: time.Now().UTC(), MetadataJSON: encodeVideoJobMetadata(videoInputMetadata{}),
 	}
@@ -445,6 +450,77 @@ func TestRunVideoJobSwitchesAccountAfterCredentialRefreshFailure(t *testing.T) {
 	if len(adapter.generateAccountIDs) != 1 || adapter.generateAccountIDs[0] != second.ID {
 		t.Fatalf("generated accounts = %#v, want [%d]", adapter.generateAccountIDs, second.ID)
 	}
+}
+
+func TestRunVideoJobFailsClosedWhenClientKeyScopeNoLongerAllowsProvider(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-client-key-scope.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-account", SourceKey: "build-account", EncryptedAccessToken: "access",
+		ExpiresAt: time.Now().Add(time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyService := clientkeyapp.NewService(relational.NewClientKeyRepository(database), nil, nil, 60, 4, testCipher(t))
+	created, err := keyService.Create(ctx, clientkeyapp.CreateInput{
+		Name: "web-only", Enabled: true, ProviderScope: clientkey.ProviderScopeWeb, TierScope: clientkey.TierScopeAll,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &videoCredentialFailoverAdapter{}
+	registry := provider.NewRegistry(adapter)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), registry, time.Hour, time.Second, time.Minute)
+	jobs := &videoRunRepository{}
+	service := &Service{
+		accounts:  accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, testCipher(t), nil),
+		providers: registry, selector: selector, mediaJobs: jobs, audits: &durableVideoAuditRecorder{}, clientKeys: keyService, logger: slog.Default(),
+	}
+	job := media.Job{
+		ID: "video-client-key-scope", RequestID: "request-client-key-scope", ClientKeyID: created.Key.ID, ClientKeyName: created.Key.Name,
+		AccountID: credential.ID, AccountName: credential.Name, Provider: string(account.ProviderBuild), Model: "video-test", ModelRouteID: 1, UpstreamModel: "video-test",
+		Seconds: 6, Quality: "720p", Status: media.StatusInProgress, Progress: 1, CreatedAt: time.Now().UTC(), MetadataJSON: encodeVideoJobMetadata(videoInputMetadata{}),
+	}
+	service.runVideoJob(ctx, job, model.Route{ID: 1, Provider: account.ProviderBuild, PublicID: "video-test", UpstreamModel: "video-test"})
+	if jobs.job.Status != media.StatusFailed || jobs.job.ErrorCode != "account_unavailable" {
+		t.Fatalf("job = %#v, want fail-closed account_unavailable", jobs.job)
+	}
+	if len(adapter.generateAccountIDs) != 0 {
+		t.Fatalf("generated accounts = %#v, want none", adapter.generateAccountIDs)
+	}
+}
+
+func TestRunVideoJobDefersWhenClientKeyRepositoryIsTemporarilyUnavailable(t *testing.T) {
+	jobs := &videoRunRepository{}
+	keyService := clientkeyapp.NewService(videoClientKeyRepository{getErr: errors.New("database unavailable")}, nil, nil, 60, 4, nil)
+	service := &Service{mediaJobs: jobs, clientKeys: keyService, audits: &durableVideoAuditRecorder{}, logger: slog.Default()}
+	job := media.Job{
+		ID: "video-client-key-runtime", ClientKeyID: 1, Status: media.StatusInProgress, Progress: 1,
+		CreatedAt: time.Now().UTC(), MetadataJSON: encodeVideoJobMetadata(videoInputMetadata{}),
+	}
+	service.runVideoJob(context.Background(), job, model.Route{ID: 1, Provider: account.ProviderBuild, UpstreamModel: "video-test"})
+	if jobs.job.Status != media.StatusInProgress || jobs.job.LeaseUntil == nil || jobs.job.CompletedAt != nil {
+		t.Fatalf("job = %#v, want deferred in-progress job", jobs.job)
+	}
+}
+
+type videoClientKeyRepository struct {
+	repository.ClientKeyRepository
+	getErr error
+}
+
+func (r videoClientKeyRepository) Get(context.Context, uint64) (clientkey.Key, error) {
+	return clientkey.Key{}, r.getErr
 }
 
 type videoCredentialFailoverAdapter struct {

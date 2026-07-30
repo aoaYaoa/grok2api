@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,8 +307,11 @@ func TestFetchStatsigMaterialsCompletesAnonymousChallengeFlow(t *testing.T) {
 	verificationBytes := append([]byte{0, 0, 0, 0, 0, 2}, make([]byte, 42)...)
 	verification := base64.StdEncoding.EncodeToString(verificationBytes)
 	var requests []string
+	var requestsMu sync.Mutex
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestsMu.Lock()
 		requests = append(requests, request.Method+" "+request.URL.Path+" "+request.Header.Get("Next-Action"))
+		requestsMu.Unlock()
 		response := func(body string) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 		}
@@ -353,6 +357,8 @@ func TestFetchStatsigMaterialsCompletesAnonymousChallengeFlow(t *testing.T) {
 	if materials.VerificationToken != verification || len(materials.Indexes) != 4 || materials.SVGData == "" {
 		t.Fatalf("materials=%#v", materials)
 	}
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
 	if len(requests) != 6 {
 		t.Fatalf("requests=%#v", requests)
 	}
