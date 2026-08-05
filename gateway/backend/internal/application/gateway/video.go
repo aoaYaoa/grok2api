@@ -532,7 +532,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	accountScope := key.AccountScope()
-	lease, err := s.selector.AcquirePinnedForKey(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, "", true, accountScope)
+	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	lease, err := s.selector.AcquirePinnedForKey(ctx, route.Provider, job.AccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 	if err != nil {
 		if s.videoCancelled(job.ID) {
 			return
@@ -660,7 +661,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				failureHandled = true
 			case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
 				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
-				s.selector.MarkQuotaStateChanged(lease.Credential.Provider)
+				s.selector.MarkQuotaStateChanged(lease.Credential.Provider, lease.Credential.ID)
 				if reconcileErr != nil || !exhausted {
 					s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
 				}
@@ -718,10 +719,20 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	s.selector.MarkSuccess(context.Background(), lease.Credential)
+	if lease.QuotaMode != "" && lease.QuotaMode != "weekly" {
+		quotaCtx, quotaCancel := context.WithTimeout(context.Background(), accountStateWriteTimeout)
+		updated, quotaErr := s.accounts.DecrementQuota(quotaCtx, job.AccountID, lease.QuotaMode, 1)
+		quotaCancel()
+		if quotaErr != nil {
+			s.logger.Warn("video_quota_decrement_failed", "provider", route.Provider, "account_id", job.AccountID, "mode", lease.QuotaMode, "error", quotaErr)
+		} else if updated {
+			s.selector.ConsumeQuota(route.Provider, job.AccountID, lease.QuotaMode, 1)
+		}
+	}
 	if err := s.recordVideoAudit(context.Background(), job, time.Since(startedAt).Milliseconds()); err != nil {
 		s.logger.Error("video_usage_record_failed", "job_id", job.ID, "event_id", "video_usage_"+job.ID, "error", err)
 	}
-	if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode == "weekly" {
+	if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode != "" {
 		s.accounts.QueueQuotaRefresh(job.AccountID, lease.QuotaMode)
 	}
 }

@@ -49,18 +49,19 @@ const emptySource: SourceForm = {
 // 15-second ceiling. Keeping a request to 32 nodes leaves enough headroom for
 // the admin HTTP timeout.
 const egressProbeBatchSize = 32;
-const fallbackScopes: EgressScope[] = ["grok_build", "grok_web", "grok_console", "grok_web_asset"];
+const fallbackScopes: EgressScope[] = ["grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"];
 const fallbackDescriptionKeys: Record<EgressScope, string> = {
   grok_build: "settings.egress.fallbackBuildHelp",
   grok_web: "settings.egress.fallbackWebHelp",
   grok_console: "settings.egress.fallbackConsoleHelp",
   grok_web_asset: "settings.egress.fallbackWebAssetHelp",
+  grok_console_asset: "settings.egress.fallbackConsoleAssetHelp",
 };
 
 function defaultFallbacks(): Record<EgressScope, EgressFallbackConfigDTO> {
   return {
     grok_build: { mode: "none" }, grok_web: { mode: "none" },
-    grok_console: { mode: "none" }, grok_web_asset: { mode: "none" },
+    grok_console: { mode: "none" }, grok_web_asset: { mode: "none" }, grok_console_asset: { mode: "none" },
   };
 }
 
@@ -83,6 +84,7 @@ function operationsFormFrom(value?: EgressOperationsConfigDTO): Omit<EgressOpera
       grok_web: { ...defaults.grok_web, ...value.fallbacks.grok_web },
       grok_console: { ...defaults.grok_console, ...value.fallbacks.grok_console },
       grok_web_asset: { ...defaults.grok_web_asset, ...value.fallbacks.grok_web_asset },
+      grok_console_asset: { ...defaults.grok_console_asset, ...value.fallbacks.grok_console_asset },
     },
   };
 }
@@ -248,7 +250,7 @@ export function EgressSources({ scopeLabel }: { scopeLabel: (scope: EgressScope)
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
   const [scopeFilter, setScopeFilter] = useState("");
-  const sourcesQuery = useQuery({ queryKey: ["egress-sources"], queryFn: listEgressSources });
+  const sourcesQuery = useQuery({ queryKey: ["egress-sources"], queryFn: () => listEgressSources() });
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
@@ -315,6 +317,7 @@ export function EgressSources({ scopeLabel }: { scopeLabel: (scope: EgressScope)
                   { value: "grok_web", label: scopeLabel("grok_web") },
                   { value: "grok_console", label: scopeLabel("grok_console") },
                   { value: "grok_web_asset", label: scopeLabel("grok_web_asset") },
+                  { value: "grok_console_asset", label: scopeLabel("grok_console_asset") },
                 ],
               }]} />
             </div>
@@ -330,7 +333,7 @@ export function EgressSources({ scopeLabel }: { scopeLabel: (scope: EgressScope)
           {!sourcesQuery.isPending && pagedSources.length === 0 ? <TableBody><TableRow><TableCell colSpan={5} className="h-24 text-center text-xs text-muted-foreground">{hasActiveFilters ? t("settings.egress.noSubscriptionMatches") : t("settings.egress.noSources")}</TableCell></TableRow></TableBody> : null}
           {!sourcesQuery.isPending && pagedSources.length > 0 ? <VirtualTableBody items={pagedSources} colSpan={5} rowHeight={48} renderRow={(source) => (
             <TableRow className="group h-12" key={source.id}>
-              <TableCell><div className="flex min-w-0 items-center gap-2"><span className={source.enabled ? "size-1.5 shrink-0 rounded-full bg-emerald-500" : "size-1.5 shrink-0 rounded-full bg-muted-foreground/35"} /><span className="truncate text-xs font-medium">{source.name}</span>{source.lastSyncError ? <SourceError message={source.lastSyncError} /> : null}</div></TableCell>
+              <TableCell><div className="flex min-w-0 items-center gap-2"><span className={source.enabled ? "size-1.5 shrink-0 rounded-full bg-blue-500" : "size-1.5 shrink-0 rounded-full bg-muted-foreground/35"} /><span className="truncate text-xs font-medium">{source.name}</span>{source.lastSyncError ? <SourceError message={source.lastSyncError} /> : null}</div></TableCell>
               <TableCell className="text-center"><Badge variant="secondary" className="text-[10px]">{scopeLabel(source.scope)}</Badge></TableCell>
               <TableCell className="text-xs text-muted-foreground">{source.lastSyncedAt ? formatDateTime(source.lastSyncedAt, i18n.language) : t("settings.egress.never")}</TableCell>
               <TableCell className="text-center text-xs tabular-nums">{source.defaultAccountCapacity || t("settings.egress.unlimited")}</TableCell>
@@ -376,11 +379,13 @@ function nodeCooling(node: EgressNodeDTO): boolean {
 }
 
 function supportsFallbackScope(nodeScope: EgressScope, requestScope: EgressScope): boolean {
-  return nodeScope === requestScope || ((requestScope === "grok_console" || requestScope === "grok_web_asset") && nodeScope === "grok_web");
+  if (nodeScope === requestScope) return true;
+  if (requestScope === "grok_console" || requestScope === "grok_web_asset") return nodeScope === "grok_web";
+  return requestScope === "grok_console_asset" && (nodeScope === "grok_console" || nodeScope === "grok_web");
 }
 
 function ScopeSelect({ value, onChange, scopeLabel }: { value: EgressScope; onChange: (value: EgressScope) => void; scopeLabel: (scope: EgressScope) => string }) {
-  return <Select value={value} onValueChange={(next) => onChange(next as EgressScope)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{(["grok_build", "grok_web", "grok_console", "grok_web_asset"] as EgressScope[]).map((scope) => <SelectItem key={scope} value={scope}>{scopeLabel(scope)}</SelectItem>)}</SelectContent></Select>;
+  return <Select value={value} onValueChange={(next) => onChange(next as EgressScope)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{fallbackScopes.map((scope) => <SelectItem key={scope} value={scope}>{scopeLabel(scope)}</SelectItem>)}</SelectContent></Select>;
 }
 
 function OperationSectionHeader({ title, help, children }: { title: string; help: string; children?: ReactNode }) {

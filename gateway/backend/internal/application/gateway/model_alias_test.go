@@ -155,7 +155,7 @@ func TestResolvePublicModelRoutesGatesDynamicAliasesAndPreservesCompatibility(t 
 		models: &aliasRouteResolver{
 			byPublic: map[string][]modeldomain.Route{"Build/grok-4.5": {route, webRoute}},
 		},
-		providers: provider.NewRegistry(console.NewAdapter(console.Config{}, nil, nil)),
+		providers: provider.NewRegistry(console.NewAdapter(console.Config{}, nil, nil, nil)),
 	}
 
 	// Base model always works.
@@ -203,5 +203,20 @@ func TestResolvePublicModelRoutesGatesDynamicAliasesAndPreservesCompatibility(t 
 	routes, effort, err = service.resolvePublicModelRoutes(context.Background(), "grok-4.3-none", true)
 	if err != nil || len(routes) != 1 || effort != "none" {
 		t.Fatalf("dynamic console alias resolve = %#v, %q, %v", routes, effort, err)
+	}
+
+	// The Console 4.20 reasoning variant reasons intrinsically but rejects
+	// reasoningEffort. Keep old suffix calls routable for compatibility; the
+	// Console normalizer removes the pinned effort before the upstream request.
+	fixedReasoningRoute := modeldomain.Route{
+		ID: 3, PublicID: "Console/grok-4.20-0309-reasoning", Provider: account.ProviderConsole,
+		UpstreamModel: "grok-4.20-0309-reasoning", Capability: modeldomain.CapabilityResponses, Enabled: true,
+	}
+	service.models = &aliasRouteResolver{byPublic: map[string][]modeldomain.Route{
+		"Console/grok-4.20-0309-reasoning": {fixedReasoningRoute},
+	}}
+	routes, effort, err = service.resolvePublicModelRoutes(context.Background(), "grok-4.20-0309-reasoning-low", true)
+	if err != nil || len(routes) != 1 || routes[0].Provider != account.ProviderConsole || effort != "low" {
+		t.Fatalf("fixed Console compatibility alias resolve = %#v, %q, %v", routes, effort, err)
 	}
 }

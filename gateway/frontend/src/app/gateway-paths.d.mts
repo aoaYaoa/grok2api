@@ -11,6 +11,7 @@ export const gatewayRoutePaths: Readonly<{
   videoGallery: "/video-gallery";
   requestAudits: "/request-audits";
   cache: "/cache";
+  qualityGuard: "/quality-guard";
   docs: "/docs";
   docsDefault: "/docs/chat/completions";
   docsEndpoint: "/docs/:category/:endpoint";

@@ -50,7 +50,7 @@ const (
 	accountFreeBillingSignal           = `(` + accountFreePlanSignal + ` OR ` + accountInferredFreeBillingSignal + `)`
 	accountFreeSignalPredicate         = `(provider_accounts.provider = 'grok_build' AND (LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountFreeBillingSignal + `)))`
 	accountRecoveryPredicate           = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
-	providerQuotaExhaustedPredicate    = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
+	providerQuotaExhaustedPredicate    = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console' AND quota.remaining > 0)))`
 	accountTypeSortExpression          = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountBuildSuperPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
 	accountStatusSortExpression        = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
 	missingConsoleAccountPredicate     = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
@@ -81,6 +81,12 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	switch input.Filter.Egress {
 	case "bound":
 		query = query.Where("egress_node_id IS NOT NULL")
+		if nodeID := input.Filter.EgressNodeID; nodeID > 0 {
+			query = query.Where("egress_node_id = ?", nodeID)
+		}
+		if sourceID := input.Filter.EgressSourceID; sourceID > 0 {
+			query = query.Where("EXISTS (SELECT 1 FROM egress_nodes node WHERE node.id = provider_accounts.egress_node_id AND node.source_id = ?)", sourceID)
+		}
 	case "unbound":
 		query = query.Where("egress_node_id IS NULL")
 	}
@@ -220,42 +226,53 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 			values = filtered
 		}
 	}
-	ids := make([]uint64, 0, len(values))
-	for _, value := range values {
-		ids = append(ids, value.ID)
-	}
-	billings, err := r.getRoutingBillings(ctx, ids)
+	billings, err := r.getRoutingBillings(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
-	recoveries, err := r.GetQuotaRecoveries(ctx, ids)
+	recoveries, err := r.getRoutingQuotaRecoveries(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
-	quotaWindows, err := r.getRoutingQuotaWindows(ctx, ids, provider, quotaMode)
+	quotaWindows, err := r.getRoutingQuotaWindows(ctx, provider, quotaMode)
 	if err != nil {
 		return nil, err
 	}
-	known := make(map[uint64]bool, len(ids))
-	supported := make(map[uint64]bool, len(ids))
-	modelQuotaBlocks := make(map[uint64]account.ModelQuotaBlock, len(ids))
-	if strings.TrimSpace(upstreamModel) != "" && len(ids) > 0 {
+	known := make(map[uint64]bool, len(values))
+	supported := make(map[uint64]bool, len(values))
+	modelQuotaBlocks := make(map[uint64]account.ModelQuotaBlock, len(values))
+	if strings.TrimSpace(upstreamModel) != "" && len(values) > 0 {
 		var states []accountModelSyncStateModel
-		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND last_success_at IS NOT NULL", ids).Find(&states).Error; err != nil {
+		if err := r.db.db.WithContext(ctx).
+			Table("account_model_sync_states AS state").
+			Select("state.*").
+			Joins("JOIN provider_accounts AS account ON account.id = state.account_id").
+			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND state.last_success_at IS NOT NULL", provider, true, account.AuthStatusActive).
+			Find(&states).Error; err != nil {
 			return nil, err
 		}
 		for _, state := range states {
 			known[state.AccountID] = true
 		}
 		var capabilities []accountModelCapabilityModel
-		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND upstream_model = ?", ids, upstreamModel).Find(&capabilities).Error; err != nil {
+		if err := r.db.db.WithContext(ctx).
+			Table("account_model_capabilities AS capability").
+			Select("capability.*").
+			Joins("JOIN provider_accounts AS account ON account.id = capability.account_id").
+			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND capability.upstream_model = ?", provider, true, account.AuthStatusActive, upstreamModel).
+			Find(&capabilities).Error; err != nil {
 			return nil, err
 		}
 		for _, capability := range capabilities {
 			supported[capability.AccountID] = true
 		}
 		var blockRows []accountModelQuotaBlockModel
-		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND upstream_model = ? AND cooldown_until > ?", ids, upstreamModel, time.Now().UTC()).Find(&blockRows).Error; err != nil {
+		if err := r.db.db.WithContext(ctx).
+			Table("account_model_quota_blocks AS block").
+			Select("block.*").
+			Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
+			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND block.upstream_model = ? AND block.cooldown_until > ?", provider, true, account.AuthStatusActive, upstreamModel, time.Now().UTC()).
+			Find(&blockRows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range blockRows {
@@ -279,9 +296,17 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		}
 	}
 	result := make([]account.RoutingCandidate, 0, len(values))
+	staticConsoleModel := provider == account.ProviderConsole && strings.TrimSpace(quotaMode) != ""
 	for _, value := range values {
 		capabilityKnown, supportsModel := known[value.ID], supported[value.ID]
-		if len(bound) > 0 {
+		if staticConsoleModel {
+			// Console exposes a provider-wide static catalog. Historical account
+			// snapshots may predate newly shipped catalog entries, but must not
+			// make those built-in routes unroutable until every account is synced
+			// again. A non-empty quota mode proves the adapter recognizes the
+			// upstream model; unknown/manual models keep snapshot-based gating.
+			capabilityKnown, supportsModel = true, true
+		} else if len(bound) > 0 {
 			capabilityKnown, supportsModel = true, true
 		} else if sharedSuperBuildModel {
 			var billing *account.Billing
@@ -315,19 +340,15 @@ func (r *AccountRepository) ListRoutingAccountBases(ctx context.Context, provide
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]uint64, 0, len(values))
-	for _, value := range values {
-		ids = append(ids, value.ID)
-	}
-	billings, err := r.getRoutingBillings(ctx, ids)
+	billings, err := r.getRoutingBillings(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
-	recoveries, err := r.GetQuotaRecoveries(ctx, ids)
+	recoveries, err := r.getRoutingQuotaRecoveries(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
-	quotaWindows, err := r.getRoutingQuotaWindows(ctx, ids, provider, quotaMode)
+	quotaWindows, err := r.getRoutingQuotaWindows(ctx, provider, quotaMode)
 	if err != nil {
 		return nil, err
 	}
@@ -352,15 +373,7 @@ func (r *AccountRepository) ListRoutingAccountBases(ctx context.Context, provide
 // account to use. Provider secrets deliberately stay in account_credentials
 // until a selected account is hydrated for the upstream call.
 func (r *AccountRepository) listRoutingCredentials(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	var rows []accountModel
-	err := r.db.db.WithContext(ctx).
-		Preload("Credential", func(query *gorm.DB) *gorm.DB {
-			return query.Select(routingCredentialMetadataColumns)
-		}).
-		Preload("WebProfile").
-		Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).
-		Order("priority DESC, id ASC").
-		Find(&rows).Error
+	rows, err := r.listActiveProviderAccountRows(ctx, provider, routingCredentialMetadataColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +385,72 @@ func (r *AccountRepository) listRoutingCredentials(ctx context.Context, provider
 		return nil, err
 	}
 	return values, nil
+}
+
+// listActiveProviderAccountRows avoids GORM association preloads for complete
+// provider pools. Preload expands every parent key into an IN list and exceeds
+// SQLite's variable limit for large pools. The fixed-shape JOIN queries below
+// remain valid for both SQLite and PostgreSQL regardless of pool size.
+func (r *AccountRepository) listActiveProviderAccountRows(ctx context.Context, provider account.Provider, credentialColumns []string) ([]accountModel, error) {
+	var rows []accountModel
+	if err := r.db.db.WithContext(ctx).
+		Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).
+		Order("priority DESC, id ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return rows, nil
+	}
+	positions := make(map[uint64]int, len(rows))
+	for index := range rows {
+		positions[rows[index].ID] = index
+	}
+
+	credentialSelect := "credential.*"
+	if len(credentialColumns) > 0 {
+		credentialSelect = qualifiedColumnList("credential", credentialColumns)
+	}
+	var credentials []accountCredentialModel
+	if err := r.db.db.WithContext(ctx).
+		Table("account_credentials AS credential").
+		Select(credentialSelect).
+		Joins("JOIN provider_accounts AS account ON account.id = credential.account_id").
+		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
+		Find(&credentials).Error; err != nil {
+		return nil, err
+	}
+	for index := range credentials {
+		if position, ok := positions[credentials[index].AccountID]; ok {
+			rows[position].Credential = &credentials[index]
+		}
+	}
+
+	if provider == account.ProviderWeb {
+		var profiles []webAccountProfileModel
+		if err := r.db.db.WithContext(ctx).
+			Table("web_account_profiles AS profile").
+			Select("profile.*").
+			Joins("JOIN provider_accounts AS account ON account.id = profile.account_id").
+			Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
+			Find(&profiles).Error; err != nil {
+			return nil, err
+		}
+		for index := range profiles {
+			if position, ok := positions[profiles[index].AccountID]; ok {
+				rows[position].WebProfile = &profiles[index]
+			}
+		}
+	}
+	return rows, nil
+}
+
+func qualifiedColumnList(alias string, columns []string) string {
+	qualified := make([]string, 0, len(columns))
+	for _, column := range columns {
+		qualified = append(qualified, alias+"."+column)
+	}
+	return strings.Join(qualified, ", ")
 }
 
 // routingCredentialMetadataColumns contains all credential fields used for
@@ -388,13 +467,15 @@ var routingBillingColumns = []string{
 	"usage_period_start", "usage_period_end", "billing_period_start", "billing_period_end", "synced_at",
 }
 
-func (r *AccountRepository) getRoutingBillings(ctx context.Context, accountIDs []uint64) (map[uint64]account.Billing, error) {
-	result := make(map[uint64]account.Billing, len(accountIDs))
-	if len(accountIDs) == 0 {
-		return result, nil
-	}
+func (r *AccountRepository) getRoutingBillings(ctx context.Context, provider account.Provider) (map[uint64]account.Billing, error) {
+	result := make(map[uint64]account.Billing)
 	var rows []billingModel
-	if err := r.db.db.WithContext(ctx).Select(routingBillingColumns).Where("account_id IN ?", accountIDs).Find(&rows).Error; err != nil {
+	if err := r.db.db.WithContext(ctx).
+		Table("account_billing_snapshots AS billing").
+		Select(qualifiedColumnList("billing", routingBillingColumns)).
+		Joins("JOIN provider_accounts AS account ON account.id = billing.account_id").
+		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -403,13 +484,34 @@ func (r *AccountRepository) getRoutingBillings(ctx context.Context, accountIDs [
 	return result, nil
 }
 
+func (r *AccountRepository) getRoutingQuotaRecoveries(ctx context.Context, provider account.Provider) (map[uint64]account.QuotaRecovery, error) {
+	result := make(map[uint64]account.QuotaRecovery)
+	var rows []quotaRecoveryModel
+	if err := r.db.db.WithContext(ctx).
+		Table("account_quota_recovery AS recovery").
+		Select("recovery.*").
+		Joins("JOIN provider_accounts AS account ON account.id = recovery.account_id").
+		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", provider, true, account.AuthStatusActive).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		result[row.AccountID] = account.QuotaRecovery{
+			AccountID: row.AccountID, Kind: account.QuotaRecoveryKind(row.Kind), Status: account.QuotaRecoveryStatus(row.Status), ConfirmedUsed: row.ConfirmedUsed,
+			ConfirmedLimit: row.ConfirmedLimit, ExhaustedAt: row.ExhaustedAt, NextProbeAt: row.NextProbeAt,
+			LastConfirmedAt: row.LastConfirmedAt, UpdatedAt: row.UpdatedAt,
+		}
+	}
+	return result, nil
+}
+
 var routingQuotaWindowColumns = []string{
 	"account_id", "mode", "remaining", "total", "usage_percent", "window_seconds", "reset_at", "synced_at", "source", "updated_at",
 }
 
-func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, accountIDs []uint64, provider account.Provider, quotaMode string) (map[uint64]account.QuotaWindow, error) {
-	result := make(map[uint64]account.QuotaWindow, len(accountIDs))
-	if len(accountIDs) == 0 || (provider != account.ProviderWeb && quotaMode == "") {
+func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, provider account.Provider, quotaMode string) (map[uint64]account.QuotaWindow, error) {
+	result := make(map[uint64]account.QuotaWindow)
+	if provider != account.ProviderWeb && quotaMode == "" {
 		return result, nil
 	}
 	modes := make([]string, 0, 2)
@@ -421,9 +523,11 @@ func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, accountI
 	}
 	var rows []quotaWindowModel
 	if err := r.db.db.WithContext(ctx).
-		Select(routingQuotaWindowColumns).
-		Where("account_id IN ? AND mode IN ?", accountIDs, modes).
-		Order("CASE WHEN mode = 'weekly' THEN 0 ELSE 1 END").
+		Table("account_quota_windows AS quota").
+		Select(qualifiedColumnList("quota", routingQuotaWindowColumns)).
+		Joins("JOIN provider_accounts AS account ON account.id = quota.account_id").
+		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND quota.mode IN ?", provider, true, account.AuthStatusActive, modes).
+		Order("CASE WHEN quota.mode = 'weekly' THEN 0 ELSE 1 END").
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -518,8 +622,7 @@ func (r *AccountRepository) listRoutingBoundAccountIDs(ctx context.Context, prov
 }
 
 func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	var rows []accountModel
-	err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).Order("priority DESC, id ASC").Find(&rows).Error
+	rows, err := r.listActiveProviderAccountRows(ctx, provider, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -866,10 +969,8 @@ func (r *AccountRepository) attachRoutingEgressIdentities(ctx context.Context, p
 	if len(values) == 0 || provider == account.ProviderWeb {
 		return nil
 	}
-	ids := make([]uint64, 0, len(values))
 	positions := make(map[uint64]int, len(values))
 	for index := range values {
-		ids = append(ids, values[index].ID)
 		positions[values[index].ID] = index
 	}
 	type identityRow struct {
@@ -883,15 +984,17 @@ func (r *AccountRepository) attachRoutingEgressIdentities(ctx context.Context, p
 	case account.ProviderBuild:
 		query = query.Table("account_provider_links AS link").
 			Select("link.build_account_id AS account_id, web.source_key AS web_source_key, profile.egress_identity").
+			Joins("JOIN provider_accounts AS target ON target.id = link.build_account_id").
 			Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
 			Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
-			Where("link.build_account_id IN ?", ids)
+			Where("target.provider = ? AND target.enabled = ? AND target.auth_status = ?", provider, true, account.AuthStatusActive)
 	case account.ProviderConsole:
 		query = query.Table("web_console_account_links AS link").
 			Select("link.console_account_id AS account_id, web.source_key AS web_source_key, profile.egress_identity").
+			Joins("JOIN provider_accounts AS target ON target.id = link.console_account_id").
 			Joins("JOIN provider_accounts AS web ON web.id = link.web_account_id").
 			Joins("LEFT JOIN web_account_profiles AS profile ON profile.account_id = web.id").
-			Where("link.console_account_id IN ?", ids)
+			Where("target.provider = ? AND target.enabled = ? AND target.auth_status = ?", provider, true, account.AuthStatusActive)
 	default:
 		return nil
 	}
@@ -2030,9 +2133,28 @@ func (r *AccountRepository) ResetProviderQuotaState(ctx context.Context, provide
 }
 
 func (r *AccountRepository) HasQuotaWindows(ctx context.Context, accountID uint64) (bool, error) {
+	var providerRow struct {
+		Provider string
+	}
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", accountID).Take(&providerRow).Error; err != nil {
+		return false, err
+	}
 	var count int64
-	err := r.db.db.WithContext(ctx).Model(&quotaWindowModel{}).Where("account_id = ? AND synced_at IS NOT NULL", accountID).Count(&count).Error
-	return count > 0, err
+	query := r.db.db.WithContext(ctx).Model(&quotaWindowModel{}).Where("account_id = ? AND synced_at IS NOT NULL", accountID)
+	if account.Provider(providerRow.Provider) == account.ProviderConsole {
+		// Pre-usage Console releases stored one synthetic local chat window.
+		// Only the complete authoritative /usage snapshot counts as initialized,
+		// so re-import and startup migration replace that legacy state.
+		query = query.Where("source = ? AND mode IN ?", account.QuotaSourceUpstream, []string{"console", "console_image", "console_video"}).Distinct("mode")
+		if err := query.Count(&count).Error; err != nil {
+			return false, err
+		}
+		return count == 3, nil
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (r *AccountRepository) GetQuotaWindows(ctx context.Context, accountIDs []uint64) (map[uint64][]account.QuotaWindow, error) {

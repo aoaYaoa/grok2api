@@ -1,12 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `090104504b403d65675a01dab9c92b3a235ee832`
-- Imported: `2026-07-30`
+- Commit: `f6d7c1c55cc5884f9769e979885b9b603def58c8`
+- Version: `v3.1.0`
+- Imported: `2026-08-05`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `090104504b403d65675a01dab9c92b3a235ee832`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `f6d7c1c55cc5884f9769e979885b9b603def58c8`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Grok2API v3.1.0 Console media and quota support, DPoP protocol updates, and Grok Build 0.2.119/Composer compatibility.
+- Session-sticky duplicate model targets, account-isolated connection pools, Quality Guard, and immediate egress recovery.
+- Large account-pool query hardening, PostgreSQL URL configuration, model endpoint grouping, and expanded account filters.
 
 - High-concurrency account selection, bounded quota refresh state, atomic billing settlement, and hardened recovery paths.
 - Configurable egress fallback, proxy batch operations, cache invalidation, and hot-reloadable response-header timeouts.

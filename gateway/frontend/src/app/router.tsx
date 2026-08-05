@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter, type RouteObject } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredCachePage, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredCachePage, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredQualityGuardPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
 import { gatewayBasename, gatewayRoutePaths } from "@/app/gateway-paths.mjs";
 import { LoginPage } from "@/features/auth/login-page";
 
@@ -26,6 +26,7 @@ export const gatewayRouterRoutes: RouteObject[] = [
           { path: gatewayRoutePaths.videoGallery, element: <DeferredVideoGalleryPage /> },
           { path: gatewayRoutePaths.requestAudits, element: <DeferredRequestAuditsPage /> },
           { path: gatewayRoutePaths.cache, element: <DeferredCachePage /> },
+          { path: gatewayRoutePaths.qualityGuard, element: <DeferredQualityGuardPage /> },
           { path: gatewayRoutePaths.docs, element: <Navigate to={gatewayRoutePaths.docsDefault} replace /> },
           { path: gatewayRoutePaths.docsEndpoint, element: <DeferredApiDocsPage /> },
           { path: gatewayRoutePaths.settings, element: <DeferredSettingsPage /> },

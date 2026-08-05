@@ -57,21 +57,25 @@ type Dependencies struct {
 	LegacyClientKey     string
 	LegacyAllowNSFW     bool
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness    func(context.Context) ReadinessSnapshot
-	Ready        func(context.Context) bool
-	TrafficReady func() bool
-	AdminAuth    *adminauthapp.Service
-	Accounts     *accountapp.Service
-	AccountSync  *accountsyncapp.Service
-	Models       *modelapp.Service
-	ClientKeys   *clientkeyapp.Service
-	Audits       *auditapp.Service
-	Dashboard    *dashboardapp.Service
-	Gateway      *gateway.Service
-	Media        *mediaapp.Service
-	Settings     *settingsapp.Service
-	Egress       *egressapp.Service
-	Updates      *updatecheckapp.Service
+	Readiness              func(context.Context) ReadinessSnapshot
+	Ready                  func(context.Context) bool
+	TrafficReady           func() bool
+	AdminAuth              *adminauthapp.Service
+	Accounts               *accountapp.Service
+	AccountSync            *accountsyncapp.Service
+	Models                 *modelapp.Service
+	ClientKeys             *clientkeyapp.Service
+	Audits                 *auditapp.Service
+	Dashboard              *dashboardapp.Service
+	Gateway                *gateway.Service
+	Media                  *mediaapp.Service
+	Settings               *settingsapp.Service
+	Egress                 *egressapp.Service
+	QualityGuardStatePath  string
+	QualityGuardConfigPath string
+	QualityGuardToken      string
+	QualityGuardProbe      egressapp.QualityProbeInput
+	Updates                *updatecheckapp.Service
 }
 
 type ReadinessComponent struct {
@@ -165,11 +169,13 @@ func New(deps Dependencies) *gin.Engine {
 	accounthttp.NewHandler(deps.Accounts, deps.AccountSync).Register(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
-	audithttp.NewHandler(deps.Audits).Register(adminProtected)
+	auditHandler := audithttp.NewHandler(deps.Audits)
+	auditHandler.Register(adminProtected)
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
-	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
+	egressHandler := egresshttp.NewHandler(deps.Egress, deps.QualityGuardStatePath, deps.QualityGuardConfigPath).WithQualityGuardProbe(deps.QualityGuardProbe)
+	egressHandler.Register(adminProtected)
 	systemhttp.NewHandler(func() string {
 		if deps.Settings != nil {
 			return deps.Settings.PublicAPIBaseURL()
@@ -178,6 +184,13 @@ func New(deps Dependencies) *gin.Engine {
 	}, deps.Updates).Register(adminProtected)
 	if cacheHandler != nil {
 		cacheHandler.RegisterAdmin(adminProtected)
+	}
+
+	if deps.QualityGuardToken != "" {
+		qualityGuardInternal := router.Group("/api/internal/v1/quality-guard")
+		qualityGuardInternal.Use(middleware.QualityGuardAuth(deps.QualityGuardToken))
+		audithttp.NewQualityGuardHandler(deps.Audits, deps.QualityGuardProbe.ClientKeyID).RegisterQualityGuard(qualityGuardInternal)
+		egressHandler.RegisterQualityGuard(qualityGuardInternal)
 	}
 
 	v1 := router.Group("/v1")

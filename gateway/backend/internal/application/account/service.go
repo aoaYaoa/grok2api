@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +43,7 @@ var (
 )
 
 var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token 已永久失效")
+var errQuotaRefreshBusy = errors.New("额度同步已由其他实例执行")
 
 const (
 	// estimatedFreeTokenLimit is only a fallback until an upstream exhaustion
@@ -55,11 +59,16 @@ const (
 	credentialStateWriteTimeout     time.Duration = 5 * time.Second
 	credentialRefreshBatchSize                    = 100
 	managedTaskWorkerCeiling                      = 50
-	webQuotaRefreshQueueSize                      = 4096
-	webQuotaRefreshTimeout                        = 30 * time.Second
-	webQuotaRefreshDirtyTTL                       = 24 * time.Hour
-	webQuotaRefreshRetryInterval                  = 500 * time.Millisecond
-	webQuotaRefreshSharedPoll                     = time.Second
+	quotaRefreshQueueSize                         = 4096
+	quotaRefreshTimeout                           = 30 * time.Second
+	quotaRefreshDirtyTTL                          = 24 * time.Hour
+	quotaRefreshPollInterval                      = 500 * time.Millisecond
+	quotaRefreshSharedPoll                        = time.Second
+	quotaRefreshBackoffBase                       = time.Second
+	quotaRefreshBackoffMax                        = time.Minute
+	consoleQuotaRefreshMinInterval                = 30 * time.Second
+	unknownRemoteQuotaProbeDelay    time.Duration = 5 * time.Minute
+	consolePredictedQuotaProbeDelay time.Duration = 24 * time.Hour
 	observedModelPersistInterval                  = 30 * time.Minute
 	observedModelLocalCacheTTL                    = 5 * time.Second
 	observedModelLockShards                       = 64
@@ -75,17 +84,25 @@ const (
 	maxAccountTaskBatchSize                       = 1000
 	buildBotFlagCacheTTL            time.Duration = 30 * time.Second
 	linkedDeleteRuntimeCleanupLimit               = 3 * time.Second
+	// buildDetectModel 管理端「检测账号」固定使用的 Grok Build 模型。
+	buildDetectModel               = "grok-4.5"
+	buildDetectQuotaRecoveryPause  = 24 * time.Hour
+	buildDetectModelDeniedCooldown = 5 * time.Minute
+	// buildDetectPrompt 探测请求正文，仅用于验证凭据与上游可用性。
+	buildDetectPrompt = "hello,test"
 )
 
 const permanentRefreshExpiredReason = "OAuth refresh token 已永久失效且 access token 已过期"
 const buildBotFlagCacheKey = "build-bot-flagged-account-ids"
 
-type webQuotaRefreshState struct {
+type quotaRefreshState struct {
 	generation          uint64
 	publishedGeneration uint64
 	sharedGeneration    uint64
 	queued              bool
 	running             bool
+	pending             bool
+	failures            int
 	nextAttemptAt       time.Time
 }
 
@@ -100,10 +117,15 @@ type observedModelShard struct {
 	lastCleanupAt time.Time
 }
 
-type webQuotaRefreshRequest struct {
+type quotaRefreshRequest struct {
 	key       string
 	accountID uint64
 	mode      string
+}
+
+type quotaRefreshResult struct {
+	Credential accountdomain.Credential
+	Windows    []accountdomain.QuotaWindow
 }
 
 type QuotaRefreshStats struct {
@@ -210,6 +232,31 @@ type ImportedAccountObserver func(accountID uint64) error
 // BatchProgressObserver 在单个账号任务结束后报告批次完成数。
 type BatchProgressObserver func(completed, total int) error
 
+// BuildDetectOutcome 描述单次 Grok Build 可用性探测结果。
+type BuildDetectOutcome string
+
+const (
+	// BuildDetectOutcomeOK 表示探测成功，账号可用。
+	BuildDetectOutcomeOK BuildDetectOutcome = "ok"
+	// BuildDetectOutcomeInvalid 表示已确认失效并标 reauthRequired。
+	BuildDetectOutcomeInvalid BuildDetectOutcome = "invalid"
+	// BuildDetectOutcomeFailed 表示探测失败但未判定为永久失效（网络/5xx/临时额度等）。
+	BuildDetectOutcomeFailed BuildDetectOutcome = "failed"
+)
+
+// BuildDetectItemResult 是单账号探测的结构化结果，供 SSE 增量推送。
+type BuildDetectItemResult struct {
+	AccountID  uint64
+	Name       string
+	Email      string
+	Outcome    BuildDetectOutcome
+	Reason     string
+	HTTPStatus int
+}
+
+// BuildDetectItemObserver 在单个账号探测完成后推送明细；返回错误会取消批次。
+type BuildDetectItemObserver func(item BuildDetectItemResult) error
+
 type ExportResult struct {
 	Data  []byte
 	Count int
@@ -303,32 +350,34 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 
 // Service 负责 OAuth 账号接入、刷新、额度和持久化生命周期。
 type Service struct {
-	accounts              repository.AccountRepository
-	audits                repository.AuditRepository
-	deviceSessions        repository.DeviceSessionRepository
-	sticky                repository.StickySessionRepository
-	refreshLock           repository.DistributedLock
-	concurrency           repository.ConcurrencyLimiter
-	quotaQueue            repository.QuotaRecoveryQueue
-	quotaRefreshState     repository.QuotaRefreshCoordinator
-	providers             *provider.Registry
-	cipher                *security.Cipher
-	refreshes             singleflight.Group
-	billingSyncs          singleflight.Group
-	quotaSyncs            singleflight.Group
-	identitySyncs         singleflight.Group
-	observedModelWrites   singleflight.Group
-	observedModelStore    repository.ObservedModelStateRepository
-	refreshMu             sync.Mutex
-	lastRefreshAt         map[uint64]time.Time
-	observedModelShards   [observedModelLockShards]observedModelShard
-	quotaRefreshMu        sync.Mutex
-	quotaRefreshes        map[string]*webQuotaRefreshState
-	quotaRefreshQueue     chan webQuotaRefreshRequest
-	quotaRefreshWake      chan struct{}
-	conversionPool        *batch.Pool
-	syncPool              *batch.Pool
-	refreshPool           *batch.Pool
+	accounts            repository.AccountRepository
+	audits              repository.AuditRepository
+	deviceSessions      repository.DeviceSessionRepository
+	sticky              repository.StickySessionRepository
+	refreshLock         repository.DistributedLock
+	concurrency         repository.ConcurrencyLimiter
+	quotaQueue          repository.QuotaRecoveryQueue
+	quotaRefreshState   repository.QuotaRefreshCoordinator
+	providers           *provider.Registry
+	cipher              *security.Cipher
+	refreshes           singleflight.Group
+	billingSyncs        singleflight.Group
+	quotaSyncs          singleflight.Group
+	identitySyncs       singleflight.Group
+	observedModelWrites singleflight.Group
+	observedModelStore  repository.ObservedModelStateRepository
+	refreshMu           sync.Mutex
+	lastRefreshAt       map[uint64]time.Time
+	observedModelShards [observedModelLockShards]observedModelShard
+	quotaRefreshMu      sync.Mutex
+	quotaRefreshes      map[string]*quotaRefreshState
+	quotaRefreshQueue   chan quotaRefreshRequest
+	quotaRefreshWake    chan struct{}
+	conversionPool      *batch.Pool
+	syncPool            *batch.Pool
+	refreshPool         *batch.Pool
+	// detectPool 专用于管理端「检测账号」，与额度同步/续期隔离，默认并发 32。
+	detectPool            *batch.Pool
 	accountTaskBatchSize  atomic.Int64
 	credentialRefreshWake chan struct{}
 	autoCleanMu           sync.RWMutex
@@ -351,10 +400,13 @@ func (s *Service) SetQuotaRefreshCoordinator(value repository.QuotaRefreshCoordi
 func (s *Service) QuotaRefreshStats() QuotaRefreshStats {
 	s.quotaRefreshMu.Lock()
 	defer s.quotaRefreshMu.Unlock()
-	result := QuotaRefreshStats{Pending: len(s.quotaRefreshes)}
+	result := QuotaRefreshStats{}
 	for _, state := range s.quotaRefreshes {
 		if state == nil {
 			continue
+		}
+		if state.pending || state.queued || state.running {
+			result.Pending++
 		}
 		if state.queued {
 			result.Queued++
@@ -380,8 +432,8 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 	service := &Service{
 		accounts: accounts, audits: audits, deviceSessions: deviceSessions, sticky: sticky,
 		providers: providers, cipher: cipher, refreshLock: refreshLock,
-		lastRefreshAt: make(map[uint64]time.Time), quotaRefreshes: make(map[string]*webQuotaRefreshState),
-		quotaRefreshQueue:     make(chan webQuotaRefreshRequest, webQuotaRefreshQueueSize),
+		lastRefreshAt: make(map[uint64]time.Time), quotaRefreshes: make(map[string]*quotaRefreshState),
+		quotaRefreshQueue:     make(chan quotaRefreshRequest, quotaRefreshQueueSize),
 		quotaRefreshWake:      make(chan struct{}, 1),
 		credentialRefreshWake: make(chan struct{}, 1),
 		autoClean: AutoCleanConfig{
@@ -389,8 +441,9 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 		},
 		autoCleanWake:     make(chan struct{}, 1),
 		buildBotFlagCache: resultcache.New[string, []uint64](1, buildBotFlagCacheTTL),
-		conversionPool:    batch.NewPool(25), syncPool: batch.NewPool(25), refreshPool: batch.NewPool(25), logger: slog.Default(),
-		now: func() time.Time { return time.Now().UTC() },
+		conversionPool:    batch.NewPool(25), syncPool: batch.NewPool(25), refreshPool: batch.NewPool(25), detectPool: batch.NewPool(32),
+		logger: slog.Default(),
+		now:    func() time.Time { return time.Now().UTC() },
 	}
 	service.accountTaskBatchSize.Store(defaultAccountTaskBatchSize)
 	return service
@@ -432,6 +485,13 @@ func (s *Service) currentAccountTaskBatchSize() int {
 	return int(value)
 }
 
+// SetDetectPool 绑定管理端「检测账号」专用并发池；nil 时保留现有池。
+func (s *Service) SetDetectPool(pool *batch.Pool) {
+	if pool != nil {
+		s.detectPool = pool
+	}
+}
+
 func (s *Service) SetLogger(logger *slog.Logger) {
 	if logger != nil {
 		s.logger = logger
@@ -448,10 +508,11 @@ func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Def
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
+	egressMode, egressNodeID, egressSourceID, egressValid := parseEgressFilter(filter.Egress)
 	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) ||
 		!oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") ||
 		!oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") ||
-		!oneOf(filter.Egress, "", "bound", "unbound") ||
+		!egressValid ||
 		!oneOf(filter.Renewal, "", "refreshable", "unrefreshable") ||
 		!oneOf(filter.Risk, "", "flagged", "normal") ||
 		(filter.Risk != "" && filter.Provider != string(accountdomain.ProviderBuild)) ||
@@ -467,7 +528,8 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		refreshable = &value
 	}
 	repositoryFilter := repository.AccountListFilter{
-		Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Egress: filter.Egress,
+		Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Egress: egressMode,
+		EgressNodeID: egressNodeID, EgressSourceID: egressSourceID,
 		Refreshable: refreshable, Agreement: filter.Agreement, Association: filter.Association, Now: s.now(),
 	}
 	if filter.Risk != "" {
@@ -560,6 +622,35 @@ func (s *Service) loadBuildBotFlaggedAccountIDs(ctx context.Context) ([]uint64, 
 func (s *Service) invalidateBuildBotFlagCache() {
 	if s.buildBotFlagCache != nil {
 		s.buildBotFlagCache.Delete(buildBotFlagCacheKey)
+	}
+}
+
+// parseEgressFilter splits the account egress filter into its bound/unbound mode
+// and an optional narrowing target. Accepted values are "", "bound", "unbound",
+// "node:<id>" and "source:<id>"; the last two are "bound" narrowed to one egress
+// node or to every node owned by one subscription source.
+func parseEgressFilter(value string) (mode string, nodeID uint64, sourceID uint64, ok bool) {
+	if oneOf(value, "", "bound", "unbound") {
+		return value, 0, 0, true
+	}
+	prefix, raw, found := strings.Cut(value, ":")
+	if !found {
+		return "", 0, 0, false
+	}
+	// Relational account and egress IDs are stored in signed BIGINT/INTEGER
+	// columns. Reject values outside that range here so malformed filters cannot
+	// reach database/sql as unsupported high-bit uint64 arguments and become 500s.
+	id, err := strconv.ParseUint(raw, 10, 63)
+	if err != nil || id == 0 {
+		return "", 0, 0, false
+	}
+	switch prefix {
+	case "node":
+		return "bound", id, 0, true
+	case "source":
+		return "bound", 0, id, true
+	default:
+		return "", 0, 0, false
 	}
 }
 
@@ -2500,13 +2591,7 @@ func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, rese
 				if window.Mode != mode {
 					continue
 				}
-				if window.ResetAt != nil && window.ResetAt.After(s.now()) {
-					value := *window.ResetAt
-					resetAt = &value
-				} else if window.WindowSeconds > 0 {
-					value := s.now().Add(time.Duration(window.WindowSeconds) * time.Second)
-					resetAt = &value
-				}
+				resetAt = quotaRecoveryDueAt(window, s.now(), true)
 				break
 			}
 		}
@@ -2531,64 +2616,61 @@ func (s *Service) RefreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	if err != nil {
 		return nil, err
 	}
-	windows, ok := result.([]accountdomain.QuotaWindow)
+	refreshed, ok := result.(quotaRefreshResult)
 	if !ok {
 		return nil, fmt.Errorf("Provider 额度同步返回类型无效")
 	}
-	return windows, nil
-}
-
-func (s *Service) RefreshWebQuota(ctx context.Context, id uint64) ([]accountdomain.QuotaWindow, error) {
-	return s.RefreshQuota(ctx, id)
-}
-
-func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.QuotaWindow, error) {
-	value, err := s.accounts.Get(ctx, id)
-	if err != nil {
-		return nil, mapRepositoryError(err)
-	}
-	adapter, ok := s.providers.Quota(value.Provider)
-	if !ok {
-		return nil, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
-	}
-	snapshot, err := adapter.SyncQuota(ctx, value)
-	if err != nil {
-		if errors.Is(err, provider.ErrUnauthorized) {
-			err = errors.Join(err, s.markSSOCredentialRejected(ctx, value, fmt.Sprintf("%s SSO credential rejected", value.Provider)))
-		}
-		return nil, err
-	}
-	quotaKind, _ := s.providers.QuotaKind(value.Provider)
-	if quotaKind == provider.QuotaLocalWindow {
-		existing, loadErr := s.accounts.GetQuotaWindows(ctx, []uint64{id})
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		snapshot.Windows = preserveActiveQuotaWindows(existing[id], snapshot.Windows, s.now())
-	}
-	if err := s.accounts.ReplaceQuotaWindows(ctx, id, snapshot.Tier, snapshot.SyncedAt, snapshot.Windows); err != nil {
-		return nil, err
-	}
-	for _, window := range snapshot.Windows {
-		if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
-			if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				return snapshot.Windows, fmt.Errorf("安排额度恢复事件: %w", err)
-			}
-		}
+	if err := s.reconcileQuotaRecoveryWindows(ctx, refreshed.Credential.Provider, id, refreshed.Windows); err != nil {
+		return refreshed.Windows, err
 	}
 	// 身份补全是非关键操作：只在额度落库和恢复任务调度完成后执行，
 	// 并沿用调用方取消语义，不能反向影响额度同步结果。
+	value := refreshed.Credential
 	if (value.Provider == accountdomain.ProviderWeb || value.Provider == accountdomain.ProviderConsole) && ctx.Err() == nil {
 		if strings.TrimSpace(value.UserID) == "" && strings.TrimSpace(value.Email) == "" {
 			if identityErr := s.syncAccountIdentityBestEffort(ctx, id); errors.Is(identityErr, provider.ErrUnauthorized) {
-				return snapshot.Windows, identityErr
+				return refreshed.Windows, identityErr
 			}
 		} else {
 			// 已有 Session 身份时只做本地增量关联，不再访问上游。
 			s.reconcileProviderLinksBestEffort(ctx, id)
 		}
 	}
-	return snapshot.Windows, nil
+	return refreshed.Windows, nil
+}
+
+func (s *Service) RefreshWebQuota(ctx context.Context, id uint64) ([]accountdomain.QuotaWindow, error) {
+	return s.RefreshQuota(ctx, id)
+}
+
+func (s *Service) refreshQuota(ctx context.Context, id uint64) (quotaRefreshResult, error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return quotaRefreshResult{}, mapRepositoryError(err)
+	}
+	adapter, ok := s.providers.Quota(value.Provider)
+	if !ok {
+		return quotaRefreshResult{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
+	}
+	snapshot, err := adapter.SyncQuota(ctx, value)
+	if err != nil {
+		if errors.Is(err, provider.ErrUnauthorized) {
+			err = errors.Join(err, s.markSSOCredentialRejected(ctx, value, fmt.Sprintf("%s SSO credential rejected", value.Provider)))
+		}
+		return quotaRefreshResult{}, err
+	}
+	quotaKind, _ := s.providers.QuotaKind(value.Provider)
+	if quotaKind == provider.QuotaLocalWindow {
+		existing, loadErr := s.accounts.GetQuotaWindows(ctx, []uint64{id})
+		if loadErr != nil {
+			return quotaRefreshResult{}, loadErr
+		}
+		snapshot.Windows = preserveActiveQuotaWindows(existing[id], snapshot.Windows, s.now())
+	}
+	if err := s.accounts.ReplaceQuotaWindows(ctx, id, snapshot.Tier, snapshot.SyncedAt, snapshot.Windows); err != nil {
+		return quotaRefreshResult{}, err
+	}
+	return quotaRefreshResult{Credential: value, Windows: snapshot.Windows}, nil
 }
 
 func preserveActiveQuotaWindows(existing, incoming []accountdomain.QuotaWindow, now time.Time) []accountdomain.QuotaWindow {
@@ -2632,84 +2714,215 @@ func (s *Service) ReconcileWebRateLimit(ctx context.Context, id uint64, mode str
 }
 
 func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
-	key := strings.TrimSpace(mode) + ":" + strconv.FormatUint(id, 10)
+	mode = strings.TrimSpace(mode)
+	key := quotaSyncKey(id, mode)
 	result, err, _ := s.quotaSyncs.Do(key, func() (any, error) {
 		return s.refreshQuotaMode(ctx, id, mode)
 	})
 	if err != nil {
 		return accountdomain.QuotaWindow{}, err
 	}
-	window, ok := result.(accountdomain.QuotaWindow)
+	refreshed, ok := result.(quotaRefreshResult)
 	if !ok {
 		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度同步返回类型无效")
+	}
+	window, ok := quotaWindowByMode(refreshed.Windows, mode)
+	if !ok {
+		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider usage 响应缺少 %s 额度", mode)
+	}
+	if refreshed.Credential.Provider == accountdomain.ProviderConsole {
+		// One Console request refreshes all three authoritative windows. Reconcile
+		// every matching recovery event so externally consumed media quota cannot
+		// remain unscheduled merely because a different kind triggered the refresh.
+		if err := s.reconcileQuotaRecoveryWindows(ctx, refreshed.Credential.Provider, id, refreshed.Windows); err != nil {
+			return window, err
+		}
+	} else if err := s.reconcileQuotaRecoveryWindow(ctx, refreshed.Credential.Provider, id, window); err != nil {
+		return window, err
 	}
 	return window, nil
 }
 
-func (s *Service) RefreshWebQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
-	return s.RefreshQuotaMode(ctx, id, mode)
+// ProbeQuotaMode refreshes a claimed recovery event without scheduling a
+// second event for the same account and mode. The recovery worker owns the
+// current claim and is responsible for acknowledging or rescheduling it.
+func (s *Service) ProbeQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
+	mode = strings.TrimSpace(mode)
+	key := quotaSyncKey(id, mode)
+	result, err, _ := s.quotaSyncs.Do(key, func() (any, error) {
+		return s.refreshQuotaMode(ctx, id, mode)
+	})
+	if err != nil {
+		return accountdomain.QuotaWindow{}, err
+	}
+	refreshed, ok := result.(quotaRefreshResult)
+	if !ok {
+		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度探测返回类型无效")
+	}
+	window, ok := quotaWindowByMode(refreshed.Windows, mode)
+	if !ok {
+		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider usage 响应缺少 %s 额度", mode)
+	}
+	return window, nil
 }
 
-func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
+func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) (quotaRefreshResult, error) {
 	value, err := s.accounts.Get(ctx, id)
 	if err != nil {
-		return accountdomain.QuotaWindow{}, mapRepositoryError(err)
+		return quotaRefreshResult{}, mapRepositoryError(err)
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
+		return quotaRefreshResult{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
-	window, err := adapter.SyncQuotaMode(ctx, value, mode)
+	var window accountdomain.QuotaWindow
+	var windows []accountdomain.QuotaWindow
+	var syncedAt time.Time
+	var tier accountdomain.WebTier
+	if value.Provider == accountdomain.ProviderConsole {
+		// Console /usage always returns Chat, Image and Video together. Persist the
+		// response as one authoritative snapshot so each media route observes the
+		// same upstream usage generation.
+		var snapshot provider.QuotaSnapshot
+		snapshot, err = adapter.SyncQuota(ctx, value)
+		if err == nil {
+			windows = snapshot.Windows
+			syncedAt = snapshot.SyncedAt
+			for _, candidate := range windows {
+				if candidate.Mode == mode {
+					window = candidate
+					break
+				}
+			}
+			if window.Mode == "" {
+				err = fmt.Errorf("Console usage 响应缺少 %s 额度", mode)
+			}
+		}
+	} else {
+		window, err = adapter.SyncQuotaMode(ctx, value, mode)
+		windows = []accountdomain.QuotaWindow{window}
+		syncedAt = s.now()
+	}
 	if err != nil {
 		if errors.Is(err, provider.ErrUnauthorized) {
 			err = errors.Join(err, s.markSSOCredentialRejected(ctx, value, fmt.Sprintf("%s SSO credential rejected", value.Provider)))
 		}
-		return accountdomain.QuotaWindow{}, err
+		return quotaRefreshResult{}, err
 	}
-	var tier accountdomain.WebTier
 	quotaKind, _ := s.providers.QuotaKind(value.Provider)
 	if quotaKind == provider.QuotaRemoteWindow {
-		// A single-mode reconciliation updates only the window associated with this 429.
-		// Full quota synchronization remains responsible for tier detection and other modes.
+		// Web reconciliation updates one mode; Console already supplied and
+		// persisted its complete /usage snapshot above.
 		tier = value.WebTier
 	}
-	now := s.now()
-	if err := s.accounts.SaveQuotaWindows(ctx, id, tier, now, []accountdomain.QuotaWindow{window}); err != nil {
-		return accountdomain.QuotaWindow{}, err
+	if syncedAt.IsZero() {
+		syncedAt = s.now()
 	}
-	if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
-		if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: *window.ResetAt}); err != nil {
-			return window, fmt.Errorf("安排额度恢复事件: %w", err)
+	if value.Provider == accountdomain.ProviderConsole {
+		if err := s.accounts.ReplaceQuotaWindows(ctx, id, tier, syncedAt, windows); err != nil {
+			return quotaRefreshResult{}, err
+		}
+	} else if err := s.accounts.SaveQuotaWindows(ctx, id, tier, syncedAt, windows); err != nil {
+		return quotaRefreshResult{}, err
+	}
+	return quotaRefreshResult{Credential: value, Windows: windows}, nil
+}
+
+func quotaSyncKey(accountID uint64, mode string) string {
+	mode = strings.TrimSpace(mode)
+	if isConsoleUsageQuotaMode(mode) {
+		return "all:" + strconv.FormatUint(accountID, 10)
+	}
+	return mode + ":" + strconv.FormatUint(accountID, 10)
+}
+
+func quotaWindowByMode(windows []accountdomain.QuotaWindow, mode string) (accountdomain.QuotaWindow, bool) {
+	for _, window := range windows {
+		if window.Mode == mode {
+			return window, true
 		}
 	}
-	return window, nil
+	return accountdomain.QuotaWindow{}, false
+}
+
+func (s *Service) reconcileQuotaRecoveryWindows(ctx context.Context, providerValue accountdomain.Provider, accountID uint64, windows []accountdomain.QuotaWindow) error {
+	for _, window := range windows {
+		if err := s.reconcileQuotaRecoveryWindow(ctx, providerValue, accountID, window); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) reconcileQuotaRecoveryWindow(ctx context.Context, providerValue accountdomain.Provider, accountID uint64, window accountdomain.QuotaWindow) error {
+	if s.quotaQueue == nil || !quotaWindowControlsRouting(providerValue, window.Mode) {
+		return nil
+	}
+	if dueAt := quotaRecoveryDueAt(window, s.now(), window.Remaining == 0); dueAt != nil {
+		if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: accountID, Mode: window.Mode, DueAt: *dueAt}); err != nil {
+			return fmt.Errorf("安排额度恢复事件: %w", err)
+		}
+		return nil
+	}
+	if err := s.quotaQueue.CancelQuotaRecovery(ctx, accountID, window.Mode); err != nil {
+		return fmt.Errorf("取消额度恢复事件: %w", err)
+	}
+	return nil
+}
+
+// quotaRecoveryDueAt keeps upstream quota exhaustion recoverable even when
+// the Provider reports no reset timestamp. Console uses a conservative
+// predicted 24-hour probe window; generic remote windows retain the shorter
+// fallback and transport failures use the recovery queue's bounded backoff.
+func quotaRecoveryDueAt(window accountdomain.QuotaWindow, now time.Time, exhausted bool) *time.Time {
+	if !exhausted {
+		return nil
+	}
+	if window.ResetAt != nil && window.ResetAt.After(now) {
+		value := *window.ResetAt
+		return &value
+	}
+	if isConsoleUsageQuotaMode(window.Mode) {
+		value := now.Add(consolePredictedQuotaProbeDelay)
+		return &value
+	}
+	if window.Source == accountdomain.QuotaSourceUpstream {
+		value := now.Add(unknownRemoteQuotaProbeDelay)
+		return &value
+	}
+	return nil
 }
 
 // QueueQuotaRefresh asynchronously refreshes the remote quota window after a successful request.
 func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 	mode = strings.TrimSpace(mode)
-	if id == 0 || (mode != "weekly" && !isWebChatQuotaMode(mode)) {
+	if id == 0 || (!isConsoleUsageQuotaMode(mode) && mode != "weekly" && !isWebChatQuotaMode(mode)) {
 		return
 	}
 	key := strconv.FormatUint(id, 10) + ":" + mode
 	s.quotaRefreshMu.Lock()
 	state := s.quotaRefreshes[key]
+	now := s.now().UTC()
+	if state != nil && !state.pending && !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
+		delete(s.quotaRefreshes, key)
+		state = nil
+	}
 	if state == nil {
-		state = &webQuotaRefreshState{}
+		state = &quotaRefreshState{}
 		s.quotaRefreshes[key] = state
 	}
 	state.generation++
-	state.nextAttemptAt = time.Time{}
-	enqueued := state.queued || state.running || s.enqueueQuotaRefreshLocked(webQuotaRefreshRequest{key: key, accountID: id, mode: mode}, state)
+	state.pending = true
+	enqueued := state.queued || state.running || now.Before(state.nextAttemptAt) || s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: id, mode: mode}, state)
 	s.quotaRefreshMu.Unlock()
 	if !enqueued {
 		perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "enqueue", Outcome: "queue_full"}, 1)
-		s.logger.Warn("web_quota_refresh_queue_full", "account_id", id, "mode", mode)
+		s.logger.Warn("quota_refresh_queue_full", "account_id", id, "mode", mode)
 		s.wakeQuotaRefreshRecovery()
 	}
 }
 
-func (s *Service) enqueueQuotaRefreshLocked(request webQuotaRefreshRequest, state *webQuotaRefreshState) bool {
+func (s *Service) enqueueQuotaRefreshLocked(request quotaRefreshRequest, state *quotaRefreshState) bool {
 	if state == nil || state.queued || state.running {
 		return state != nil
 	}
@@ -2729,13 +2942,8 @@ func (s *Service) wakeQuotaRefreshRecovery() {
 	}
 }
 
-// QueueWebQuotaRefresh preserves the existing internal API while delegating to QueueQuotaRefresh.
-func (s *Service) QueueWebQuotaRefresh(id uint64, mode string) {
-	s.QueueQuotaRefresh(id, mode)
-}
-
-// RunWebQuotaRefresh uses a fixed worker set to avoid unbounded goroutine creation.
-func (s *Service) RunWebQuotaRefresh(ctx context.Context) {
+// RunQuotaRefresh uses a fixed worker set to avoid unbounded goroutine creation.
+func (s *Service) RunQuotaRefresh(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Add(managedTaskWorkerCeiling + 1)
 	for range managedTaskWorkerCeiling {
@@ -2754,24 +2962,27 @@ func (s *Service) RunWebQuotaRefresh(ctx context.Context) {
 					}
 					state.queued = false
 					state.running = true
+					state.pending = false
 					s.quotaRefreshMu.Unlock()
 					if err := batch.Do(ctx, func(workCtx context.Context) error {
-						s.runWebQuotaRefresh(workCtx, request)
+						s.runQuotaRefresh(workCtx, request)
 						return nil
 					}); err != nil {
 						s.quotaRefreshMu.Lock()
 						if state := s.quotaRefreshes[request.key]; state != nil {
 							state.running = false
-							state.nextAttemptAt = time.Now().UTC().Add(webQuotaRefreshRetryInterval)
+							state.pending = true
+							state.failures++
+							state.nextAttemptAt = s.now().UTC().Add(quotaRefreshRetryDelay(state.failures))
 						}
 						s.quotaRefreshMu.Unlock()
 						s.wakeQuotaRefreshRecovery()
 						if ctx.Err() == nil {
 							var panicErr *batch.PanicError
 							if errors.As(err, &panicErr) {
-								s.logger.Error("web_quota_refresh_worker_panicked", "account_id", request.accountID, "mode", request.mode, "error", panicErr, "stack", string(panicErr.Stack))
+								s.logger.Error("quota_refresh_worker_panicked", "account_id", request.accountID, "mode", request.mode, "error", panicErr, "stack", string(panicErr.Stack))
 							} else {
-								s.logger.Error("web_quota_refresh_worker_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
+								s.logger.Error("quota_refresh_worker_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
 							}
 						}
 					}
@@ -2786,7 +2997,7 @@ func (s *Service) RunWebQuotaRefresh(ctx context.Context) {
 	workers.Wait()
 }
 
-func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRefreshRequest) {
+func (s *Service) runQuotaRefresh(parent context.Context, request quotaRefreshRequest) {
 	for {
 		s.quotaRefreshMu.Lock()
 		state := s.quotaRefreshes[request.key]
@@ -2797,16 +3008,17 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 		localGeneration := state.generation
 		publishedGeneration := state.publishedGeneration
 		sharedGeneration := state.sharedGeneration
+		state.pending = false
 		s.quotaRefreshMu.Unlock()
 
-		ctx, cancel := context.WithTimeout(parent, webQuotaRefreshTimeout)
+		ctx, cancel := context.WithTimeout(parent, quotaRefreshTimeout)
 		if s.quotaRefreshState != nil && publishedGeneration < localGeneration {
-			generation, err := s.quotaRefreshState.MarkQuotaRefreshDirty(ctx, request.accountID, request.mode, webQuotaRefreshDirtyTTL)
+			generation, err := s.quotaRefreshState.MarkQuotaRefreshDirty(ctx, request.accountID, request.mode, quotaRefreshDirtyTTL)
 			if err != nil {
 				cancel()
 				s.deferQuotaRefresh(request.key)
 				perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "publish", Outcome: "failed"}, 1)
-				s.logger.Warn("web_quota_refresh_dirty_publish_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
+				s.logger.Warn("quota_refresh_dirty_publish_failed", "account_id", request.accountID, "mode", request.mode, "error", err)
 				return
 			}
 			sharedGeneration = generation
@@ -2843,24 +3055,42 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 			}
 		}
 		refreshMode := request.mode
+		consoleMode := isConsoleUsageQuotaMode(request.mode)
+		skipUpstream := false
 		if windows, err := s.accounts.GetQuotaWindows(ctx, []uint64{request.accountID}); err == nil {
-			for _, window := range windows[request.accountID] {
-				if window.Mode == "weekly" {
-					refreshMode = "weekly"
-					break
+			if consoleMode {
+				for _, window := range windows[request.accountID] {
+					if window.Mode == request.mode && window.SyncedAt != nil && s.now().UTC().Sub(window.SyncedAt.UTC()) < consoleQuotaRefreshMinInterval {
+						skipUpstream = true
+						break
+					}
+				}
+			} else {
+				// Weekly remains a Grok Web capability. Console never inherits this
+				// legacy mode and always refreshes its authoritative /usage snapshot.
+				for _, window := range windows[request.accountID] {
+					if window.Mode == "weekly" {
+						refreshMode = "weekly"
+						break
+					}
 				}
 			}
 		}
 		var refreshErr error
 		acquired := true
 		var release func()
-		if s.refreshLock != nil {
+		if !skipUpstream && s.refreshLock != nil {
 			effectiveKey := strconv.FormatUint(request.accountID, 10) + ":" + refreshMode
-			release, acquired, refreshErr = s.refreshLock.Acquire(ctx, "quota-refresh:"+effectiveKey, webQuotaRefreshTimeout)
+			if consoleMode {
+				// Every Console mode reads the same /usage snapshot. Serialize all
+				// three kinds across instances to avoid duplicate upstream probes.
+				effectiveKey = "console:" + strconv.FormatUint(request.accountID, 10)
+			}
+			release, acquired, refreshErr = s.refreshLock.Acquire(ctx, "quota-refresh:"+effectiveKey, quotaRefreshTimeout)
 		}
-		if refreshErr == nil && acquired {
+		if !skipUpstream && refreshErr == nil && acquired {
 			if err := s.syncPool.Do(ctx, func(workCtx context.Context) error {
-				_, refreshErr = s.RefreshWebQuotaMode(workCtx, request.accountID, refreshMode)
+				_, refreshErr = s.RefreshQuotaMode(workCtx, request.accountID, refreshMode)
 				return refreshErr
 			}); err != nil {
 				refreshErr = err
@@ -2872,7 +3102,7 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 		cancel()
 		if refreshErr != nil || !acquired {
 			if refreshErr != nil && !errors.Is(refreshErr, context.Canceled) {
-				s.logger.Warn("web_quota_refresh_failed", "account_id", request.accountID, "mode", refreshMode, "error", refreshErr)
+				s.logger.Warn("quota_refresh_failed", "account_id", request.accountID, "mode", refreshMode, "error", refreshErr)
 			}
 			s.deferQuotaRefresh(request.key)
 			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "retry"}, 1)
@@ -2897,6 +3127,10 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 		s.quotaRefreshMu.Unlock()
 		if localChanged || (s.quotaRefreshState != nil && currentShared != sharedGeneration) {
 			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "trailing"}, 1)
+			if consoleMode {
+				s.deferSuccessfulQuotaRefresh(request.key, true)
+				return
+			}
 			continue
 		}
 		if s.quotaRefreshState != nil && sharedDirty {
@@ -2905,7 +3139,11 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 			clearCancel()
 			if clearErr != nil || !cleared {
 				if clearErr != nil {
-					s.logger.Warn("web_quota_refresh_dirty_clear_failed", "account_id", request.accountID, "mode", request.mode, "error", clearErr)
+					s.logger.Warn("quota_refresh_dirty_clear_failed", "account_id", request.accountID, "mode", request.mode, "error", clearErr)
+				}
+				if consoleMode {
+					s.deferSuccessfulQuotaRefresh(request.key, true)
+					return
 				}
 				continue
 			}
@@ -2913,9 +3151,25 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 		s.quotaRefreshMu.Lock()
 		state = s.quotaRefreshes[request.key]
 		if state != nil && state.generation == localGeneration {
-			delete(s.quotaRefreshes, request.key)
+			if consoleMode {
+				state.running = false
+				state.pending = false
+				state.failures = 0
+				state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
+			} else {
+				delete(s.quotaRefreshes, request.key)
+			}
 			s.quotaRefreshMu.Unlock()
 			perfmetrics.Default.Add("quota_refresh_events", perfmetrics.Labels{Subsystem: "quota", Stage: "refresh", Outcome: "success"}, 1)
+			return
+		}
+		if consoleMode && state != nil {
+			state.running = false
+			state.pending = true
+			state.failures = 0
+			state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
+			s.quotaRefreshMu.Unlock()
+			s.wakeQuotaRefreshRecovery()
 			return
 		}
 		s.quotaRefreshMu.Unlock()
@@ -2926,15 +3180,47 @@ func (s *Service) deferQuotaRefresh(key string) {
 	s.quotaRefreshMu.Lock()
 	if state := s.quotaRefreshes[key]; state != nil {
 		state.running = false
-		state.nextAttemptAt = time.Now().UTC().Add(webQuotaRefreshRetryInterval)
+		state.pending = true
+		state.failures++
+		state.nextAttemptAt = s.now().UTC().Add(quotaRefreshRetryDelay(state.failures))
 	}
 	s.quotaRefreshMu.Unlock()
 	s.wakeQuotaRefreshRecovery()
 }
 
+func (s *Service) deferSuccessfulQuotaRefresh(key string, pending bool) {
+	s.quotaRefreshMu.Lock()
+	if state := s.quotaRefreshes[key]; state != nil {
+		state.running = false
+		state.pending = pending
+		state.failures = 0
+		state.nextAttemptAt = s.now().UTC().Add(consoleQuotaRefreshMinInterval)
+	}
+	s.quotaRefreshMu.Unlock()
+	s.wakeQuotaRefreshRecovery()
+}
+
+func quotaRefreshRetryDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	shift := min(failures-1, 6)
+	delay := quotaRefreshBackoffBase * time.Duration(1<<shift)
+	if delay > quotaRefreshBackoffMax {
+		delay = quotaRefreshBackoffMax
+	}
+	// Equal jitter keeps retries bounded away from zero while preventing a
+	// shared upstream outage from synchronizing every account worker.
+	half := delay / 2
+	if half <= 0 {
+		return delay
+	}
+	return half + time.Duration(rand.Int64N(int64(half)+1))
+}
+
 func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
-	retryTicker := time.NewTicker(webQuotaRefreshRetryInterval)
-	sharedTicker := time.NewTicker(webQuotaRefreshSharedPoll)
+	retryTicker := time.NewTicker(quotaRefreshPollInterval)
+	sharedTicker := time.NewTicker(quotaRefreshSharedPoll)
 	defer retryTicker.Stop()
 	defer sharedTicker.Stop()
 	for {
@@ -2953,10 +3239,20 @@ func (s *Service) runQuotaRefreshRecovery(ctx context.Context) {
 }
 
 func (s *Service) requeueQuotaRefreshes() {
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	s.quotaRefreshMu.Lock()
 	for key, state := range s.quotaRefreshes {
-		if state == nil || state.queued || state.running || now.Before(state.nextAttemptAt) {
+		if state == nil {
+			delete(s.quotaRefreshes, key)
+			continue
+		}
+		if !state.pending {
+			if !state.queued && !state.running && !now.Before(state.nextAttemptAt) {
+				delete(s.quotaRefreshes, key)
+			}
+			continue
+		}
+		if state.queued || state.running || now.Before(state.nextAttemptAt) {
 			continue
 		}
 		separator := strings.IndexByte(key, ':')
@@ -2967,7 +3263,7 @@ func (s *Service) requeueQuotaRefreshes() {
 		if err != nil {
 			continue
 		}
-		if !s.enqueueQuotaRefreshLocked(webQuotaRefreshRequest{key: key, accountID: accountID, mode: key[separator+1:]}, state) {
+		if !s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: accountID, mode: key[separator+1:]}, state) {
 			break
 		}
 	}
@@ -2982,7 +3278,7 @@ func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.T
 	values, err := s.quotaRefreshState.ListQuotaRefreshDirty(ctx, now, 100)
 	cancel()
 	if err != nil {
-		s.logger.Warn("web_quota_refresh_dirty_list_failed", "error", err)
+		s.logger.Warn("quota_refresh_dirty_list_failed", "error", err)
 		return
 	}
 	s.quotaRefreshMu.Lock()
@@ -2990,12 +3286,15 @@ func (s *Service) recoverSharedQuotaRefreshes(parent context.Context, now time.T
 		key := strconv.FormatUint(value.AccountID, 10) + ":" + value.Mode
 		state := s.quotaRefreshes[key]
 		if state == nil {
-			state = &webQuotaRefreshState{generation: 1, publishedGeneration: 1, sharedGeneration: value.Generation}
+			state = &quotaRefreshState{generation: 1, publishedGeneration: 1, sharedGeneration: value.Generation, pending: true}
 			s.quotaRefreshes[key] = state
-		} else if value.Generation > state.sharedGeneration {
-			state.sharedGeneration = value.Generation
+		} else {
+			if value.Generation > state.sharedGeneration {
+				state.sharedGeneration = value.Generation
+			}
+			state.pending = true
 		}
-		if !state.queued && !state.running && !s.enqueueQuotaRefreshLocked(webQuotaRefreshRequest{key: key, accountID: value.AccountID, mode: value.Mode}, state) {
+		if !state.queued && !state.running && !now.Before(state.nextAttemptAt) && !s.enqueueQuotaRefreshLocked(quotaRefreshRequest{key: key, accountID: value.AccountID, mode: value.Mode}, state) {
 			break
 		}
 	}
@@ -3034,6 +3333,19 @@ func isWebChatQuotaMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+func isConsoleUsageQuotaMode(mode string) bool {
+	switch mode {
+	case "console", "console_image", "console_video":
+		return true
+	default:
+		return false
+	}
+}
+
+func quotaWindowControlsRouting(providerValue accountdomain.Provider, mode string) bool {
+	return providerValue != accountdomain.ProviderConsole || isConsoleUsageQuotaMode(mode)
 }
 
 // SyncAllBilling 尽力刷新全部启用账号，单个账号失败不阻断其他账号。
@@ -3075,6 +3387,88 @@ func (s *Service) SyncAllConsoleQuotas(ctx context.Context) (int, int, error) {
 
 func (s *Service) SyncAllConsoleQuotasWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, error) {
 	return s.syncAllQuotasWithProgress(ctx, accountdomain.ProviderConsole, "console_quota_sync", progress)
+}
+
+// SyncIncompleteConsoleQuotas replaces pre-/usage synthetic windows and
+// partial snapshots without refreshing accounts that already have all three
+// authoritative Console quota kinds. It is safe to run periodically and uses
+// the shared sync pool to preserve the deployment-wide upstream limit.
+func (s *Service) SyncIncompleteConsoleQuotas(ctx context.Context) (int, int, error) {
+	const batchSize = 1000
+	var succeeded, failed int
+	var afterID uint64
+	for {
+		values, _, err := s.accounts.ListProviderAccountBatch(ctx, accountdomain.ProviderConsole, afterID, batchSize)
+		if err != nil {
+			return succeeded, failed, err
+		}
+		if len(values) == 0 {
+			return succeeded, failed, nil
+		}
+		ids := make([]uint64, 0, len(values))
+		for _, value := range values {
+			if value.Enabled && value.AuthStatus == accountdomain.AuthStatusActive {
+				ids = append(ids, value.ID)
+			}
+		}
+		windows, err := s.accounts.GetQuotaWindows(ctx, ids)
+		if err != nil {
+			return succeeded, failed, err
+		}
+		pending := make([]uint64, 0, len(ids))
+		for _, id := range ids {
+			if !completeConsoleUsageSnapshot(windows[id]) {
+				pending = append(pending, id)
+			}
+		}
+		var batchSucceeded, batchFailed int
+		if len(pending) > 0 {
+			batchSucceeded, batchFailed, err = s.runAccountBatch(ctx, "console_usage_migration", pending, s.syncPool, nil, func(workCtx context.Context, id uint64) error {
+				var release func()
+				if s.refreshLock != nil {
+					var acquired bool
+					var lockErr error
+					release, acquired, lockErr = s.refreshLock.Acquire(workCtx, "quota-refresh:"+strconv.FormatUint(id, 10)+":console", 2*quotaRefreshTimeout)
+					if lockErr != nil {
+						return lockErr
+					}
+					if !acquired {
+						return errQuotaRefreshBusy
+					}
+					defer release()
+				}
+				_, refreshErr := s.RefreshQuotaMode(workCtx, id, "console")
+				return refreshErr
+			})
+		}
+		succeeded += batchSucceeded
+		failed += batchFailed
+		if err != nil {
+			return succeeded, failed, err
+		}
+		afterID = values[len(values)-1].ID
+		if len(values) < batchSize {
+			return succeeded, failed, nil
+		}
+	}
+}
+
+func completeConsoleUsageSnapshot(windows []accountdomain.QuotaWindow) bool {
+	var present uint8
+	for _, window := range windows {
+		if window.Source != accountdomain.QuotaSourceUpstream || window.SyncedAt == nil {
+			continue
+		}
+		switch window.Mode {
+		case "console":
+			present |= 1
+		case "console_image":
+			present |= 2
+		case "console_video":
+			present |= 4
+		}
+	}
+	return present == 7
 }
 
 func (s *Service) syncAllQuotasWithProgress(ctx context.Context, providerValue accountdomain.Provider, operation string, progress BatchProgressObserver) (int, int, error) {
@@ -3178,6 +3572,373 @@ func (s *Service) BatchRefreshBilling(ctx context.Context, ids []uint64) (int, i
 		return 0, 0, err
 	}
 	return s.refreshBillings(ctx, values, nil)
+}
+
+// DetectBuildAccountsWithProgress 对指定或全部 Grok Build 账号发起探测请求；all 与 ids 必须且只能提供一个。
+// 该方法同时上报批量进度与单账号明细。
+// itemObserver 在每个账号完成后调用：选中检测会推送全部结果，全量检测仅推送已确认失效账号。
+func (s *Service) DetectBuildAccountsWithProgress(ctx context.Context, ids []uint64, all bool, progress BatchProgressObserver, itemObserver BuildDetectItemObserver) (int, int, error) {
+	if all == (len(ids) > 0) {
+		return 0, 0, invalidInput("必须明确选择全部账号或提供非空账号 ID")
+	}
+	if s.providers == nil {
+		return 0, 0, fmt.Errorf("Provider 注册表未初始化")
+	}
+	selectedMode := !all
+	var err error
+	if all {
+		ids, err = s.accounts.ListEnabledAccountIDs(ctx, accountdomain.ProviderBuild, false)
+		if err != nil {
+			return 0, 0, err
+		}
+	} else {
+		ids, err = normalizeBatchIDs(ids)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
+	pool := s.detectPool
+	if pool == nil {
+		pool = s.syncPool
+	}
+	if progress != nil {
+		if err := progress(0, len(ids)); err != nil {
+			return 0, 0, err
+		}
+	}
+	var progressMu sync.Mutex
+	var progressErr error
+	completed := 0
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	summary, err := batch.ForEachObserved(runCtx, ids, batch.Options{Workers: pool.Limit(), Pool: pool}, func(workCtx context.Context, id uint64) (BuildDetectItemResult, error) {
+		item := s.detectBuildAccount(workCtx, id)
+		if itemObserver != nil && (selectedMode || item.Outcome == BuildDetectOutcomeInvalid) {
+			if notifyErr := itemObserver(item); notifyErr != nil {
+				return item, notifyErr
+			}
+		}
+		if item.Outcome == BuildDetectOutcomeOK {
+			return item, nil
+		}
+		if item.Reason != "" {
+			return item, fmt.Errorf("%s", item.Reason)
+		}
+		return item, fmt.Errorf("账号检测失败")
+	}, func(index int, result batch.Result[BuildDetectItemResult]) {
+		var panicErr *batch.PanicError
+		if errors.As(result.Err, &panicErr) {
+			s.logger.Error("account_bulk_task_panicked", "operation", "build_detect", "account_id", ids[index], "error", panicErr, "stack", string(panicErr.Stack))
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		completed++
+		if progress != nil {
+			if notifyErr := progress(completed, len(ids)); notifyErr != nil && progressErr == nil {
+				progressErr = notifyErr
+				cancel()
+			}
+		}
+	})
+	s.logBatchSummary("build_detect", pool, summary, err)
+	return summary.Succeeded, summary.Failed, errors.Join(err, progressErr)
+}
+
+// detectBuildAccount 使用现有 Build Responses 链路发送固定探测请求。
+// 失效判定复用 provider.ClassifyCredentialRejection：凭据拒绝标 reauthRequired，
+// spending-limit 写额度恢复状态，PermanentAccountDenial 仅阻断固定探测模型。
+func (s *Service) detectBuildAccount(ctx context.Context, id uint64) BuildDetectItemResult {
+	item := BuildDetectItemResult{AccountID: id, Outcome: BuildDetectOutcomeFailed}
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		item.Reason = mapRepositoryError(err).Error()
+		return item
+	}
+	item.Name = value.Name
+	item.Email = value.Email
+	if value.Provider != accountdomain.ProviderBuild {
+		item.Reason = "仅 Grok Build 账号支持可用性检测"
+		return item
+	}
+	value, err = s.EnsureCredential(ctx, value, false)
+	if err != nil {
+		return s.finishBuildDetectCredentialError(ctx, value, err)
+	}
+	billing, err := s.loadDetectBilling(ctx, id)
+	if err != nil {
+		item.Reason = err.Error()
+		return item
+	}
+	response, err := s.forwardBuildDetect(ctx, value, billing)
+	if err != nil {
+		return s.finishBuildDetectCredentialError(ctx, value, err)
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		_ = response.Body.Close()
+		return s.handleBuildDetectUnauthorized(ctx, value, billing)
+	}
+	return s.finishBuildDetectResponse(ctx, response, value, billing)
+}
+
+// handleBuildDetectUnauthorized 复用网关对 Build OAuth 401 的恢复与失效收敛路径。
+func (s *Service) handleBuildDetectUnauthorized(ctx context.Context, value accountdomain.Credential, billing *accountdomain.Billing) BuildDetectItemResult {
+	item := BuildDetectItemResult{AccountID: value.ID, Name: value.Name, Email: value.Email, Outcome: BuildDetectOutcomeFailed, HTTPStatus: http.StatusUnauthorized}
+	if value.RefreshPermanent {
+		reason := fmt.Sprintf("%s OAuth access token rejected after permanent refresh failure", value.Provider)
+		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
+			item.Reason = markErr.Error()
+			return item
+		}
+		item.Outcome = BuildDetectOutcomeInvalid
+		item.Reason = reason
+		return item
+	}
+	refreshed, refreshErr := s.EnsureCredential(ctx, value, true)
+	if refreshErr != nil {
+		if errors.Is(refreshErr, ErrCredentialRefreshPermanent) {
+			reason := fmt.Sprintf("%s OAuth access token rejected after permanent refresh failure", value.Provider)
+			if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
+				item.Reason = errors.Join(refreshErr, markErr).Error()
+				return item
+			}
+			item.Outcome = BuildDetectOutcomeInvalid
+			item.Reason = reason
+			return item
+		}
+		return s.finishBuildDetectCredentialError(ctx, value, refreshErr)
+	}
+	response, err := s.forwardBuildDetect(ctx, refreshed, billing)
+	if err != nil {
+		return s.finishBuildDetectCredentialError(ctx, refreshed, err)
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		drainDetectBody(response.Body)
+		_ = response.Body.Close()
+		reason := "Grok Build OAuth credential rejected after refresh"
+		if markErr := s.markBuildDetectReauth(ctx, refreshed.ID, reason); markErr != nil {
+			item.Reason = markErr.Error()
+			return item
+		}
+		item.AccountID = refreshed.ID
+		item.Name = refreshed.Name
+		item.Email = refreshed.Email
+		item.Outcome = BuildDetectOutcomeInvalid
+		item.Reason = reason
+		return item
+	}
+	return s.finishBuildDetectResponse(ctx, response, refreshed, billing)
+}
+
+func (s *Service) finishBuildDetectCredentialError(ctx context.Context, value accountdomain.Credential, err error) BuildDetectItemResult {
+	item := BuildDetectItemResult{
+		AccountID: value.ID,
+		Name:      value.Name,
+		Email:     value.Email,
+		Outcome:   BuildDetectOutcomeFailed,
+		Reason:    err.Error(),
+	}
+	var refreshErr *provider.CredentialRefreshError
+	if errors.Is(err, ErrCredentialRefreshPermanent) || errors.As(err, &refreshErr) && refreshErr.Permanent {
+		reason := fmt.Sprintf("%s OAuth refresh credential permanently rejected", value.Provider)
+		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
+			item.Reason = errors.Join(err, markErr).Error()
+			return item
+		}
+		item.Outcome = BuildDetectOutcomeInvalid
+		item.Reason = reason
+		return item
+	}
+	if rejection := provider.ClassifyCredentialRejection(0, nil, err); rejection.Rejected {
+		reason := fmt.Sprintf("%s OAuth credential rejected", value.Provider)
+		if markErr := s.markBuildDetectReauth(ctx, value.ID, reason); markErr != nil {
+			item.Reason = errors.Join(err, markErr).Error()
+			return item
+		}
+		item.Outcome = BuildDetectOutcomeInvalid
+		item.Reason = reason
+	}
+	return item
+}
+
+func (s *Service) loadDetectBilling(ctx context.Context, id uint64) (*accountdomain.Billing, error) {
+	snap, err := s.accounts.GetBilling(ctx, id)
+	if err == nil {
+		return &snap, nil
+	}
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func (s *Service) forwardBuildDetect(ctx context.Context, value accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
+	adapter, ok := s.providers.Responses(accountdomain.ProviderBuild)
+	if !ok {
+		return nil, fmt.Errorf("Provider %s 未注册 Responses 能力", accountdomain.ProviderBuild)
+	}
+	body := []byte(fmt.Sprintf(`{"model":%q,"input":%q}`, buildDetectModel, buildDetectPrompt))
+	return adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{
+		Credential:    value,
+		Billing:       billing,
+		Method:        http.MethodPost,
+		Path:          "/responses",
+		Model:         buildDetectModel,
+		Body:          body,
+		NormalizeBody: true,
+		Streaming:     false,
+	})
+}
+
+// markBuildDetectReauth 与 markSSOCredentialRejected 一样不继承客户端取消，确保已确认失效的账号落库。
+func (s *Service) markBuildDetectReauth(ctx context.Context, id uint64, reason string) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+	defer cancel()
+	if err := s.MarkReauthRequired(writeCtx, id, reason); err != nil {
+		s.logger.Error("account_reauth_required_write_failed", "account_id", id, "provider", accountdomain.ProviderBuild, "error", err)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) finishBuildDetectResponse(ctx context.Context, response *provider.Response, credential accountdomain.Credential, billing *accountdomain.Billing) BuildDetectItemResult {
+	item := BuildDetectItemResult{
+		AccountID:  credential.ID,
+		Name:       credential.Name,
+		Email:      credential.Email,
+		Outcome:    BuildDetectOutcomeFailed,
+		HTTPStatus: response.StatusCode,
+	}
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	body := readDetectBodyForClassification(response.Body)
+	rejection := provider.ClassifyCredentialRejection(response.StatusCode, body, nil)
+	if rejection.Rejected {
+		reason := fmt.Sprintf("%s OAuth credential rejected (HTTP %d)", credential.Provider, response.StatusCode)
+		if markErr := s.markBuildDetectReauth(ctx, credential.ID, reason); markErr != nil {
+			item.Reason = markErr.Error()
+			return item
+		}
+		item.Outcome = BuildDetectOutcomeInvalid
+		item.Reason = reason
+		return item
+	}
+	if rejection.SpendingLimitBlocked {
+		reason := fmt.Sprintf("%s spending limit blocked", credential.Provider)
+		if markErr := s.markBuildDetectQuotaExhausted(ctx, credential, billing); markErr != nil {
+			item.Reason = errors.Join(errors.New(reason), markErr).Error()
+			return item
+		}
+		item.Reason = reason
+		return item
+	}
+	if rejection.ModelQuotaExhausted {
+		reason := fmt.Sprintf("%s model quota exhausted for %s", credential.Provider, buildDetectModel)
+		if markErr := s.markBuildDetectModelQuotaExhausted(ctx, credential, reason); markErr != nil {
+			item.Reason = errors.Join(errors.New(reason), markErr).Error()
+			return item
+		}
+		item.Reason = reason
+		return item
+	}
+	if rejection.QuotaExhausted {
+		reason := fmt.Sprintf("%s quota exhausted", credential.Provider)
+		if markErr := s.markBuildDetectQuotaExhausted(ctx, credential, billing); markErr != nil {
+			item.Reason = errors.Join(errors.New(reason), markErr).Error()
+			return item
+		}
+		item.Reason = reason
+		return item
+	}
+	if rejection.PermanentAccountDenial {
+		reason := fmt.Sprintf("%s chat endpoint access denied for %s", credential.Provider, buildDetectModel)
+		if markErr := s.markBuildDetectModelDenied(ctx, credential, reason); markErr != nil {
+			item.Reason = errors.Join(errors.New(reason), markErr).Error()
+			return item
+		}
+		item.Reason = reason
+		return item
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		item.Reason = fmt.Sprintf("上游检测失败: HTTP %d", response.StatusCode)
+		return item
+	}
+	item.Outcome = BuildDetectOutcomeOK
+	item.Reason = ""
+	return item
+}
+
+func (s *Service) markBuildDetectQuotaExhausted(ctx context.Context, credential accountdomain.Credential, billing *accountdomain.Billing) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+	defer cancel()
+	now := s.now()
+	recovery := accountdomain.QuotaRecovery{
+		AccountID: credential.ID, Kind: accountdomain.QuotaRecoveryKindFree, Status: accountdomain.QuotaRecoveryStatusExhausted,
+		ExhaustedAt: &now, LastConfirmedAt: &now, UpdatedAt: now,
+	}
+	nextProbeAt := now.Add(buildDetectQuotaRecoveryPause)
+	if billing != nil && billing.IsPaid() {
+		if periodEnd, ok := billing.PeriodEnd(); ok && periodEnd.After(now) {
+			recovery.Kind = accountdomain.QuotaRecoveryKindPaid
+			nextProbeAt = periodEnd
+		}
+	}
+	recovery.NextProbeAt = &nextProbeAt
+	if err := s.accounts.SaveQuotaRecovery(writeCtx, recovery); err != nil {
+		s.logger.Error("account_quota_recovery_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
+		return err
+	}
+	if s.sticky != nil {
+		if err := s.sticky.DeleteByAccount(writeCtx, credential.ID); err != nil {
+			s.logger.Warn("account_sticky_delete_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) markBuildDetectModelDenied(ctx context.Context, credential accountdomain.Credential, reason string) error {
+	return s.markBuildDetectModelBlock(ctx, credential, "model_access_denied", buildDetectModelDeniedCooldown, reason)
+}
+
+func (s *Service) markBuildDetectModelQuotaExhausted(ctx context.Context, credential accountdomain.Credential, reason string) error {
+	return s.markBuildDetectModelBlock(ctx, credential, "model_quota_depleted", buildDetectQuotaRecoveryPause, reason)
+}
+
+func (s *Service) markBuildDetectModelBlock(ctx context.Context, credential accountdomain.Credential, blockReason string, cooldown time.Duration, diagnostic string) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
+	defer cancel()
+	now := s.now()
+	if err := s.accounts.UpsertModelQuotaBlock(writeCtx, accountdomain.ModelQuotaBlock{
+		AccountID: credential.ID, UpstreamModel: buildDetectModel, Reason: blockReason,
+		CooldownUntil: now.Add(cooldown), UpdatedAt: now,
+	}); err != nil {
+		s.logger.Error("account_model_block_write_failed", "account_id", credential.ID, "provider", credential.Provider, "model", buildDetectModel, "reason", diagnostic, "block_reason", blockReason, "error", err)
+		return err
+	}
+	return nil
+}
+
+// readDetectBodyForClassification 读取响应正文用于凭据拒绝分类，最多 64 KiB。
+// 返回的副本供 ClassifyCredentialRejection 解析；body 读完后会被消耗，调用方不应再使用。
+func readDetectBodyForClassification(body io.ReadCloser) []byte {
+	if body == nil {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, 64*1024))
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func drainDetectBody(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
 }
 
 // BatchResetQuotaState clears local Build quota recovery state without changing
