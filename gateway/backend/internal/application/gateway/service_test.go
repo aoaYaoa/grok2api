@@ -2009,7 +2009,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	attemptsBeforeForbidden := len(adapter.Attempts())
 	adapter.FailWithError(retrySafeImageStatusError{status: http.StatusForbidden})
 	if _, err := service.GenerateImage(ctx, ImageGenerationInput{
-		RequestID: "req-image-forbidden", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		RequestID: "req-image-forbidden", ClientKey: key, PublicModel: "grok-imagine-image-quality-lite",
 		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
 	}); err == nil {
 		t.Fatal("expected image upload forbidden error")
