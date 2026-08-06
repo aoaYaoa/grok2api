@@ -219,7 +219,7 @@ func TestImagineStartSSEAndStopUseGoImageGenerator(t *testing.T) {
 		t.Fatal("image generator was not called")
 	}
 	input := generator.inputs[0]
-	if input.PublicModel != "grok-imagine-image-quality" || input.Prompt != "draw" || input.AspectRatio != "16:9" || input.Resolution != "2k" || input.ResponseFormat != "b64_json" || input.Count != 1 || input.NSFW == nil || !*input.NSFW {
+	if input.PublicModel != "Web/grok-imagine-image-quality-lite" || input.Prompt != "draw" || input.AspectRatio != "16:9" || input.Resolution != "2k" || input.ResponseFormat != "b64_json" || input.Count != 1 || input.NSFW == nil || !*input.NSFW {
 		t.Fatalf("input = %#v", input)
 	}
 

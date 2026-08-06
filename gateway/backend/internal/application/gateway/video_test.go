@@ -199,6 +199,15 @@ type videoStatusError struct {
 func (e videoStatusError) Error() string       { return e.message }
 func (e videoStatusError) HTTPStatusCode() int { return e.status }
 
+func TestShouldSwitchVideoAccountStopsForConsoleDPoPRequirement(t *testing.T) {
+	if shouldSwitchVideoAccount(videoStatusError{status: http.StatusForbidden, message: "Console 媒体上游返回 403: DPoP proof required but was not verified"}) {
+		t.Fatal("DPoP protocol requirement must not rotate through accounts")
+	}
+	if !shouldSwitchVideoAccount(videoStatusError{status: http.StatusForbidden, message: "Console 媒体上游返回 403: account denied"}) {
+		t.Fatal("ordinary account-scoped forbidden response should remain switchable")
+	}
+}
+
 func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	service := &Service{}
 	service.ConfigureMedia(&videoUsageRepository{}, 1)

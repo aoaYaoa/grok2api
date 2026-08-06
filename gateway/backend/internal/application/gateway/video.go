@@ -975,6 +975,9 @@ func shouldSwitchVideoAccount(err error) bool {
 	if err == nil || provider.IsMediaPostProcessingError(err) {
 		return false
 	}
+	if provider.IsDPoPProofRequiredText(err.Error()) {
+		return false
+	}
 	if errors.Is(err, provider.ErrUnauthorized) {
 		return true
 	}

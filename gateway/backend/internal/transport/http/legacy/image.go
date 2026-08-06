@@ -22,7 +22,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const maxLegacyImageResponseBytes = 64 << 20
+const (
+	maxLegacyImageResponseBytes = 64 << 20
+	legacyWebImageModel         = "Web/grok-imagine-image-quality-lite"
+)
 
 var parentPostIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
@@ -205,7 +208,7 @@ func (h *Handler) imagineWS(c *gin.Context) {
 		if task.pro {
 			resolution = "2k"
 		}
-		result, generateErr := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey, PublicModel: "grok-imagine-image-quality", Prompt: task.prompt, Count: 1, AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw})
+		result, generateErr := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey, PublicModel: legacyWebImageModel, Prompt: task.prompt, Count: 1, AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw})
 		if generateErr != nil {
 			_ = connection.WriteJSON(gin.H{"type": "error", "message": generateErr.Error(), "code": "image_generation_failed"})
 			return
@@ -333,7 +336,7 @@ func (h *Handler) imagineSSE(c *gin.Context) {
 		}
 		result, err := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{
 			RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey,
-			PublicModel: "grok-imagine-image-quality", Prompt: task.prompt, Count: 1,
+			PublicModel: legacyWebImageModel, Prompt: task.prompt, Count: 1,
 			AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw,
 		})
 		if err != nil {
