@@ -219,7 +219,7 @@ func TestImagineStartSSEAndStopUseGoImageGenerator(t *testing.T) {
 		t.Fatal("image generator was not called")
 	}
 	input := generator.inputs[0]
-	if input.PublicModel != "Web/grok-imagine-image-quality-lite" || input.Prompt != "draw" || input.AspectRatio != "16:9" || input.Resolution != "2k" || input.ResponseFormat != "b64_json" || input.Count != 1 || input.NSFW == nil || !*input.NSFW {
+	if input.PublicModel != "Console/grok-imagine-image-quality" || input.Prompt != "draw" || input.AspectRatio != "16:9" || input.Resolution != "2k" || input.ResponseFormat != "b64_json" || input.Count != 1 || input.NSFW == nil || !*input.NSFW {
 		t.Fatalf("input = %#v", input)
 	}
 
@@ -240,7 +240,7 @@ func TestImagineStartSSEAndStopUseGoImageGenerator(t *testing.T) {
 	}
 }
 
-func TestImagineNonProUsesWebImageLiteModel(t *testing.T) {
+func TestImagineNonProUsesConsoleStandardModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	generator := &fakeImageGenerator{}
@@ -264,7 +264,7 @@ func TestImagineNonProUsesWebImageLiteModel(t *testing.T) {
 	if sseRecorder.Code != http.StatusOK || len(generator.inputs) == 0 {
 		t.Fatalf("sse status=%d body=%s inputs=%d", sseRecorder.Code, sseRecorder.Body.String(), len(generator.inputs))
 	}
-	if got := generator.inputs[0].PublicModel; got != "Web/grok-imagine-image-lite" {
+	if got := generator.inputs[0].PublicModel; got != "Console/grok-imagine-image" {
 		t.Fatalf("PublicModel = %q", got)
 	}
 }
@@ -331,7 +331,7 @@ func TestImagineEditAndWorkbenchMapToGoMultiImageEditor(t *testing.T) {
 				}
 			}
 			last := generator.editInputs[len(generator.editInputs)-1]
-			if last.PublicModel != "grok-imagine-image-edit" || last.Prompt == "" || last.Count != 1 || last.ResponseFormat != "b64_json" || len(last.ImageURLs) != test.wantRefs {
+			if last.PublicModel != "Console/grok-imagine-image" || last.Prompt == "" || last.Count != 1 || last.ResponseFormat != "b64_json" || len(last.ImageURLs) != test.wantRefs {
 				t.Fatalf("input=%#v", last)
 			}
 		})

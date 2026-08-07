@@ -24,15 +24,16 @@ import (
 
 const (
 	maxLegacyImageResponseBytes = 64 << 20
-	legacyWebImageLiteModel     = "Web/grok-imagine-image-lite"
-	legacyWebImageQualityModel  = "Web/grok-imagine-image-quality-lite"
+	legacyImageStandardModel = "Console/grok-imagine-image"
+	legacyImageQualityModel  = "Console/grok-imagine-image-quality"
+	legacyImageEditModel     = "Console/grok-imagine-image"
 )
 
-func legacyWebImageModel(pro bool) string {
+func legacyImageModel(pro bool) string {
 	if pro {
-		return legacyWebImageQualityModel
+		return legacyImageQualityModel
 	}
-	return legacyWebImageLiteModel
+	return legacyImageStandardModel
 }
 
 var parentPostIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
@@ -216,7 +217,7 @@ func (h *Handler) imagineWS(c *gin.Context) {
 		if task.pro {
 			resolution = "2k"
 		}
-		result, generateErr := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey, PublicModel: legacyWebImageModel(task.pro), Prompt: task.prompt, Count: 1, AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw})
+		result, generateErr := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey, PublicModel: legacyImageModel(task.pro), Prompt: task.prompt, Count: 1, AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw})
 		if generateErr != nil {
 			_ = connection.WriteJSON(gin.H{"type": "error", "message": generateErr.Error(), "code": "image_generation_failed"})
 			return
@@ -344,7 +345,7 @@ func (h *Handler) imagineSSE(c *gin.Context) {
 		}
 		result, err := h.imageGenerator.GenerateImage(runContext, gateway.ImageGenerationInput{
 			RequestID: taskID + "-" + fmt.Sprint(sequence), ClientKey: clientKey,
-			PublicModel: legacyWebImageModel(task.pro), Prompt: task.prompt, Count: 1,
+			PublicModel: legacyImageModel(task.pro), Prompt: task.prompt, Count: 1,
 			AspectRatio: task.aspectRatio, Resolution: resolution, ResponseFormat: "b64_json", NSFW: &task.nsfw,
 		})
 		if err != nil {
@@ -418,7 +419,7 @@ func (h *Handler) handleImagineEdit(c *gin.Context, workbench bool) {
 	}
 	startedAt := time.Now()
 	result, err := editor.EditImage(c.Request.Context(), gateway.ImageEditInput{
-		RequestID: newEditRequestID(), ClientKey: clientKey, PublicModel: "grok-imagine-image-edit",
+		RequestID: newEditRequestID(), ClientKey: clientKey, PublicModel: legacyImageEditModel,
 		Prompt: request.Prompt, ImageURLs: imageURLs, Count: 1, Resolution: "1k", ResponseFormat: "b64_json",
 	})
 	if err != nil {
