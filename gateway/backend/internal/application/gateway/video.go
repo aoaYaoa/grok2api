@@ -1124,6 +1124,11 @@ func publicVideoFailureMessage(err error) string {
 		return "上游认证失败，请检查账号状态"
 	}
 	if provider.IsAccountHealthNeutral(err) {
+		if status, ok := provider.ErrorHTTPStatus(err); ok && status == http.StatusBadRequest {
+			if message := strings.TrimSpace(err.Error()); message != "" {
+				return message
+			}
+		}
 		return "内容未通过上游审核，请调整提示词或素材后重试"
 	}
 	if status, ok := provider.ErrorHTTPStatus(err); ok {

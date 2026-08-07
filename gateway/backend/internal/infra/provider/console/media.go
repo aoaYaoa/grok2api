@@ -39,6 +39,23 @@ type consoleMediaUpstreamError struct {
 	summary string
 }
 
+type consoleMediaInputError struct {
+	message string
+	cause   error
+}
+
+func (e *consoleMediaInputError) Error() string { return e.message }
+
+func (e *consoleMediaInputError) Unwrap() error { return e.cause }
+
+func (*consoleMediaInputError) HTTPStatusCode() int { return http.StatusBadRequest }
+
+func (*consoleMediaInputError) AccountHealthNeutral() bool { return true }
+
+func invalidConsoleMediaInput(message string, cause error) error {
+	return &consoleMediaInputError{message: message, cause: cause}
+}
+
 func (e *consoleMediaUpstreamError) Error() string {
 	if e == nil {
 		return ""
@@ -122,7 +139,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	for _, rawURL := range request.ImageURLs {
 		value, resolveErr := a.resolveConsoleImageInput(ctx, rawURL)
 		if resolveErr != nil {
-			return invalidConsoleMediaRequest(resolveErr.Error()), nil
+			return nil, resolveErr
 		}
 		images = append(images, map[string]any{"type": "image_url", "url": value})
 	}
@@ -637,36 +654,36 @@ func (a *Adapter) resolveConsoleImageInput(ctx context.Context, value string) (s
 	assetID, stored := mediadomain.ParseImageReference(value)
 	if !stored {
 		if !validConsoleMediaInputURL(value, "image") {
-			return "", errors.New("图片必须是 HTTPS URL、image data URL 或有效缓存图片")
+			return "", invalidConsoleMediaInput("图片必须是 HTTPS URL、image data URL 或有效缓存图片", nil)
 		}
 		return value, nil
 	}
 	reader, ok := a.assets.(provider.ImageAssetReader)
 	if !ok {
-		return "", errors.New("缓存图片存储不支持读取")
+		return "", invalidConsoleMediaInput("缓存图片暂时无法读取，请稍后重试", nil)
 	}
 	asset, body, err := reader.OpenImage(ctx, assetID)
 	if err != nil {
-		return "", fmt.Errorf("读取缓存图片: %w", err)
+		return "", invalidConsoleMediaInput("缓存图片暂时无法读取，请稍后重试", err)
 	}
 	defer body.Close()
 	if asset.SizeBytes > consoleInputImageLimit {
-		return "", errors.New("缓存图片超过 20 MiB")
+		return "", invalidConsoleMediaInput("缓存图片超过 20 MiB", nil)
 	}
 	raw, err := io.ReadAll(io.LimitReader(body, consoleInputImageLimit+1))
 	if err != nil {
-		return "", fmt.Errorf("读取缓存图片: %w", err)
+		return "", invalidConsoleMediaInput("缓存图片暂时无法读取，请稍后重试", err)
 	}
 	if len(raw) == 0 || len(raw) > consoleInputImageLimit {
-		return "", errors.New("缓存图片为空或超过 20 MiB")
+		return "", invalidConsoleMediaInput("缓存图片为空或超过 20 MiB", nil)
 	}
 	detected := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(raw), ";")[0]))
 	declared := strings.ToLower(strings.TrimSpace(strings.Split(asset.MIMEType, ";")[0]))
 	if !validConsoleImageMIME(detected) {
-		return "", errors.New("缓存文件不是受支持的图片")
+		return "", invalidConsoleMediaInput("缓存文件不是受支持的图片", nil)
 	}
 	if declared != "" && declared != "application/octet-stream" && declared != detected {
-		return "", errors.New("缓存图片 Content-Type 与实际内容不一致")
+		return "", invalidConsoleMediaInput("缓存图片 Content-Type 与实际内容不一致", nil)
 	}
 	return "data:" + detected + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
 }

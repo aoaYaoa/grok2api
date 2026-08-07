@@ -1257,6 +1257,37 @@ func TestConsoleVideoResolvesStoredImageReference(t *testing.T) {
 	}
 }
 
+func TestConsoleStoredImageReferenceRejectsInvalidAssetsSafely(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nconsole-invalid-reference")
+	tests := []struct {
+		name    string
+		fixture consoleImageAssetFixture
+	}{
+		{name: "oversized metadata", fixture: consoleImageAssetFixture{mimeType: "image/png", data: png, sizeBytes: consoleInputImageLimit + 1}},
+		{name: "oversized stream", fixture: consoleImageAssetFixture{mimeType: "application/octet-stream", data: bytes.Repeat([]byte("x"), consoleInputImageLimit+1)}},
+		{name: "empty", fixture: consoleImageAssetFixture{mimeType: "image/png"}},
+		{name: "mime mismatch", fixture: consoleImageAssetFixture{mimeType: "image/jpeg", data: png}},
+		{name: "non image", fixture: consoleImageAssetFixture{mimeType: "text/plain", data: []byte("not an image")}},
+		{name: "storage failure", fixture: consoleImageAssetFixture{openErr: errors.New("sensitive storage path /private/media.db")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &consoleImageAssetStoreStub{readable: map[string]consoleImageAssetFixture{"bad": test.fixture}}
+			adapter, _ := newConsoleTestAdapterWithAssets(t, "https://api.x.ai", store)
+			_, err := adapter.resolveConsoleImageInput(context.Background(), mediadomain.ImageReference("bad"))
+			if err == nil {
+				t.Fatal("expected invalid cached image error")
+			}
+			if !provider.IsAccountHealthNeutral(err) {
+				t.Fatalf("error must not penalize account health: %v", err)
+			}
+			if strings.Contains(err.Error(), "/private/media.db") {
+				t.Fatalf("storage details leaked: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseConsoleVideoStatusRejectsUnknownState(t *testing.T) {
 	if _, _, err := parseConsoleVideoStatus([]byte(`{"status":"mystery"}`), nil); err == nil || !strings.Contains(err.Error(), "状态无效") {
 		t.Fatalf("unknown status error = %v", err)
@@ -1385,8 +1416,10 @@ type consoleImageAssetStoreStub struct {
 }
 
 type consoleImageAssetFixture struct {
-	mimeType string
-	data     []byte
+	mimeType  string
+	data      []byte
+	sizeBytes int64
+	openErr   error
 }
 
 func (s *consoleImageAssetStoreStub) SaveImage(_ context.Context, data []byte) (mediadomain.Asset, error) {
@@ -1407,8 +1440,15 @@ func (s *consoleImageAssetStoreStub) OpenImage(_ context.Context, id string) (me
 	if !ok {
 		return mediadomain.Asset{}, nil, errors.New("image asset not found")
 	}
+	if fixture.openErr != nil {
+		return mediadomain.Asset{}, nil, fixture.openErr
+	}
 	data := bytes.Clone(fixture.data)
-	return mediadomain.Asset{ID: id, MIMEType: fixture.mimeType, SizeBytes: int64(len(data))}, io.NopCloser(bytes.NewReader(data)), nil
+	sizeBytes := fixture.sizeBytes
+	if sizeBytes == 0 {
+		sizeBytes = int64(len(data))
+	}
+	return mediadomain.Asset{ID: id, MIMEType: fixture.mimeType, SizeBytes: sizeBytes}, io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (s *consoleImageAssetStoreStub) Saved() [][]byte {

@@ -199,6 +199,17 @@ type videoStatusError struct {
 func (e videoStatusError) Error() string       { return e.message }
 func (e videoStatusError) HTTPStatusCode() int { return e.status }
 
+type neutralVideoStatusError struct{ videoStatusError }
+
+func (neutralVideoStatusError) AccountHealthNeutral() bool { return true }
+
+func TestPublicVideoFailureMessagePreservesSafeNeutralBadRequest(t *testing.T) {
+	err := neutralVideoStatusError{videoStatusError{status: http.StatusBadRequest, message: "缓存图片为空或超过 20 MiB"}}
+	if message := publicVideoFailureMessage(err); message != err.Error() {
+		t.Fatalf("message = %q", message)
+	}
+}
+
 func TestShouldSwitchVideoAccountStopsForConsoleDPoPRequirement(t *testing.T) {
 	if shouldSwitchVideoAccount(videoStatusError{status: http.StatusForbidden, message: "Console 媒体上游返回 403: DPoP proof required but was not verified"}) {
 		t.Fatal("DPoP protocol requirement must not rotate through accounts")
