@@ -1134,6 +1134,48 @@ func TestConsoleImageEditForwardsMultipleImages(t *testing.T) {
 	}
 }
 
+func TestConsoleImageEditResolvesStoredImageReference(t *testing.T) {
+	imageBytes := []byte("\x89PNG\r\n\x1a\nconsole-reference")
+	wantURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imageBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveTestDPoPToken(t, writer, request) {
+			return
+		}
+		if request.URL.Path != "/v1/images/edits" {
+			http.NotFound(writer, request)
+			return
+		}
+		verifyTestDPoPProof(t, request)
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		image, _ := payload["image"].(map[string]any)
+		if image["url"] != wantURL {
+			t.Errorf("stored edit image URL = %#v", image["url"])
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"b64_json":"aW1hZ2U="}]}`))
+	}))
+	t.Cleanup(server.Close)
+	store := &consoleImageAssetStoreStub{readable: map[string]consoleImageAssetFixture{
+		"img-reference": {mimeType: "image/png", data: imageBytes},
+	}}
+	adapter, credential := newConsoleTestAdapterWithAssets(t, server.URL, store)
+	response, err := adapter.EditImage(context.Background(), provider.ImageEditRequest{
+		Credential: credential, Model: "grok-imagine-image", Prompt: "edit", Count: 1,
+		ImageURLs: []string{mediadomain.ImageReference("img-reference")}, ResponseFormat: "b64_json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+}
+
 func TestConsoleVideoCreatesAndPollsStandardResources(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if serveTestDPoPToken(t, writer, request) {
@@ -1169,6 +1211,49 @@ func TestConsoleVideoCreatesAndPollsStandardResources(t *testing.T) {
 	}
 	if result.URL != "https://vidgen.x.ai/result.mp4" || result.ContentType != "video/mp4" || progress != 99 {
 		t.Fatalf("video result = %#v, progress = %d", result, progress)
+	}
+}
+
+func TestConsoleVideoResolvesStoredImageReference(t *testing.T) {
+	imageBytes := []byte("\x89PNG\r\n\x1a\nconsole-video-reference")
+	wantURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imageBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveTestDPoPToken(t, writer, request) {
+			return
+		}
+		verifyTestDPoPProof(t, request)
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/videos/generations":
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			image, _ := payload["image"].(map[string]any)
+			if image["url"] != wantURL {
+				t.Errorf("stored video image URL = %#v", image["url"])
+			}
+			_, _ = writer.Write([]byte(`{"request_id":"upstream-video-reference"}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/videos/upstream-video-reference":
+			_, _ = writer.Write([]byte(`{"status":"done","progress":100,"video":{"url":"https://vidgen.x.ai/reference.mp4"}}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	store := &consoleImageAssetStoreStub{readable: map[string]consoleImageAssetFixture{
+		"img-reference": {mimeType: "image/png", data: imageBytes},
+	}}
+	adapter, credential := newConsoleTestAdapterWithAssets(t, server.URL, store)
+	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: credential, Prompt: "animate", Duration: 6, AspectRatio: "16:9", Resolution: "480p",
+		ReferenceURLs: []string{mediadomain.ImageReference("img-reference")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.URL != "https://vidgen.x.ai/reference.mp4" {
+		t.Fatalf("video result = %#v", result)
 	}
 }
 
@@ -1294,8 +1379,14 @@ func newConsoleTestAdapterWithAssets(t *testing.T, baseURL string, assets provid
 }
 
 type consoleImageAssetStoreStub struct {
-	mu    sync.Mutex
-	saved [][]byte
+	mu       sync.Mutex
+	saved    [][]byte
+	readable map[string]consoleImageAssetFixture
+}
+
+type consoleImageAssetFixture struct {
+	mimeType string
+	data     []byte
 }
 
 func (s *consoleImageAssetStoreStub) SaveImage(_ context.Context, data []byte) (mediadomain.Asset, error) {
@@ -1307,6 +1398,17 @@ func (s *consoleImageAssetStoreStub) SaveImage(_ context.Context, data []byte) (
 
 func (*consoleImageAssetStoreStub) PublicImageURL(id string) string {
 	return "https://local.example/v1/media/images/" + id
+}
+
+func (s *consoleImageAssetStoreStub) OpenImage(_ context.Context, id string) (mediadomain.Asset, io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fixture, ok := s.readable[id]
+	if !ok {
+		return mediadomain.Asset{}, nil, errors.New("image asset not found")
+	}
+	data := bytes.Clone(fixture.data)
+	return mediadomain.Asset{ID: id, MIMEType: fixture.mimeType, SizeBytes: int64(len(data))}, io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (s *consoleImageAssetStoreStub) Saved() [][]byte {

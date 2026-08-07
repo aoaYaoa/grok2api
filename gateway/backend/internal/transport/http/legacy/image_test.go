@@ -240,6 +240,35 @@ func TestImagineStartSSEAndStopUseGoImageGenerator(t *testing.T) {
 	}
 }
 
+func TestImagineNonProUsesWebImageLiteModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	generator := &fakeImageGenerator{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, generator)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	startRequest := httptest.NewRequest(http.MethodPost, "/v1/public/imagine/start", bytes.NewBufferString(`{"prompt":"draw","pro":false}`))
+	startRequest.Header.Set("Authorization", "Bearer g2-direct-key")
+	startRequest.Header.Set("Content-Type", "application/json")
+	startRecorder := httptest.NewRecorder()
+	router.ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", startRecorder.Code, startRecorder.Body.String())
+	}
+	taskID := jsonStringField(t, startRecorder.Body.Bytes(), "task_id")
+
+	sseRequest := httptest.NewRequest(http.MethodGet, "/v1/public/imagine/sse?task_id="+taskID+"&public_key=g2-direct-key", nil)
+	sseRecorder := httptest.NewRecorder()
+	router.ServeHTTP(sseRecorder, sseRequest)
+	if sseRecorder.Code != http.StatusOK || len(generator.inputs) == 0 {
+		t.Fatalf("sse status=%d body=%s inputs=%d", sseRecorder.Code, sseRecorder.Body.String(), len(generator.inputs))
+	}
+	if got := generator.inputs[0].PublicModel; got != "Web/grok-imagine-image-lite" {
+		t.Fatalf("PublicModel = %q", got)
+	}
+}
+
 func TestImagineEditAndWorkbenchMapToGoMultiImageEditor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}

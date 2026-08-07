@@ -3,6 +3,7 @@ package console
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ const (
 	consoleVideoPollEvery       = 2 * time.Second
 	consoleMaxEditImages        = 3
 	consoleMaxVideoImages       = 1
+	consoleInputImageLimit      = 20 << 20
 )
 
 type consoleMediaUpstreamError struct {
@@ -118,9 +120,9 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	}
 	images := make([]map[string]any, 0, len(request.ImageURLs))
 	for _, rawURL := range request.ImageURLs {
-		value := strings.TrimSpace(rawURL)
-		if !validConsoleMediaInputURL(value, "image") {
-			return invalidConsoleMediaRequest("每张编辑图片都必须是 HTTPS URL 或 image data URL"), nil
+		value, resolveErr := a.resolveConsoleImageInput(ctx, rawURL)
+		if resolveErr != nil {
+			return invalidConsoleMediaRequest(resolveErr.Error()), nil
 		}
 		images = append(images, map[string]any{"type": "image_url", "url": value})
 	}
@@ -419,9 +421,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		payload["resolution"] = resolution
 	}
 	if len(request.ReferenceURLs) == 1 {
-		value := strings.TrimSpace(request.ReferenceURLs[0])
-		if !validConsoleMediaInputURL(value, "image") {
-			return provider.VideoResult{}, errors.New("视频首图必须是 HTTPS URL 或 image data URL")
+		value, resolveErr := a.resolveConsoleImageInput(ctx, request.ReferenceURLs[0])
+		if resolveErr != nil {
+			return provider.VideoResult{}, resolveErr
 		}
 		payload["image"] = map[string]any{"url": value}
 	}
@@ -628,6 +630,54 @@ func validConsoleMediaInputURL(value, mediaType string) bool {
 	}
 	parsed, err := url.Parse(value)
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+}
+
+func (a *Adapter) resolveConsoleImageInput(ctx context.Context, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	assetID, stored := mediadomain.ParseImageReference(value)
+	if !stored {
+		if !validConsoleMediaInputURL(value, "image") {
+			return "", errors.New("图片必须是 HTTPS URL、image data URL 或有效缓存图片")
+		}
+		return value, nil
+	}
+	reader, ok := a.assets.(provider.ImageAssetReader)
+	if !ok {
+		return "", errors.New("缓存图片存储不支持读取")
+	}
+	asset, body, err := reader.OpenImage(ctx, assetID)
+	if err != nil {
+		return "", fmt.Errorf("读取缓存图片: %w", err)
+	}
+	defer body.Close()
+	if asset.SizeBytes > consoleInputImageLimit {
+		return "", errors.New("缓存图片超过 20 MiB")
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, consoleInputImageLimit+1))
+	if err != nil {
+		return "", fmt.Errorf("读取缓存图片: %w", err)
+	}
+	if len(raw) == 0 || len(raw) > consoleInputImageLimit {
+		return "", errors.New("缓存图片为空或超过 20 MiB")
+	}
+	detected := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(raw), ";")[0]))
+	declared := strings.ToLower(strings.TrimSpace(strings.Split(asset.MIMEType, ";")[0]))
+	if !validConsoleImageMIME(detected) {
+		return "", errors.New("缓存文件不是受支持的图片")
+	}
+	if declared != "" && declared != "application/octet-stream" && declared != detected {
+		return "", errors.New("缓存图片 Content-Type 与实际内容不一致")
+	}
+	return "data:" + detected + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func validConsoleImageMIME(value string) bool {
+	switch value {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseConsoleVideoCreate(body []byte) (string, error) {

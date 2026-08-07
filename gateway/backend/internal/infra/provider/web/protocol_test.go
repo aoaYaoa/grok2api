@@ -80,6 +80,21 @@ func TestWebImageLitePublicNamesPreserveGatewayModels(t *testing.T) {
 	}
 }
 
+func TestBasicTierIncludesWebVideoModel(t *testing.T) {
+	adapter := &Adapter{}
+	models, err := adapter.ListModels(context.Background(), account.Credential{WebTier: account.WebTierBasic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(models, "grok-imagine-video") {
+		t.Fatalf("Basic models = %v", models)
+	}
+	wantOrder := []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+	if got := adapter.TierOrder("grok-imagine-video"); !slices.Equal(got, wantOrder) {
+		t.Fatalf("video tier order = %v, want %v", got, wantOrder)
+	}
+}
+
 func TestParseMediaPostResponsePreservesStatusAndPostID(t *testing.T) {
 	postID, err := parseMediaPostResponse(&http.Response{
 		StatusCode: http.StatusOK,
