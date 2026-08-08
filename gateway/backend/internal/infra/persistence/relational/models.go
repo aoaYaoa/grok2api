@@ -82,6 +82,7 @@ type accountCredentialModel struct {
 	LastRefreshErrorMessage   string        `gorm:"size:512;not null;default:'';check:chk_account_credentials_refresh_error_message,length(last_refresh_error_message) <= 512"`
 	LastRefreshErrorResponse  string        `gorm:"size:4096;not null;default:'';check:chk_account_credentials_refresh_error_response,length(last_refresh_error_response) <= 4096"`
 	RefreshPermanent          bool          `gorm:"not null;default:false"`
+	BuildBotFlagSource        int           `gorm:"not null;default:0;check:chk_account_credentials_build_bot_flag_source,build_bot_flag_source IN (0,1,2)"`
 	UpdatedAt                 time.Time     `gorm:"not null"`
 	Account                   *accountModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
@@ -437,12 +438,13 @@ func (mediaJobModel) TableName() string { return "media_jobs" }
 const MaxVideoAssetBytes = 256 << 20
 
 type mediaAssetModel struct {
-	ID         string    `gorm:"size:64;primaryKey;check:chk_media_assets_id,length(trim(id)) BETWEEN 16 AND 64"`
-	Kind       string    `gorm:"size:16;not null;check:chk_media_assets_kind,kind IN ('image','video')"`
-	StorageKey string    `gorm:"size:512;not null;uniqueIndex;check:chk_media_assets_storage_key,length(trim(storage_key)) BETWEEN 1 AND 512"`
-	MIMEType   string    `gorm:"size:64;not null;check:chk_media_assets_mime,mime_type IN ('image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime')"`
-	SizeBytes  int64     `gorm:"not null;check:chk_media_assets_size,size_bytes > 0 AND size_bytes <= 268435456"`
-	SHA256     string    `gorm:"size:64;not null;check:chk_media_assets_sha,length(sha256) = 64"`
+	ID         string `gorm:"size:64;primaryKey;check:chk_media_assets_id,length(trim(id)) BETWEEN 16 AND 64"`
+	Kind       string `gorm:"size:16;not null;check:chk_media_assets_kind,kind IN ('image','video')"`
+	StorageKey string `gorm:"size:512;not null;uniqueIndex;check:chk_media_assets_storage_key,length(trim(storage_key)) BETWEEN 1 AND 512"`
+	MIMEType   string `gorm:"size:64;not null;check:chk_media_assets_mime,mime_type IN ('image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime')"`
+	SizeBytes  int64  `gorm:"not null;check:chk_media_assets_size,size_bytes > 0 AND size_bytes <= 268435456"`
+	SHA256     string `gorm:"size:64;not null;check:chk_media_assets_sha,length(sha256) = 64"`
+	ExpiresAt  *time.Time
 	CreatedAt  time.Time `gorm:"not null"`
 }
 

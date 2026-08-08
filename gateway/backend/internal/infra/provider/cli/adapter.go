@@ -99,7 +99,8 @@ func (a *Adapter) SetReasoningReplay(replay *reasoningreplay.ReasoningReplay) {
 func (a *Adapter) Provider() account.Provider { return account.ProviderBuild }
 
 // CredentialMetadata extracts only non-sensitive risk flags from a Build access token.
-// bot_flag_source must be JSON number 1; other values, malformed tokens, and decryption failures are not marked.
+// bot_flag_source or its short alias bfs must be JSON number 1 or 2; other values, malformed
+// tokens, and decryption failures are not marked. bot_flag_source is preferred when both are set.
 func (a *Adapter) CredentialMetadata(credential account.Credential) provider.CredentialMetadata {
 	if credential.Provider != account.ProviderBuild || a.cipher == nil || credential.EncryptedAccessToken == "" {
 		return provider.CredentialMetadata{}
@@ -108,8 +109,47 @@ func (a *Adapter) CredentialMetadata(credential account.Credential) provider.Cre
 	if err != nil {
 		return provider.CredentialMetadata{}
 	}
-	value, ok := decodeJWTClaims(accessToken)["bot_flag_source"].(float64)
-	return provider.CredentialMetadata{BuildBotFlagged: ok && value == 1}
+	claims := decodeJWTClaims(accessToken)
+	if claims == nil {
+		return provider.CredentialMetadata{}
+	}
+	source := buildBotFlagSourceFromClaims(claims)
+	return provider.CredentialMetadata{
+		BuildBotFlagInspected: true,
+		BuildBotFlagged:       source != 0,
+		BuildBotFlagSource:    source,
+	}
+}
+
+// buildBotFlagSourceFromClaims returns the bot-risk source from JWT claims.
+// Accepts bot_flag_source or bfs; only JSON numbers 1 and 2 count (string "1"/"2" do not).
+// Prefer bot_flag_source when it is 1 or 2; otherwise fall back to bfs.
+func buildBotFlagSourceFromClaims(claims map[string]any) int {
+	if claims == nil {
+		return 0
+	}
+	if source := botFlagSourceClaim(claims, "bot_flag_source"); source != 0 {
+		return source
+	}
+	return botFlagSourceClaim(claims, "bfs")
+}
+
+func botFlagSourceClaim(claims map[string]any, key string) int {
+	value, ok := claims[key].(float64)
+	if !ok {
+		return 0
+	}
+	switch value {
+	case 1, 2:
+		return int(value)
+	default:
+		return 0
+	}
+}
+
+// buildBotFlaggedFromClaims reports whether JWT claims mark a Build account as bot-risked.
+func buildBotFlaggedFromClaims(claims map[string]any) bool {
+	return buildBotFlagSourceFromClaims(claims) != 0
 }
 
 func (a *Adapter) UpdateConfig(cfg Config) {
@@ -246,7 +286,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 		return a.forwardGatewayCompaction(ctx, request, accessToken, body, warnings)
 	}
-	// Explicit mode wins; in auto mode only confirmed Super accounts with bot_flag_source=1 default to XAI.
+	// Explicit mode wins; in auto mode only confirmed Super accounts with bot_flag_source/bfs in {1,2} default to XAI.
 	primaryBase := a.primaryBaseURL()
 	base := a.inferenceBaseForOperation(request.Credential, request.Billing, request.Method, request.Path)
 	// Cache affinity and reasoning replay use separate identities. Replay is also bound to the actual account and upstream plane,

@@ -211,6 +211,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressManager.SetClearanceLock(refreshLock)
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
+	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
 		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
 		ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier,
@@ -267,6 +268,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	accountService.UpdateAccountTaskBatchSize(cfg.Batch.AccountTaskBatchSize)
 	accountService.SetDetectPool(detectPool)
+	if err := accountService.RebuildBuildBotFlagIndex(ctx); err != nil {
+		if runtimeStore != nil {
+			_ = runtimeStore.Close()
+		}
+		database.Close()
+		return nil, fmt.Errorf("重建 Build 风控路由索引: %w", err)
+	}
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
 	if err != nil {
 		if runtimeStore != nil {
@@ -338,6 +346,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	selector.SetLogger(logger)
 	selector.UpdatePreferFreeBuild(cfg.Routing.PreferFreeBuild)
 	selector.UpdateSegmentedSelector(cfg.Routing.SegmentedSelectorEnabled, cfg.Routing.SegmentedMinCandidates, cfg.Routing.SegmentedWindowSize)
+	selector.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+	accountService.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 	egressManager.UpdateAccountIsolatedConnections(cfg.Routing.AccountIsolatedConnections)
 	invalidationService := invalidationapp.NewService(invalidationBus, invalidationSourceInstance(cfg), func(event repository.InvalidationEvent) {
 		selector.ApplyInvalidation(event)
@@ -386,6 +396,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			ResponseHeaderTimeout: next.Provider.Build.ResponseHeaderTimeout.Value(),
 		})
 		egressManager.UpdateBuildResponseHeaderTimeout(next.Provider.Build.ResponseHeaderTimeout.Value())
+		egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
 		webAdapter.UpdateConfig(webProviderConfig(next))
 		egressManager.UpdateClearanceConfig(clearanceConfig(next))
 		consoleAdapter.UpdateConfig(consoleProviderConfig(next))
@@ -395,6 +406,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
 		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
+		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
@@ -445,7 +458,8 @@ func webProviderConfig(cfg config.Config) webprovider.Config {
 		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeoutSeconds: int(cfg.Provider.Web.QuotaTimeout.Value().Seconds()),
 		StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
 		StatsigSignerURL:   cfg.Provider.Web.StatsigSignerURL,
-		ChatTimeoutSeconds: int(cfg.Provider.Web.ChatTimeout.Value().Seconds()), ImageTimeoutSeconds: int(cfg.Provider.Web.ImageTimeout.Value().Seconds()),
+		ChatTimeoutSeconds: int(cfg.Provider.Web.ChatTimeout.Value().Seconds()), StreamIdleTimeoutSeconds: int(cfg.Provider.Web.StreamIdleTimeout.Value().Seconds()),
+		ImageTimeoutSeconds: int(cfg.Provider.Web.ImageTimeout.Value().Seconds()),
 		VideoTimeoutSeconds: int(cfg.Provider.Web.VideoTimeout.Value().Seconds()), MaxInputImageBytes: cfg.Media.MaxImageBytes,
 		AllowNSFW: cfg.Provider.Web.AllowNSFW,
 	}
@@ -462,7 +476,7 @@ func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
 func consoleProviderConfig(cfg config.Config) consoleprovider.Config {
 	return consoleprovider.Config{
 		BaseURL: cfg.Provider.Console.BaseURL, SessionBaseURL: cfg.Provider.Web.BaseURL,
-		TimeoutSeconds: int(cfg.Provider.Console.ChatTimeout.Value().Seconds()),
+		TimeoutSeconds: int(cfg.Provider.Console.ChatTimeout.Value().Seconds()), StreamIdleTimeoutSeconds: int(cfg.Provider.Console.StreamIdleTimeout.Value().Seconds()),
 	}
 }
 
