@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
+	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
@@ -38,7 +39,7 @@ func (h *Handler) RegisterAdmin(router *gin.RouterGroup) {
 	router.DELETE("/media/images", h.deleteImages)
 	router.GET("/media/images/stats", h.imageStats)
 	router.POST("/media/inputs/import", h.importInputImageFromURL)
-	router.POST("/media/inputs/upload", h.uploadInputImage)
+	router.POST("/media/inputs/upload", h.uploadInputAsset)
 	router.GET("/media/videos", h.listVideos)
 	router.DELETE("/media/videos", h.deleteVideos)
 	router.GET("/media/videos/stats", h.videoStats)
@@ -99,7 +100,7 @@ func (h *Handler) getVideo(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", asset.MIMEType)
-	c.Header("Content-Disposition", `inline; filename="`+asset.ID+`"`)
+	c.Header("Content-Disposition", mediafile.VideoContentDisposition(asset.ID, asset.MIMEType))
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
 	c.Header("ETag", `"`+asset.SHA256+`"`)
 	c.Header("X-Content-Type-Options", "nosniff")

@@ -1,13 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `f6d7c1c55cc5884f9769e979885b9b603def58c8`
-- Version: `v3.1.0`
-- Imported: `2026-08-05`
+- Commit: `86ae605717087c2df479dc8a268219d3ad8fe731`
+- Version: `v3.1.2`
+- Imported: `2026-08-14`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `f6d7c1c55cc5884f9769e979885b9b603def58c8`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `86ae605717087c2df479dc8a268219d3ad8fe731`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Grok2API v3.1.2 voice APIs, model 4.6 catalog updates, Imagine quota tracking, and Console/Web media reliability improvements.
+- Official video create, reference, edit, and extend operations alongside the preserved legacy Web extension workflow.
+- Degraded-account monitoring, tunnel-proxy egress support, and refreshed management and Creative Console interfaces.
 
 - Grok2API v3.1.0 Console media and quota support, DPoP protocol updates, and Grok Build 0.2.119/Composer compatibility.
 - Session-sticky duplicate model targets, account-isolated connection pools, Quality Guard, and immediate egress recovery.

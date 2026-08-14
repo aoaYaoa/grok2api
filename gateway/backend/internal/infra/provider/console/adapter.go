@@ -78,6 +78,9 @@ func (a *Adapter) QuotaMode(upstreamModel string) string {
 	if ResolveMedia(upstreamModel, modeldomain.CapabilityVideo) {
 		return QuotaModeVideo
 	}
+	if ResolveMedia(upstreamModel, modeldomain.CapabilityTTS) || ResolveMedia(upstreamModel, modeldomain.CapabilitySTT) || ResolveMedia(upstreamModel, modeldomain.CapabilityRealtime) {
+		return QuotaMode
+	}
 	return ""
 }
 
@@ -171,7 +174,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			cancel()
 			return nil, readErr
 		}
-		if !provider.IsDefinitiveAccountBlockBody(data) && !provider.IsDPoPProofRequiredBody(data) {
+		if shouldInvalidateConsoleClearance(data) {
 			lease.InvalidateClearance()
 			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
 		}
@@ -243,6 +246,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	result := responseResult(response, &releaseBody{ReadCloser: response.Body, release: release})
 	result.RateLimit = rateLimit
 	return result, nil
+}
+
+// shouldInvalidateConsoleClearance keeps account-level and protocol-level
+// rejections from being misclassified as a broken browser/egress binding.
+func shouldInvalidateConsoleClearance(body []byte) bool {
+	return !provider.IsDefinitiveAccountBlockBody(body) && !provider.IsDPoPProofRequiredBody(body)
 }
 
 func normalizeConversationError(data []byte, operation string, status int) []byte {

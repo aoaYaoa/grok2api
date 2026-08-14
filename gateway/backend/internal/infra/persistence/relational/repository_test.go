@@ -41,7 +41,7 @@ func TestSchemaAndRepositoryConstraints(t *testing.T) {
 	if err := accountRepo.UpdateObservedModel(context.Background(), created.ID, "grok-observed", observedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := accountRepo.UpdateHealth(context.Background(), created.ID, 0, nil, "", true); err != nil {
+	if err := accountRepo.UpdateHealth(context.Background(), created.ID, created.Provider, 0, nil, "", true); err != nil {
 		t.Fatal(err)
 	}
 	value.Name = "updated"
@@ -275,6 +275,47 @@ func TestAccountRepositoryDecrementsQuotaByAmountAtomically(t *testing.T) {
 	}
 }
 
+func TestAccountRepositoryReplacesQuotaGroupWithoutTouchingOtherModes(t *testing.T) {
+	ctx := context.Background()
+	repo := NewAccountRepository(openTestDatabase(t))
+	value, _, err := repo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "quota-group", SourceKey: "quota-group",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	initial := []account.QuotaWindow{
+		{AccountID: value.ID, Mode: "weekly", Remaining: 90, Total: 100, UpdatedAt: now},
+		{AccountID: value.ID, Mode: account.QuotaModeWebImagePro, Remaining: 4, UpdatedAt: now},
+		{AccountID: value.ID, Mode: account.QuotaModeWebVideo720p, Remaining: 1, UpdatedAt: now},
+	}
+	if err := repo.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, initial); err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := now.Add(time.Minute)
+	if err := repo.ReplaceQuotaWindowGroup(ctx, value.ID, updatedAt, account.WebImagineQuotaModes(), []account.QuotaWindow{
+		{AccountID: value.ID, Mode: account.QuotaModeWebImagePro, Remaining: 3, UpdatedAt: updatedAt},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	windows, err := repo.GetQuotaWindows(ctx, []uint64{value.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byMode := make(map[string]account.QuotaWindow)
+	for _, window := range windows[value.ID] {
+		byMode[window.Mode] = window
+	}
+	if byMode["weekly"].Remaining != 90 || byMode[account.QuotaModeWebImagePro].Remaining != 3 {
+		t.Fatalf("windows = %#v", windows[value.ID])
+	}
+	if _, exists := byMode[account.QuotaModeWebVideo720p]; exists {
+		t.Fatalf("explicitly unavailable group mode was preserved: %#v", windows[value.ID])
+	}
+}
+
 func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -292,7 +333,7 @@ func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	create(account.ProviderBuild, "build-active")
 	cooldown := create(account.ProviderBuild, "build-cooldown")
 	cooldownUntil := now.Add(time.Hour)
-	if err := repo.UpdateHealth(ctx, cooldown.ID, 1, &cooldownUntil, "cooldown", false); err != nil {
+	if err := repo.UpdateHealth(ctx, cooldown.ID, cooldown.Provider, 1, &cooldownUntil, "cooldown", false); err != nil {
 		t.Fatal(err)
 	}
 	disabled := create(account.ProviderBuild, "build-disabled")

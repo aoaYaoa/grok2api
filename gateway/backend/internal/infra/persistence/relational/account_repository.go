@@ -635,7 +635,10 @@ func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, provider
 		return result, nil
 	}
 	modes := make([]string, 0, 2)
-	if provider == account.ProviderWeb {
+	// Paid Web chat routes are governed by the shared weekly pool. Imagine
+	// products have independent authoritative windows and must not be hidden by
+	// a weekly row merely because the same account also has paid chat access.
+	if provider == account.ProviderWeb && !account.IsWebImagineQuotaMode(quotaMode) {
 		modes = append(modes, "weekly")
 	}
 	if quotaMode != "" {
@@ -675,7 +678,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 	var states []accountModelSyncStateModel
 	if err := r.db.db.WithContext(ctx).
 		Table("account_model_sync_states AS state").
-		Select("state.*").
+		Select("state.account_id").
 		Joins("JOIN provider_accounts AS account ON account.id = state.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND state.last_success_at IS NOT NULL", provider).
 		Find(&states).Error; err != nil {
@@ -690,7 +693,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 	var capabilities []accountModelCapabilityModel
 	if err := r.db.db.WithContext(ctx).
 		Table("account_model_capabilities AS capability").
-		Select("capability.*").
+		Select("capability.account_id").
 		Joins("JOIN provider_accounts AS account ON account.id = capability.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND capability.upstream_model = ?", provider, upstreamModel).
 		Find(&capabilities).Error; err != nil {
@@ -705,7 +708,7 @@ func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, prov
 	var blockRows []accountModelQuotaBlockModel
 	if err := r.db.db.WithContext(ctx).
 		Table("account_model_quota_blocks AS block").
-		Select("block.*").
+		Select("block.account_id", "block.upstream_model", "block.reason", "block.cooldown_until", "block.updated_at").
 		Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
 		Where("account.provider = ? AND account.enabled = TRUE AND block.upstream_model = ? AND block.cooldown_until > ?", provider, upstreamModel, time.Now().UTC()).
 		Find(&blockRows).Error; err != nil {
@@ -2058,17 +2061,43 @@ func (r *AccountRepository) MarkBuildAPIFallback(ctx context.Context, id uint64,
 	return nil
 }
 
-func (r *AccountRepository) UpdateHealth(ctx context.Context, id uint64, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error {
-	updates := map[string]any{"failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": truncate(lastError, 512)}
+func (r *AccountRepository) UpdateHealth(ctx context.Context, id uint64, provider account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error {
+	if id == 0 || !provider.IsValid() {
+		return repository.ErrNotFound
+	}
+	failureCount = max(0, failureCount)
+	lastError = truncate(lastError, 512)
+	updates := map[string]any{"failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": lastError}
 	if success {
 		now := time.Now().UTC()
 		updates["last_used_at"] = &now
 	}
-	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Updates(updates).Error
-	if err == nil && !success {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, AccountID: id})
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ? AND provider = ?", id, provider).Updates(updates)
+	if result.Error != nil {
+		return mapError(result.Error)
 	}
-	return err
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	r.notifyInvalidation(ctx, repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
+		FailureCount: failureCount, CooldownUntil: cooldownUntil,
+	})
+	return nil
+}
+
+func (r *AccountRepository) TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error {
+	if id == 0 || usedAt.IsZero() {
+		return repository.ErrNotFound
+	}
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Update("last_used_at", usedAt.UTC())
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
 }
 
 func (r *AccountRepository) UpsertModelQuotaBlock(ctx context.Context, value account.ModelQuotaBlock) error {
@@ -2208,11 +2237,11 @@ func (r *AccountRepository) ClaimQuotaProbe(ctx context.Context, accountID uint6
 }
 
 func (r *AccountRepository) ClearQuotaRecovery(ctx context.Context, accountID uint64) error {
-	err := r.db.db.WithContext(ctx).Delete(&quotaRecoveryModel{}, "account_id = ?", accountID).Error
-	if err == nil {
+	result := r.db.db.WithContext(ctx).Delete(&quotaRecoveryModel{}, "account_id = ?", accountID)
+	if result.Error == nil && result.RowsAffected > 0 {
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountRecoveryChanged, AccountID: accountID})
 	}
-	return err
+	return result.Error
 }
 
 func (r *AccountRepository) ResetQuotaState(ctx context.Context, provider account.Provider, accountIDs []uint64) error {
@@ -2298,7 +2327,7 @@ func (r *AccountRepository) GetQuotaWindows(ctx context.Context, accountIDs []ui
 }
 
 func (r *AccountRepository) SaveQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow) error {
-	err := r.saveQuotaWindows(ctx, accountID, tier, syncedAt, values, false)
+	err := r.saveQuotaWindows(ctx, accountID, tier, syncedAt, values, false, nil)
 	if err == nil {
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, AccountID: accountID})
 	}
@@ -2306,14 +2335,48 @@ func (r *AccountRepository) SaveQuotaWindows(ctx context.Context, accountID uint
 }
 
 func (r *AccountRepository) ReplaceQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow) error {
-	err := r.saveQuotaWindows(ctx, accountID, tier, syncedAt, values, true)
+	err := r.saveQuotaWindows(ctx, accountID, tier, syncedAt, values, true, nil)
 	if err == nil {
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, AccountID: accountID})
 	}
 	return err
 }
 
-func (r *AccountRepository) saveQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow, replace bool) error {
+func (r *AccountRepository) ReplaceQuotaWindowGroup(ctx context.Context, accountID uint64, syncedAt time.Time, modes []string, values []account.QuotaWindow) error {
+	allowed := make(map[string]struct{}, len(modes))
+	cleanModes := make([]string, 0, len(modes))
+	for _, mode := range modes {
+		mode = strings.TrimSpace(mode)
+		if mode == "" {
+			return repository.ErrConflict
+		}
+		if _, exists := allowed[mode]; !exists {
+			allowed[mode] = struct{}{}
+			cleanModes = append(cleanModes, mode)
+		}
+	}
+	if accountID == 0 || len(cleanModes) == 0 {
+		return repository.ErrConflict
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		mode := strings.TrimSpace(value.Mode)
+		if _, ok := allowed[mode]; !ok {
+			return repository.ErrConflict
+		}
+		if _, duplicate := seen[mode]; duplicate {
+			return repository.ErrConflict
+		}
+		seen[mode] = struct{}{}
+	}
+	err := r.saveQuotaWindows(ctx, accountID, "", syncedAt, values, false, cleanModes)
+	if err == nil {
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountQuotaChanged, AccountID: accountID})
+	}
+	return err
+}
+
+func (r *AccountRepository) saveQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow, replace bool, replaceModes []string) error {
 	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if tier != "" {
 			profile := webAccountProfileModel{AccountID: accountID, Tier: string(tier), SyncedAt: &syncedAt}
@@ -2323,6 +2386,10 @@ func (r *AccountRepository) saveQuotaWindows(ctx context.Context, accountID uint
 		}
 		if replace {
 			if err := tx.Where("account_id = ?", accountID).Delete(&quotaWindowModel{}).Error; err != nil {
+				return err
+			}
+		} else if len(replaceModes) > 0 {
+			if err := tx.Where("account_id = ? AND mode IN ?", accountID, replaceModes).Delete(&quotaWindowModel{}).Error; err != nil {
 				return err
 			}
 		}

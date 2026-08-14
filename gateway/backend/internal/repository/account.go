@@ -147,7 +147,10 @@ type AccountRepository interface {
 	NextCredentialRefreshDueAt(ctx context.Context) (*time.Time, error)
 	UpdateCredentialRefreshFailure(ctx context.Context, id uint64, failure CredentialRefreshFailure) error
 	UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error
-	UpdateHealth(ctx context.Context, id uint64, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error
+	UpdateHealth(ctx context.Context, id uint64, provider account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error
+	// TouchLastUsed persists request activity without changing routing health or
+	// invalidating candidate snapshots.
+	TouchLastUsed(ctx context.Context, id uint64, usedAt time.Time) error
 	// MarkBuildAPIFallback 幂等写入 Build 账号的 XAI 推理回退标记；非 Build 账号返回错误。
 	MarkBuildAPIFallback(ctx context.Context, id uint64, enabled bool) error
 	// MarkWebNSFWEnabled 幂等记录 Web 账号首次确认 NSFW 已开启的时间。
@@ -169,6 +172,7 @@ type AccountRepository interface {
 	HasQuotaWindows(ctx context.Context, accountID uint64) (bool, error)
 	GetQuotaWindows(ctx context.Context, accountIDs []uint64) (map[uint64][]account.QuotaWindow, error)
 	ReplaceQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow) error
+	ReplaceQuotaWindowGroup(ctx context.Context, accountID uint64, syncedAt time.Time, modes []string, values []account.QuotaWindow) error
 	SaveQuotaWindows(ctx context.Context, accountID uint64, tier account.WebTier, syncedAt time.Time, values []account.QuotaWindow) error
 	UpsertManyByIdentity(ctx context.Context, values []account.Credential) ([]AccountUpsertResult, error)
 	DecrementQuotaWindow(ctx context.Context, accountID uint64, mode string, now time.Time) (bool, error)

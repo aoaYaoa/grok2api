@@ -260,22 +260,31 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	defer lease.Release()
 	if request.IsExtension {
 		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
 	}
 	parentID := ""
-	references := make([]uploadedFile, 0, len(request.ReferenceURLs))
+	rawReferences := make([]string, 0, 1+len(request.ReferenceURLs))
+	if imageURL := strings.TrimSpace(request.ImageURL); imageURL != "" {
+		rawReferences = append(rawReferences, imageURL)
+	}
 	for _, rawReference := range request.ReferenceURLs {
+		if value := strings.TrimSpace(rawReference); value != "" {
+			rawReferences = append(rawReferences, value)
+		}
+	}
+	references := make([]uploadedFile, 0, len(rawReferences))
+	for _, rawReference := range rawReferences {
 		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
 		if referenceErr != nil {
-			return provider.VideoResult{}, referenceErr
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(referenceErr), 0, referenceErr)
 		}
 		references = append(references, reference)
 	}
@@ -285,11 +294,11 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt, "video_prompt_media_post")
 	}
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	segments := videoSegments(request.Duration)
 	if len(segments) == 0 {
-		return provider.VideoResult{}, fmt.Errorf("duration 必须在 1 到 15 秒之间")
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
 	}
 	ratio := resolveAspectRatio(request.AspectRatio)
 	resolution := request.Resolution
@@ -299,7 +308,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
 	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	if result.URL == "" && len(postIDs) > 0 {
 		result, err = a.recoverVideoResult(ctx, cfg, lease, token, postIDs)
@@ -307,7 +316,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 			if errors.Is(err, provider.ErrUnauthorized) {
 				return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err)
 			}
-			return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postIDs[0], progress: lastProgress}
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, &videoMissingURLError{kind: "视频生成", postID: postIDs[0], progress: lastProgress})
 		}
 	}
 	if result.URL == "" {
@@ -315,7 +324,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		if len(postIDs) > 0 {
 			postID = postIDs[0]
 		}
-		return provider.VideoResult{}, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress}
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress})
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }
@@ -362,7 +371,7 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 			if errors.Is(err, provider.ErrUnauthorized) {
 				return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, err)
 			}
-			return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postIDs[0], progress: lastProgress}
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, &videoMissingURLError{kind: "视频延长", postID: postIDs[0], progress: lastProgress})
 		}
 	}
 	if result.URL == "" {
@@ -370,7 +379,7 @@ func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *
 		if len(postIDs) > 0 {
 			postID = postIDs[0]
 		}
-		return provider.VideoResult{}, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress}
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, &videoMissingURLError{kind: "视频延长", postID: postID, progress: lastProgress})
 	}
 	return a.ArchiveVideo(ctx, request.Credential, result)
 }
@@ -393,6 +402,13 @@ func (a *Adapter) requestVideoWithModerationRetry(ctx context.Context, cfg Confi
 		}
 		_ = response.Body.Close()
 		if !errors.Is(parseErr, errVideoModerated) {
+			if parseErr != nil {
+				stage := provider.VideoStagePoll
+				if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+					stage = provider.VideoCreateFailureStage(parseErr)
+				}
+				parseErr = provider.WrapVideoStage(stage, 0, parseErr)
+			}
 			return result, postIDs, lastProgress, parseErr
 		}
 		a.log().Warn("video_generation_moderated", "attempt", attempt, "max_attempts", videoModerationAttempts, "post_ids", postIDs)
@@ -837,7 +853,7 @@ func parseVideoStreamCandidates(response *http.Response, progress func(int)) (pr
 	}
 	orderedCandidates := func() []string {
 		candidates := make([]string, 0, len(videoIDs)+len(assetIDs)+len(videoPostIDs))
-		for _, values := range [][]string{videoIDs, assetIDs, videoPostIDs} {
+		for _, values := range [][]string{videoPostIDs, videoIDs, assetIDs} {
 			for _, candidate := range values {
 				if !containsString(candidates, candidate) {
 					candidates = append(candidates, candidate)
