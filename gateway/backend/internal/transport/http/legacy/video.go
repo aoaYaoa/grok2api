@@ -259,9 +259,16 @@ func cachedVideoFromJob(job mediadomain.Job) (LegacyCachedVideo, bool) {
 	}
 	return LegacyCachedVideo{
 		Source: "mediaJob", CacheKey: job.ID,
-		Name: name, TaskID: job.RequestID, ViewURL: job.UpstreamURL, PostID: lastVideoPostID(job.UpstreamURL),
+		Name: name, TaskID: job.RequestID, ViewURL: videoJobPlaybackURL(job), PostID: lastVideoPostID(job.UpstreamURL),
 		PosterURL: videoJobPosterURL(job), DisplayName: displayName, ModifiedAtMS: job.UpdatedAt.UnixMilli(),
 	}, true
+}
+
+func videoJobPlaybackURL(job mediadomain.Job) string {
+	if assetID := strings.TrimSpace(job.ResultAssetID); assetID != "" {
+		return "/v1/media/videos/" + url.PathEscape(assetID)
+	}
+	return strings.TrimSpace(job.UpstreamURL)
 }
 
 func videoJobPosterURL(job mediadomain.Job) string {
@@ -328,7 +335,7 @@ func (h *Handler) videoRename(c *gin.Context) {
 		if err == nil {
 			c.JSON(http.StatusOK, gin.H{"status": "success", "result": gin.H{
 				"task_id": job.ID, "post_id": videoPostIDPattern.FindString(job.UpstreamURL),
-				"display_name": job.DisplayName, "view_url": job.UpstreamURL,
+				"display_name": job.DisplayName, "view_url": videoJobPlaybackURL(job),
 			}})
 			return
 		}
@@ -570,7 +577,7 @@ func (h *Handler) videoSSE(c *gin.Context) {
 			if posterURL := videoJobPosterURL(job); posterURL != "" {
 				writeLegacySSE(c, gin.H{"poster_url": posterURL})
 			}
-			writeVideoDelta(c, "[video]("+job.UpstreamURL+")", "")
+			writeVideoDelta(c, "[video]("+videoJobPlaybackURL(job)+")", "")
 			writeVideoDelta(c, "", "stop")
 			writeLegacyDone(c)
 			return

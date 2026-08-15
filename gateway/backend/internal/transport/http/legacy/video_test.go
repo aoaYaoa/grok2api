@@ -310,7 +310,7 @@ func (f *fakeLegacyVideoGateway) GetVideo(_ context.Context, id string, _ client
 	if f.polls[id] == 1 {
 		return mediadomain.Job{ID: id, Status: mediadomain.StatusInProgress, Progress: 35}, nil
 	}
-	return mediadomain.Job{ID: id, Status: mediadomain.StatusCompleted, Progress: 100, UpstreamURL: "https://example.com/video.mp4", Seconds: 6}, nil
+	return mediadomain.Job{ID: id, Status: mediadomain.StatusCompleted, Progress: 100, UpstreamURL: "https://example.com/video.mp4", ResultAssetID: "vid_local_123456", Seconds: 6}, nil
 }
 
 func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
@@ -360,7 +360,7 @@ func TestVideoStartAndSSEMapToPersistentGoJobs(t *testing.T) {
 	if sseRecorder.Code != http.StatusOK || !strings.HasPrefix(sseRecorder.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("sse status=%d content-type=%q body=%s", sseRecorder.Code, sseRecorder.Header().Get("Content-Type"), sseRecorder.Body.String())
 	}
-	for _, expected := range []string{"当前进度 35%", "[video](https://example.com/video.mp4)", `"finish_reason":"stop"`, "data: [DONE]"} {
+	for _, expected := range []string{"当前进度 35%", "[video](/v1/media/videos/vid_local_123456)", `"finish_reason":"stop"`, "data: [DONE]"} {
 		if !strings.Contains(sseRecorder.Body.String(), expected) {
 			t.Fatalf("SSE body missing %q: %s", expected, sseRecorder.Body.String())
 		}
@@ -442,7 +442,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	videoGateway := &fakeLegacyVideoGateway{listed: []mediadomain.Job{{
 		ID: "video-job-1", RequestID: "request-1", Status: mediadomain.StatusCompleted,
-		UpstreamURL:  "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4",
+		UpstreamURL: "https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4", ResultAssetID: "vid_cache_123456",
 		MetadataJSON: `{"display_name":"Saved title"}`, UpdatedAt: time.UnixMilli(123456),
 	}}}
 	videoCache := &fakeLegacyVideoCache{items: []LegacyCachedVideo{{
@@ -458,7 +458,7 @@ func TestVideoCacheListAndRenameUsePersistentJobs(t *testing.T) {
 	listRequest.Header.Set("Authorization", "Bearer g2-direct-key")
 	listRecorder := httptest.NewRecorder()
 	router.ServeHTTP(listRecorder, listRequest)
-	for _, expected := range []string{`"display_name":"Saved title"`, `"task_id":"request-1"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"https://example.com/123e4567-e89b-12d3-a456-426614174000.mp4"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"source":"legacy"`, `"cache_key":"local.mp4"`, `"poster_url":"/v1/files/image/local.jpg"`, `"total":2`} {
+	for _, expected := range []string{`"display_name":"Saved title"`, `"task_id":"request-1"`, `"post_id":"123e4567-e89b-12d3-a456-426614174000"`, `"view_url":"/v1/media/videos/vid_cache_123456"`, `"display_name":"Migrated title"`, `"view_url":"/v1/files/video/local.mp4"`, `"source":"legacy"`, `"cache_key":"local.mp4"`, `"poster_url":"/v1/files/image/local.jpg"`, `"total":2`} {
 		if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), expected) {
 			t.Fatalf("list status=%d body=%s missing=%s", listRecorder.Code, listRecorder.Body.String(), expected)
 		}
