@@ -223,6 +223,66 @@ func TestVideoStartStoresInlineReferencesIndependentlyOfPublicBaseURL(t *testing
 	}
 }
 
+func TestVideoStartUsesVideo15ModelForFifteenSecondReferenceGeneration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{
+		"prompt":"move",
+		"video_length":15,
+		"source_image_urls":["https://example.com/reference.png"]
+	}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || len(videoGateway.created) != 1 {
+		t.Fatalf("status=%d body=%s jobs=%d", recorder.Code, recorder.Body.String(), len(videoGateway.created))
+	}
+	if input := videoGateway.created[0]; input.PublicModel != "grok-imagine-video-1.5" {
+		t.Fatalf("model=%q want grok-imagine-video-1.5", input.PublicModel)
+	}
+}
+
+func TestVideoStartKeepsBaseModelWhenVideo15IsNotRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "ten second reference", body: `{"prompt":"move","video_length":10,"source_image_url":"https://example.com/reference.png"}`},
+		{name: "fifteen second text", body: `{"prompt":"move","video_length":15}`},
+		{name: "video extension", body: `{"prompt":"extend","video_length":15,"is_video_extension":true,"extend_post_id":"123e4567-e89b-12d3-a456-426614174000"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+			videoGateway := &fakeLegacyVideoGateway{}
+			handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+			router := gin.New()
+			handler.Register(router, nil, nil)
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(test.body))
+			request.Header.Set("Authorization", "Bearer g2-direct-key")
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK || len(videoGateway.created) != 1 {
+				t.Fatalf("status=%d body=%s jobs=%d", recorder.Code, recorder.Body.String(), len(videoGateway.created))
+			}
+			if input := videoGateway.created[0]; input.PublicModel != "grok-imagine-video" {
+				t.Fatalf("model=%q want grok-imagine-video", input.PublicModel)
+			}
+		})
+	}
+}
+
 func TestVideoStartHidesPersistenceErrorsFromPublicResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}

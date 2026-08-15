@@ -436,6 +436,10 @@ func (h *Handler) videoStart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "参考图处理失败，请重新选择图片"})
 		return
 	}
+	publicModel := "grok-imagine-video"
+	if !request.IsVideoExtension && len(references) > 0 && request.VideoLength > 10 {
+		publicModel = "grok-imagine-video-1.5"
+	}
 	taskIDs := make([]string, 0, request.Concurrent)
 	for index := 0; index < request.Concurrent; index++ {
 		taskID, err := newTaskID()
@@ -444,7 +448,7 @@ func (h *Handler) videoStart(c *gin.Context) {
 			return
 		}
 		job, err := h.videoGateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
-			RequestID: taskID, ClientKey: clientKey, PublicModel: "grok-imagine-video",
+			RequestID: taskID, ClientKey: clientKey, PublicModel: publicModel,
 			Prompt: request.Prompt, Preset: request.Preset, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
 			Resolution: request.Resolution, ReferenceURLs: references,
 			IsExtension: request.IsVideoExtension, ExtendPostID: request.ExtendPostID,
