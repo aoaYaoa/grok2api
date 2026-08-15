@@ -1679,6 +1679,40 @@ func TestGenerateVideoClassifiesOnlyExplicitHTTPRejectionAsCreateFailure(t *test
 	}
 }
 
+func TestGenerateVideoReturnsUpstreamResultForApplicationArchiving(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/rest/media/post/create":
+			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
+		case "/rest/app-chat/conversations/new":
+			_, _ = io.WriteString(writer, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"/videos/final.mp4"}}}}`+"\n")
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedToken, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := infraegress.NewManager(egressRepositoryStub{}, cipher)
+	adapter := NewAdapter(Config{BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test"}, manager, cipher, nil, nil)
+	result, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: account.Credential{ID: 1, Provider: account.ProviderWeb, EncryptedAccessToken: encryptedToken},
+		Prompt:     "test",
+		Duration:   5,
+	})
+	if err != nil || result.URL != "https://assets.grok.com/videos/final.mp4" {
+		t.Fatalf("result = %#v, err = %v, want upstream URL without application archive", result, err)
+	}
+}
+
 func TestParseVideoConcatenatedJSONFixture(t *testing.T) {
 	fixture := `{"result":{"conversation":{"conversationId":"conversation_1"}}}` +
 		`{"result":{"response":{"streamingVideoGenerationResponse":{"videoId":"video_1","progress":1,"videoPostId":"post_1","resolutionName":"720p"}}}}` +

@@ -326,7 +326,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		}
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, &videoMissingURLError{kind: "视频生成", postID: postID, progress: lastProgress})
 	}
-	return a.ArchiveVideo(ctx, request.Credential, result)
+	return result, nil
 }
 
 func (a *Adapter) generateExtendedVideo(ctx context.Context, cfg Config, lease *egress.Lease, token string, request provider.VideoRequest) (provider.VideoResult, error) {
@@ -588,7 +588,6 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 	cfg := a.config()
 	parsed, err := url.Parse(strings.TrimSpace(result.URL))
 	if err != nil || parsed.User != nil || !trustedVideoAssetURL(parsed, cfg.BaseURL) {
-		a.log().Warn("video_asset_url_rejected", "scheme", parsedScheme(parsed), "host", parsedHost(parsed))
 		return provider.VideoResult{}, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, fmt.Errorf("视频内容 URL 不受信任"))
 	}
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
@@ -618,20 +617,6 @@ func (a *Adapter) ArchiveVideo(ctx context.Context, credential account.Credentia
 		}
 	}
 	return provider.VideoResult{}, provider.NewMediaPostProcessingError(lastStage, lastErr)
-}
-
-func parsedScheme(value *url.URL) string {
-	if value == nil {
-		return ""
-	}
-	return value.Scheme
-}
-
-func parsedHost(value *url.URL) string {
-	if value == nil {
-		return ""
-	}
-	return value.Hostname()
 }
 
 func (a *Adapter) archiveVideoPoster(ctx context.Context, credential account.Credential, result provider.VideoResult) provider.VideoResult {
