@@ -1,13 +1,15 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `86ae605717087c2df479dc8a268219d3ad8fe731`
+- Commit: `5b0c5cd30c3c41255158fedc1a51875cd2583c43`
 - Version: `v3.1.2`
-- Imported: `2026-08-14`
+- Imported: `2026-08-15`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `86ae605717087c2df479dc8a268219d3ad8fe731`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `5b0c5cd30c3c41255158fedc1a51875cd2583c43`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Semantic CLI stream idle timeout now distinguishes tool progress from meaningful assistant output, preventing stalled streams from staying alive indefinitely.
 
 - Grok2API v3.1.2 voice APIs, model 4.6 catalog updates, Imagine quota tracking, and Console/Web media reliability improvements.
 - Official video create, reference, edit, and extend operations alongside the preserved legacy Web extension workflow.
