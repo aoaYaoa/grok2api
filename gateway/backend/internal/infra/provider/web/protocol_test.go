@@ -1512,6 +1512,8 @@ func TestGeneratedVideoAssetHostsRemainStrict(t *testing.T) {
 	if !trustedVideoAssetHost("assets.grok.com", "https://api.example") ||
 		!trustedVideoAssetHost("imagine-public.x.ai", "https://api.example") ||
 		!trustedVideoAssetHost("imgen.x.ai", "https://api.example") ||
+		!trustedVideoAssetHost("cdn.x.ai", "https://api.example") ||
+		!trustedVideoAssetHost("videos.x.ai", "https://api.example") ||
 		trustedVideoAssetHost("example.com", "https://api.example") {
 		t.Fatal("generated video host allowlist is incorrect")
 	}

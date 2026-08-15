@@ -690,7 +690,7 @@ func (a *Adapter) archiveVideoAttempt(ctx context.Context, credential account.Cr
 }
 
 func trustedVideoAssetHost(host, baseURL string) bool {
-	if strings.EqualFold(host, "assets.grok.com") || strings.EqualFold(host, "imagine-public.x.ai") || strings.EqualFold(host, "imgen.x.ai") {
+	if strings.EqualFold(host, "assets.grok.com") || strings.EqualFold(host, "imagine-public.x.ai") || strings.EqualFold(host, "imgen.x.ai") || strings.EqualFold(host, "cdn.x.ai") || strings.EqualFold(host, "videos.x.ai") {
 		return true
 	}
 	parsed, err := url.Parse(baseURL)
