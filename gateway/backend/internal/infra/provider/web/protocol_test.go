@@ -1508,6 +1508,15 @@ func TestGeneratedImageAssetHostsRemainStrict(t *testing.T) {
 	}
 }
 
+func TestGeneratedVideoAssetHostsRemainStrict(t *testing.T) {
+	if !trustedVideoAssetHost("assets.grok.com", "https://api.example") ||
+		!trustedVideoAssetHost("imagine-public.x.ai", "https://api.example") ||
+		!trustedVideoAssetHost("imgen.x.ai", "https://api.example") ||
+		trustedVideoAssetHost("example.com", "https://api.example") {
+		t.Fatal("generated video host allowlist is incorrect")
+	}
+}
+
 func TestImageStreamUsesOfficialOpenAIEventsWithoutTokenUsage(t *testing.T) {
 	adapter := &Adapter{assets: imageAssetStoreStub{}}
 	urlItem, err := adapter.imageDataItem(context.Background(), account.Credential{}, imagineImageValue{URL: "https://imgen.x.ai/image.jpg", Blob: "aW1hZ2U="}, "url")
