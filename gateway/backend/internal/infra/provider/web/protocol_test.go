@@ -1205,13 +1205,23 @@ func TestModelsUseLowestSufficientTierFirst(t *testing.T) {
 		{model: "grok-imagine-image", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
 		{model: "grok-imagine-image-quality", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
 		{model: "imagine-image-edit", want: []account.WebTier{account.WebTierSuper, account.WebTierHeavy}},
-		{model: "grok-imagine-video", want: []account.WebTier{account.WebTierSuper, account.WebTierHeavy}},
+		{model: "grok-imagine-video", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
 	}
 	for _, test := range tests {
 		got := adapter.TierOrder(test.model)
 		if !slices.Equal(got, test.want) {
 			t.Fatalf("tier order for %s = %v, want %v", test.model, got, test.want)
 		}
+	}
+}
+
+func TestBasicTierIncludesWebVideoWhenUpstreamPublishesVideoQuota(t *testing.T) {
+	models, err := (&Adapter{}).ListModels(context.Background(), account.Credential{WebTier: account.WebTierBasic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(models, "grok-imagine-video") {
+		t.Fatalf("Basic models = %v", models)
 	}
 }
 

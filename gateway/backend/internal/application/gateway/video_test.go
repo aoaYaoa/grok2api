@@ -28,7 +28,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-func TestVideoQuotaModeUsesWeb720pProduct(t *testing.T) {
+func TestVideoQuotaModeUsesCurrentWebVideoProduct(t *testing.T) {
 	tests := []struct {
 		provider   account.Provider
 		resolution string
@@ -36,7 +36,7 @@ func TestVideoQuotaModeUsesWeb720pProduct(t *testing.T) {
 	}{
 		{account.ProviderWeb, "", account.QuotaModeWebVideo720p},
 		{account.ProviderWeb, "720p", account.QuotaModeWebVideo720p},
-		{account.ProviderWeb, "480p", account.QuotaModeWebVideo},
+		{account.ProviderWeb, "480p", account.QuotaModeWebVideo720p},
 		{account.ProviderConsole, "720p", account.QuotaModeWebVideo},
 	}
 	for _, test := range tests {

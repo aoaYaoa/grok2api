@@ -947,12 +947,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	s.releaseVideoInputs(job)
 }
 
-func videoQuotaMode(providerValue account.Provider, catalogMode, resolution string) string {
+func videoQuotaMode(providerValue account.Provider, catalogMode, _ string) string {
 	if providerValue == account.ProviderWeb && catalogMode == account.QuotaModeWebVideo {
-		resolution = strings.ToLower(strings.TrimSpace(resolution))
-		if resolution == "" || resolution == "720p" {
-			return account.QuotaModeWebVideo720p
-		}
+		return account.QuotaModeWebVideo720p
 	}
 	return catalogMode
 }
