@@ -58,7 +58,7 @@ func newBuildClientWithOptions(proxyURL string, responseHeaderTimeout time.Durat
 			if err != nil {
 				return nil, fmt.Errorf("创建 Grok Build SOCKS 代理: %w", err)
 			}
-			transport.DialContext = dialContext(dialer)
+			transport.DialContext = dialContext(newIPv6PreferredDialer(dialer))
 		case "trojan", "vless", "ss", "vmess":
 			dialer, err := tunnelproxy.NewDialer(proxyURL)
 			if err != nil {

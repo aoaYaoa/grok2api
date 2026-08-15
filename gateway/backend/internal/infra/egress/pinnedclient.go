@@ -81,7 +81,7 @@ func newPinnedHTTPSClient(proxyURL, serverName string, tlsConfig *tls.Config) (*
 			if err != nil {
 				return nil, fmt.Errorf("创建固定地址 SOCKS 代理: %w", err)
 			}
-			transport.DialContext = dialContext(dialer)
+			transport.DialContext = dialContext(newIPv6PreferredDialer(dialer))
 		case "trojan", "vless", "ss", "vmess":
 			dialer, err := tunnelproxy.NewDialer(proxyURL)
 			if err != nil {

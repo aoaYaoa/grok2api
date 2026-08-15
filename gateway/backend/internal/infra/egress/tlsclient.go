@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/bogdanfinn/websocket"
 	"github.com/chenyme/grok2api/backend/internal/pkg/tunnelproxy"
+	xproxy "golang.org/x/net/proxy"
 )
 
 type browserClient struct{ inner tlsclient.HttpClient }
@@ -75,7 +77,18 @@ func newBrowserClient(proxyURL, userAgent string) (*browserClient, error) {
 			}
 			options = append(options, tlsclient.WithDialContext(dialer.DialContext))
 		} else {
-			options = append(options, tlsclient.WithProxyUrl(proxyURL))
+			switch strings.ToLower(parsed.Scheme) {
+			case "socks4", "socks4a", "socks5", "socks5h":
+				direct := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+				dialer, err := xproxy.FromURL(parsed, direct)
+				if err != nil {
+					return nil, fmt.Errorf("创建浏览器 SOCKS 代理: %w", err)
+				}
+				preferred := newIPv6PreferredDialer(dialer)
+				options = append(options, tlsclient.WithDialContext(preferred.DialContext))
+			default:
+				options = append(options, tlsclient.WithProxyUrl(proxyURL))
+			}
 		}
 	}
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), options...)
