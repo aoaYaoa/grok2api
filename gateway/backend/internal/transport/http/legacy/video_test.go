@@ -223,7 +223,7 @@ func TestVideoStartStoresInlineReferencesIndependentlyOfPublicBaseURL(t *testing
 	}
 }
 
-func TestVideoStartUsesVideo15ModelForFifteenSecondReferenceGeneration(t *testing.T) {
+func TestVideoStartKeepsWebModelForFifteenSecondSingleReferenceGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
 	videoGateway := &fakeLegacyVideoGateway{}
@@ -244,8 +244,8 @@ func TestVideoStartUsesVideo15ModelForFifteenSecondReferenceGeneration(t *testin
 	if recorder.Code != http.StatusOK || len(videoGateway.created) != 1 {
 		t.Fatalf("status=%d body=%s jobs=%d", recorder.Code, recorder.Body.String(), len(videoGateway.created))
 	}
-	if input := videoGateway.created[0]; input.PublicModel != "grok-imagine-video-1.5" {
-		t.Fatalf("model=%q want grok-imagine-video-1.5", input.PublicModel)
+	if input := videoGateway.created[0]; input.PublicModel != "grok-imagine-video" {
+		t.Fatalf("model=%q want grok-imagine-video", input.PublicModel)
 	}
 }
 
