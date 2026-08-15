@@ -46,6 +46,18 @@ func (e *webMediaUpstreamError) HTTPStatusCode() int {
 	return e.status
 }
 
+// RequestScopedFailure marks shared Web rate limits so the gateway can defer
+// the job instead of amplifying the limit by cycling through every account.
+func (e *webMediaUpstreamError) RequestScopedFailure() bool {
+	if e == nil || e.status != http.StatusTooManyRequests {
+		return false
+	}
+	message := strings.ToLower(e.summary)
+	return strings.Contains(message, "too many requests") ||
+		strings.Contains(message, "rate limit") ||
+		strings.Contains(message, "rate limited")
+}
+
 const (
 	webMediaDiagnosticBodyLimit    = 64 << 10
 	webMediaDiagnosticSummaryLimit = 256

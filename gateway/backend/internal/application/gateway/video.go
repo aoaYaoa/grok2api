@@ -29,6 +29,7 @@ const (
 	videoJobTimeout          = 2 * time.Hour
 	videoJobLease            = videoJobTimeout + 5*time.Minute
 	videoJobRecoveryInterval = 30 * time.Second
+	videoRateLimitBackoff    = 5 * time.Minute
 	videoOutputAttempts      = 3
 	// Base64 物化会同时持有原图和编码后字符串，单独限流避免高 mediaConcurrency 放大内存峰值。
 	videoInputMaterializeConcurrency = 4
@@ -807,12 +808,19 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			s.deferVideoJob(parent, job)
 			return
 		}
+		status, hasStatus := provider.ErrorHTTPStatus(err)
+		if hasStatus && status == http.StatusTooManyRequests && provider.IsRequestScopedError(err) {
+			lease.Release()
+			lease = nil
+			s.deferVideoJobFor(parent, job, videoRateLimitBackoff)
+			s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "upstream_rate_limit", "retry_after", videoRateLimitBackoff)
+			return
+		}
 		failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
 		failureHandled := false
 		retriableCreate := false
 		stage, hasStage := provider.VideoErrorStage(err)
 		safeCreateFailure := hasStage && stage == provider.VideoStageCreate
-		status, hasStatus := provider.ErrorHTTPStatus(err)
 		if provider.IsAccountHealthNeutral(err) || provider.IsRequestScopedError(err) {
 			failureHandled = true
 			retriableCreate = false

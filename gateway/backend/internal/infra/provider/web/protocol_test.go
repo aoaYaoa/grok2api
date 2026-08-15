@@ -1192,6 +1192,20 @@ func TestWebMediaUpstreamDiagnosticLogsStageHeadersWithoutBodyPreview(t *testing
 	}
 }
 
+func TestWebMediaRateLimitIsRequestScoped(t *testing.T) {
+	err := newWebMediaUpstreamError(http.StatusTooManyRequests, []byte(`{"code":8,"message":"Too many requests"}`), false)
+	if !provider.IsRequestScopedError(err) {
+		t.Fatal("explicit Web rate limit should be request-scoped")
+	}
+}
+
+func TestWebMediaGeneric429IsNotRequestScoped(t *testing.T) {
+	err := newWebMediaUpstreamError(http.StatusTooManyRequests, []byte(`{"message":"temporary upstream failure"}`), false)
+	if provider.IsRequestScopedError(err) {
+		t.Fatal("generic Web 429 should not be treated as request-scoped")
+	}
+}
+
 func TestModelsUseLowestSufficientTierFirst(t *testing.T) {
 	adapter := &Adapter{}
 	tests := []struct {
