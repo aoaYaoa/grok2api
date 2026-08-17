@@ -124,6 +124,7 @@ func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64, input e
 			responseID = event.ID
 		}
 		if event.Usage != nil {
+			usage.Reported = true
 			usage.InputTokens = event.Usage.PromptTokens
 			usage.OutputTokens = event.Usage.CompletionTokens
 			usage.ReasoningTokens = event.Usage.CompletionTokensDetails.ReasoningTokens
@@ -184,7 +185,7 @@ func (s *Service) ProbeEgressQuality(ctx context.Context, nodeID uint64, input e
 		FirstTokenMS: firstTokenMS, DurationMS: durationMS, GenerationMS: generationMS,
 		ChunkCount: chunkCount, OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
 		VisibleTokens: visibleTokens, VisibleCharacters: visibleCharacters, OutputTokensPerSecond: outputTokensPerSecond,
-		ExpectedMatched: strings.Contains(text, input.Expected), ResponseSHA256: hex.EncodeToString(digest[:]),
+		ExpectedMatched: egressapp.MatchExpected(text, input.Expected, input.MatchMode), ResponseSHA256: hex.EncodeToString(digest[:]),
 	}, nil
 }
 

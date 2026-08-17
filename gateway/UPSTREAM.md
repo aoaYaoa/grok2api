@@ -1,13 +1,16 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `5b0c5cd30c3c41255158fedc1a51875cd2583c43`
+- Commit: `f42ba1765fa520c6a587387daf8b22612168b397`
 - Version: `v3.1.2`
-- Imported: `2026-08-15`
+- Imported: `2026-08-17`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `5b0c5cd30c3c41255158fedc1a51875cd2583c43`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `f42ba1765fa520c6a587387daf8b22612168b397`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Current Imagine `mediaGenInput` editing, browser Clearance reacquisition, Basic media quota routing, and Console video admission limits.
+- Clash subscription parsing, VLESS Reality transport, configurable quality probes, media audit accounting, and soft cooldown for interrupted streams.
 
 - Semantic CLI stream idle timeout now distinguishes tool progress from meaningful assistant output, preventing stalled streams from staying alive indefinitely.
 

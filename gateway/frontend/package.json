@@ -9,6 +9,7 @@
     "build": "tsc -b && pnpm build:admin && pnpm build:public",
     "build:admin": "vite build --mode admin",
     "build:public": "vite build --mode public",
+    "test": "tsc -p tsconfig.test.json && node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "lint": "eslint .",
     "preview": "vite preview"
   },

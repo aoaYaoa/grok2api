@@ -160,6 +160,20 @@ Grok Console 固定使用 `store: false`，不支持 `previous_response_id`、Re
 
 升级时会原位迁移内部路由并保留路由主键、客户端密钥权限和旧名称别名。多个来源可以提供同一个对外模型名称；网关会按客户端权限、协议能力和账号可用性选择来源。带 Provider 前缀的名称仍可作为兼容入口，用于显式指定渠道。
 
+| Model | Type | Minimum tier | Gateway surfaces |
+| :-- | :-- | :-- | :-- |
+| `grok-chat-fast` | Conversation | Basic | Chat Completions, Responses, Messages |
+| `grok-chat-auto` | Conversation | Super | Chat Completions, Responses, Messages |
+| `grok-chat-expert` | Conversation | Super | Chat Completions, Responses, Messages |
+| `grok-chat-heavy` | Conversation | Heavy | Chat Completions, Responses, Messages |
+| `grok-imagine-image-lite` | Image | Basic | Images Generations |
+| `grok-imagine-image` | Image | Basic | Images Generations (`enable_pro=false`) |
+| `grok-imagine-image-2.0` | Image | Basic | Images Generations (`enable_pro=true`) |
+| `grok-imagine-image-edit` | Image Edit | Basic | Images Edits |
+| `grok-imagine-video` | Video | Basic for 720p; Super for 480p | Videos |
+
+Web Imagine generation maps `aspect_ratio` and `n` to the browser protocol. `size` remains an OpenAI-compatible aspect-ratio alias, while generation-only `resolution` and `quality` are ignored on Web routes because the upstream product is selected by the model name rather than by those Console-oriented controls.
+
 Grok Web 内置模型：
 
 | 模型 | 能力 | 最低等级 |

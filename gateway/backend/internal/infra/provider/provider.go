@@ -472,6 +472,16 @@ const (
 	VideoOperationExtend   = media.VideoOperationExtend
 )
 
+// ConsoleVideoMaxReferenceImages and ConsoleVideoMaxReferenceDurationSeconds
+// describe the Console reference-to-video contract enforced by the upstream.
+// They are shared by admission control and the Console adapter so invalid
+// asynchronous jobs are rejected before enqueueing without weakening the
+// adapter's final request-boundary validation.
+const (
+	ConsoleVideoMaxReferenceImages          = 7
+	ConsoleVideoMaxReferenceDurationSeconds = 10
+)
+
 type VideoRequest struct {
 	Credential account.Credential
 	// Billing 仅用于 Build auto 模式的 XAI 资格判断；nil 表示账号等级尚未确认。
@@ -827,7 +837,14 @@ type QuotaProductMetadataAdapter interface {
 	QuotaProduct(upstreamModel string) (int, bool)
 }
 
-// ModelAlias 将隐藏兼容模型名解析到唯一公开路由，并可固定推理强度。
+// QuotaTierOrderAdapter optionally narrows account tiers for a concrete quota
+// product. It is used when one public model exposes parameter variants backed
+// by different upstream entitlements.
+type QuotaTierOrderAdapter interface {
+	TierOrderForQuotaMode(upstreamModel, quotaMode string) []account.WebTier
+}
+
+// ModelAlias resolves a hidden compatibility model name to one public route and can fix reasoning effort.
 type ModelAlias struct {
 	Alias           string
 	PublicModel     string
@@ -1224,6 +1241,21 @@ func (r *Registry) QuotaProduct(value account.Provider, upstreamModel string) (i
 		return 0, false
 	}
 	return metadata.QuotaProduct(upstreamModel)
+}
+
+func (r *Registry) TierOrderForQuotaMode(value account.Provider, upstreamModel, quotaMode string) []account.WebTier {
+	adapter, ok := r.Get(value)
+	if !ok {
+		return nil
+	}
+	if metadata, ok := adapter.(QuotaTierOrderAdapter); ok {
+		return metadata.TierOrderForQuotaMode(upstreamModel, quotaMode)
+	}
+	metadata, ok := adapter.(RoutingMetadataAdapter)
+	if !ok {
+		return nil
+	}
+	return metadata.TierOrder(upstreamModel)
 }
 
 func (r *Registry) PricingModel(value account.Provider, upstreamModel string) string {
