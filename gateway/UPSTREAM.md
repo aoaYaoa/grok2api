@@ -1,13 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `f42ba1765fa520c6a587387daf8b22612168b397`
-- Version: `v3.1.2`
-- Imported: `2026-08-17`
+- Commit: `909bb8109fcc56b34612066630f5c0bf4e43e517`
+- Version: `v3.1.4`
+- Imported: `2026-08-20`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `f42ba1765fa520c6a587387daf8b22612168b397`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `909bb8109fcc56b34612066630f5c0bf4e43e517`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Missing-thinking and empty-stream quality retries with durable account penalties and protocol-safe terminal events.
+- Build refresh-token import and persistence recovery, Grok TUI compaction compatibility, and reasoning-effort audit fields.
+- Shared proxy profiles with bounded automatic assignment, trusted client-IP recording, and account quota/status UI improvements.
 
 - Current Imagine `mediaGenInput` editing, browser Clearance reacquisition, Basic media quota routing, and Console video admission limits.
 - Clash subscription parsing, VLESS Reality transport, configurable quality probes, media audit accounting, and soft cooldown for interrupted streams.

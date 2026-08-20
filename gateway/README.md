@@ -146,6 +146,15 @@ pnpm dev
 | Grok Web | SSO JSON、逐行 SSO Token | Chat、Responses、Messages、图片、图片编辑、视频 |
 | Grok Console | SSO JSON、逐行 SSO Token | 无状态 Responses、兼容 Chat 与 Messages |
 
+Build refresh token 在续期时可能轮换。不要让 grok2api、官方 CLI、其他网关或独立客户端同时共用一份 Build 凭据，否则其中一个客户端可能消耗另一个客户端仍持有的 token；每个活跃客户端应分别授权，或在旧客户端停止使用后再迁移凭据。
+
+Web 账号工具可接受条款、随机设置对应 20–40 岁的生日并启用 NSFW；已完成步骤会被记录，后续执行自动跳过。
+
+旧 `reauthRequired` 账号的自动删除功能默认关闭；活跃推理租约和视频任务会受到保护。
+
+> [!TIP]
+> 从 Python 版本迁移时，可将 Grok Web SSO token 导出为 TXT 后在 **Grok Web** 中导入。旧版号池元数据和数据库不兼容。
+
 Grok Build OAuth 支持按需续期。Grok Web 与 Grok Console 的 SSO 不可自动续期，凭据失效后账号会退出可用号池并等待重新授权。
 
 Grok Web 与 Grok Console 均支持账号列表 JSON，也支持每行一个 Token 的快速导入。账号接入接口会等待本批账号的首次额度与模型能力同步完成后再返回结果。
@@ -201,6 +210,8 @@ Grok Console 内置模型：
 `grok-4.5` 不由 Grok Console Provider 注册；即使由 Web SSO 同步创建 Console 账号，该模型在 Console 中仍不可用。
 
 Console 上游路由始终使用 `Console/` 内部前缀，不再根据启动顺序生成 `-console` 冲突后缀。升级产生的兼容别名不会出现在 `GET /v1/models`。
+
+Responses 与 Messages 支持流式输出、工具、推理、多轮会话和压缩。稳定的客户端会话信号会被保留以维持 Grok Build 提示词缓存亲和性；缓存命中仍要求兼容的上游账号和未变化的提示词前缀。由当前网关生成且仍可解密的压缩摘要，即使会话或 `PromptCacheKey` 发生重映射也会被展开；外部或无法解密的摘要仍属于兼容边界。
 
 同名模型会在当前可用来源中自动选路；来源选定后，账号故障切换只发生在该 Provider 的账号池内。
 
@@ -259,6 +270,7 @@ Egress nodes are scoped to Build, Web, Console, or Web assets. The admin console
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
 - Optional [Egress Quality Guard](./tools/egress-quality-guard/README.md) for active per-node model probes, guarded quarantine, and recovery; enable it with the built-in `quality-guard` Compose profile
+- Give each sticky session its own fixed node (`proxyPool=false`). Do not merge several stickies into one node, or the guard can only quarantine the whole group
 
 To enable the guard, add a `qualityGuard` section to `config.yaml`, then start
 the profile. The main service creates and reuses a non-exportable system probe
@@ -268,7 +280,16 @@ identity automatically:
 qualityGuard:
   enabled: true
   model: "grok-4.5"
+  # Optional: withhold thinking-model streams that have no reasoning.
+  requestRetry:
+    enabled: false
+    maxAttempts: 6
+    holdTimeout: 3s
+    minOutputTokens: 32
+    onExhausted: fail_closed # fail_open | fail_closed
 ```
+
+`requestRetry` runs on the gateway request path and is independent of the sidecar. It is off by default. When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, stored-response, and ForcedEgress probe requests are unchanged.
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -329,11 +350,48 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automatically selects the `postgres` driver. An empty value is ignored. Supported URL schemes are `postgres://` and `postgresql://`; SQLAlchemy's `postgresql+asyncpg://` form is rejected with a migration hint. The application does not implicitly read the generic `DATABASE_URL`; platforms that provide it can map it explicitly with `GROK2API_DATABASE_URL: "${DATABASE_URL}"`. Database configuration precedence is built-in defaults, `config.yaml`, then `GROK2API_DATABASE_URL`. The current CLI has no database override.
 
+### Client IPs behind a reverse proxy
+
+Request audits record the normalized client IPv4 or IPv6 address. Direct deployments need no extra configuration. Behind Nginx or another reverse proxy, configure both sides:
+
+1. Forward the standard client IP headers from the proxy:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+2. Trust only the proxy address or its isolated network in `config.yaml`:
+
+```yaml
+server:
+  trustedProxies:
+    - "127.0.0.1"
+```
+
+With Docker, the peer seen by grok2api may be the bridge gateway or another container rather than `127.0.0.1`. Inspect the Compose network before configuring it:
+
+```bash
+docker network inspect grok2api_default \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+For example, an isolated network reported as `172.20.0.0/16` can be configured as a trusted proxy CIDR. Never use `0.0.0.0/0` or `::/0`; grok2api rejects unrestricted trusted-proxy ranges. Without `trustedProxies`, forwarded headers are ignored and audits contain the direct TCP peer address, preventing clients from spoofing `X-Forwarded-For`.
+
+If Cloudflare is in front of Nginx, configure Nginx's real-IP module with `CF-Connecting-IP` and Cloudflare's official proxy ranges first. Do not trust `CF-Connecting-IP` from arbitrary peers. Restart grok2api after changing `server.trustedProxies`; reload Nginx after changing its configuration.
+
 Important optional settings:
 
 - `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
 - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
-- `routing.segmentedSelectorEnabled`: optimizes large account pools while retaining full-planner fallback and atomic guards.
+- `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
+- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when a quarantined node would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
 - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
 - **Sync latest version** applies the validated Grok Build client version and User-Agent.
 

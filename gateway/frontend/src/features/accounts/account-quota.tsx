@@ -7,7 +7,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { AccountDTO, BillingDTO, QuotaDTO } from "@/features/accounts/accounts-api";
 import { getWebQuotaAvailability, normalizeWeeklyQuotaProducts } from "@/features/accounts/weekly-quota-products.mjs";
 import { cn } from "@/shared/lib/cn";
-import { formatDateTime, formatNumber } from "@/shared/lib/format";
+import { formatDateTime, formatNumber, formatTokenMillions } from "@/shared/lib/format";
 
 export function AccountQuota({ quota, billing, locale }: { quota: QuotaDTO; billing?: BillingDTO; locale: string }) {
   const { t } = useTranslation();
@@ -19,8 +19,8 @@ export function AccountQuota({ quota, billing, locale }: { quota: QuotaDTO; bill
   }
 
   const percent = Math.min(100, Math.max(0, quota.usagePercent));
-  const used = formatNumber(quota.used, locale, 0);
-  const limit = formatNumber(quota.limit, locale, 0);
+  const used = formatTokenMillions(quota.used, locale);
+  const limit = formatTokenMillions(quota.limit, locale);
   const isEstimated = !quota.limitKnown;
   const statusDescription = quota.status === "waitingReset" && quota.nextProbeAt
     ? t("accounts.waitingResetUntil", { time: formatDateTime(quota.nextProbeAt, locale) })
@@ -30,7 +30,7 @@ export function AccountQuota({ quota, billing, locale }: { quota: QuotaDTO; bill
         ? t("accounts.upstreamConfirmed")
         : null;
   const usage = quota.limit > 0
-    ? isEstimated ? t("accounts.freeEstimatedUsage", { used, limit }) : `${used} / ${limit} tokens`
+    ? isEstimated ? t("accounts.freeEstimatedUsage", { used, limit }) : t("accounts.freeConfirmedUsage", { used, limit })
     : t("accounts.freeObservedUsage", { used });
 
   return (
