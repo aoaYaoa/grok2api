@@ -1172,10 +1172,11 @@ func TestDecodeDirectFileUploadResponse(t *testing.T) {
 }
 
 func TestImageEditInputAssetPrefersUUIDFromFileURI(t *testing.T) {
+	const userID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 	const assetID = "123e4567-e89b-12d3-a456-426614174000"
 	value, source := imageEditInputAsset(uploadedFile{
 		MetadataID: "file-metadata-1",
-		URI:        "https://assets.grok.com/users/test/uploads/" + assetID + "/content",
+		URI:        "https://assets.grok.com/users/" + userID + "/uploads/" + assetID + "/content",
 	})
 	if value != assetID || source != "file_uri_uuid" {
 		t.Fatalf("value=%q source=%q", value, source)

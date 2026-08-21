@@ -917,14 +917,18 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 
 func imageEditInputAsset(uploaded uploadedFile) (string, string) {
 	if parsed, err := url.Parse(strings.TrimSpace(uploaded.URI)); err == nil {
+		assetID := ""
 		for _, segment := range strings.Split(parsed.Path, "/") {
 			if len(segment) < 36 {
 				continue
 			}
 			candidate := segment[:36]
 			if _, err := uuid.Parse(candidate); err == nil {
-				return candidate, "file_uri_uuid"
+				assetID = candidate
 			}
+		}
+		if assetID != "" {
+			return assetID, "file_uri_uuid"
 		}
 	}
 	if value := strings.TrimSpace(uploaded.MetadataID); value != "" {
