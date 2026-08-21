@@ -53,6 +53,26 @@ func TestVideoQuotaFinalizationKeepsEffectiveConsumptionFence(t *testing.T) {
 	}
 }
 
+func TestVideoRequestScopedRateLimitDefersOnlyAfterBoundedQuotaFailover(t *testing.T) {
+	tests := []struct {
+		name          string
+		quotaMode     string
+		quotaFailures int
+		want          bool
+	}{
+		{name: "shared limit without quota mode", quotaFailures: 1, want: true},
+		{name: "first quota account may fail over", quotaMode: account.QuotaModeWebVideo720p, quotaFailures: 1, want: false},
+		{name: "second quota account enters backoff", quotaMode: account.QuotaModeWebVideo720p, quotaFailures: 2, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldDeferRequestScopedVideoRateLimit(test.quotaMode, test.quotaFailures); got != test.want {
+				t.Fatalf("shouldDeferRequestScopedVideoRateLimit(%q, %d) = %v, want %v", test.quotaMode, test.quotaFailures, got, test.want)
+			}
+		})
+	}
+}
+
 func TestGetVideoExposesOnlyReadableResultAsset(t *testing.T) {
 	completed := media.Job{
 		ID: "video_status", ClientKeyID: 7, Status: media.StatusCompleted,
@@ -757,6 +777,7 @@ type videoCreateFailoverAdapter struct {
 	failures      map[uint64]int
 	status        int
 	requestScoped bool
+	quotaMode     string
 	attempts      []uint64
 }
 
@@ -766,6 +787,12 @@ func (a *videoCreateFailoverAdapter) Definition() provider.Definition {
 	definition := testConversationDefinition(account.ProviderWeb)
 	definition.Media.VideoGeneration = true
 	return definition
+}
+
+func (a *videoCreateFailoverAdapter) QuotaMode(string) string { return a.quotaMode }
+
+func (a *videoCreateFailoverAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
 }
 
 func (a *videoCreateFailoverAdapter) GenerateVideo(_ context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
@@ -923,7 +950,7 @@ func TestVideoWebForbiddenRetriesPinnedAccountOnceThenFailsOver(t *testing.T) {
 	}
 }
 
-func TestVideoWebRateLimitDefersBeforeAccountFailover(t *testing.T) {
+func TestVideoWebQuotaRateLimitFailsOverToNextAccount(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "video-rate-limit.db"))
 	if err != nil {
@@ -959,10 +986,21 @@ func TestVideoWebRateLimitDefersBeforeAccountFailover(t *testing.T) {
 	}
 	first := createAccount("rate-first", 200)
 	second := createAccount("rate-second", 100)
+	third := createAccount("rate-third", 50)
+	fourth := createAccount("rate-fourth", 25)
+	now := time.Now().UTC()
+	for _, accountID := range []uint64{first.ID, second.ID, third.ID, fourth.ID} {
+		if err := accountRepo.SaveQuotaWindows(ctx, accountID, account.WebTierSuper, now, []account.QuotaWindow{{
+			AccountID: accountID, Mode: account.QuotaModeWebVideo720p, Remaining: 1, Total: 1,
+			SyncedAt: &now, Source: account.QuotaSourceUpstream,
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderWeb, []string{"grok-imagine-video"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, accountID := range []uint64{first.ID, second.ID} {
+	for _, accountID := range []uint64{first.ID, second.ID, third.ID, fourth.ID} {
 		if err := modelRepo.ReplaceAccountCapabilities(ctx, accountID, []string{"grok-imagine-video"}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
@@ -976,6 +1014,7 @@ func TestVideoWebRateLimitDefersBeforeAccountFailover(t *testing.T) {
 		failures:      map[uint64]int{first.ID: 1},
 		status:        http.StatusTooManyRequests,
 		requestScoped: true,
+		quotaMode:     account.QuotaModeWebVideo,
 	}
 	registry := provider.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
@@ -983,9 +1022,8 @@ func TestVideoWebRateLimitDefersBeforeAccountFailover(t *testing.T) {
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, nil, 3)
 	service.ConfigureMedia(mediaRepo, 1)
-	service.UpdateVideoMaxAttempts(10)
+	service.UpdateVideoMaxAttempts(1)
 
-	now := time.Now().UTC()
 	job := media.Job{
 		ID: "video_rate_limited", RequestID: "request-video-rate-limited", ClientKeyID: key.ID, ClientKeyName: key.Name,
 		AccountID: first.ID, AccountName: first.Name, Provider: string(account.ProviderWeb),
@@ -998,14 +1036,53 @@ func TestVideoWebRateLimitDefersBeforeAccountFailover(t *testing.T) {
 	}
 	service.runVideoJob(ctx, job, route)
 
-	if attempts := adapter.Attempts(); len(attempts) != 1 || attempts[0] != first.ID {
-		t.Fatalf("rate-limited attempts = %#v, want pinned account once", attempts)
+	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != first.ID || attempts[1] != second.ID {
+		t.Fatalf("rate-limited attempts = %#v, want first then second account", attempts)
 	}
 	stored, err := mediaRepo.GetMediaJob(ctx, job.ID, job.ClientKeyID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status != media.StatusInProgress || stored.LeaseUntil == nil || !stored.LeaseUntil.After(time.Now().UTC()) {
-		t.Fatalf("rate-limited job was not deferred = %#v", stored)
+	if stored.Status != media.StatusCompleted || stored.AccountID != second.ID {
+		t.Fatalf("rate-limited job did not fail over = %#v", stored)
+	}
+	windows, err := accountRepo.GetQuotaWindows(ctx, []uint64{first.ID, second.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows[first.ID]) != 1 || windows[first.ID][0].Remaining != 0 {
+		t.Fatalf("first account video quota was not exhausted = %#v", windows[first.ID])
+	}
+
+	adapter.mu.Lock()
+	adapter.failures = map[uint64]int{third.ID: 1, fourth.ID: 1}
+	adapter.attempts = nil
+	adapter.mu.Unlock()
+	deferredJob := job
+	deferredJob.ID = "video_rate_limited_twice"
+	deferredJob.RequestID = "request-video-rate-limited-twice"
+	deferredJob.AccountID = third.ID
+	deferredJob.AccountName = third.Name
+	deferredJob.Status = media.StatusInProgress
+	deferredJob.Progress = 0
+	deferredJob.ResultAssetID = ""
+	deferredJob.ContentType = ""
+	deferredJob.CompletedAt = nil
+	deferredJob.CreatedAt = time.Now().UTC()
+	deferredJob.UpdatedAt = deferredJob.CreatedAt
+	if err := mediaRepo.CreateMediaJob(ctx, deferredJob); err != nil {
+		t.Fatal(err)
+	}
+	service.runVideoJob(ctx, deferredJob, route)
+	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != third.ID || attempts[1] != fourth.ID {
+		t.Fatalf("bounded rate-limit attempts = %#v, want third then fourth account", attempts)
+	}
+	stored, err = mediaRepo.GetMediaJob(ctx, deferredJob.ID, deferredJob.ClientKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferredMetadata := decodeVideoMetadata(stored.MetadataJSON)
+	if stored.Status != media.StatusInProgress || stored.LeaseUntil == nil || len(deferredMetadata.DeferredAttempts) != 2 {
+		t.Fatalf("second rate limit did not defer with audit attempts = %#v metadata=%#v", stored, deferredMetadata)
 	}
 }

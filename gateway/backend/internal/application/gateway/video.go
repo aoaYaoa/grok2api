@@ -763,13 +763,20 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	excluded := make(map[uint64]bool)
 	forbiddenEgressRetried := make(map[uint64]bool)
 	var retryPinnedAccountID uint64
+	requestScopedQuotaFailures := 0
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, "/videos/generations")
+	restoreDeferredVideoAttempts(failureAttempts, metadata.DeferredAttempts)
+	quotaFailoverAllowance := false
 	var selection *selectionSession
 	var lease *accountLease
 	var result provider.VideoResult
 	var lastErr error
 
-	for attempt := 0; attemptPolicy.allows(attempt); attempt++ {
+	for attempt := 0; ; attempt++ {
+		if !attemptPolicy.allows(attempt) && !quotaFailoverAllowance {
+			break
+		}
+		quotaFailoverAllowance = false
 		attemptStarted := time.Now()
 		err = nil
 		if lease != nil {
@@ -863,11 +870,19 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			return
 		}
 		status, hasStatus := provider.ErrorHTTPStatus(err)
-		if hasStatus && status == http.StatusTooManyRequests && provider.IsRequestScopedError(err) {
+		requestScopedRateLimit := hasStatus && status == http.StatusTooManyRequests && provider.IsRequestScopedError(err)
+		if requestScopedRateLimit {
+			requestScopedQuotaFailures++
+			quotaFailoverAllowance = lease.QuotaMode != "" && requestScopedQuotaFailures == 1
+		}
+		if requestScopedRateLimit && shouldDeferRequestScopedVideoRateLimit(lease.QuotaMode, requestScopedQuotaFailures) && lease.QuotaMode == "" {
+			quotaMode := lease.QuotaMode
+			metadata.DeferredAttempts = boundedDeferredVideoAttempts(failureAttempts.snapshot())
+			job.MetadataJSON = encodeVideoJobMetadata(metadata)
 			lease.Release()
 			lease = nil
 			s.deferVideoJobFor(parent, job, videoRateLimitBackoff)
-			s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "upstream_rate_limit", "retry_after", videoRateLimitBackoff)
+			s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "upstream_rate_limit", "quota_mode", quotaMode, "account_failures", requestScopedQuotaFailures, "retry_after", videoRateLimitBackoff)
 			return
 		}
 		failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
@@ -875,7 +890,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		retriableCreate := false
 		stage, hasStage := provider.VideoErrorStage(err)
 		safeCreateFailure := hasStage && stage == provider.VideoStageCreate
-		if provider.IsAccountHealthNeutral(err) || provider.IsRequestScopedError(err) {
+		if provider.IsAccountHealthNeutral(err) || (provider.IsRequestScopedError(err) && !requestScopedRateLimit) {
 			failureHandled = true
 			retriableCreate = false
 		} else if errors.Is(err, provider.ErrUnauthorized) {
@@ -938,8 +953,18 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		s.logVideoGenerationFailure(job, lease.Credential, err)
+		if requestScopedRateLimit && shouldDeferRequestScopedVideoRateLimit(lease.QuotaMode, requestScopedQuotaFailures) {
+			quotaMode := lease.QuotaMode
+			metadata.DeferredAttempts = boundedDeferredVideoAttempts(failureAttempts.snapshot())
+			job.MetadataJSON = encodeVideoJobMetadata(metadata)
+			lease.Release()
+			lease = nil
+			s.deferVideoJobFor(parent, job, videoRateLimitBackoff)
+			s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "upstream_rate_limit", "quota_mode", quotaMode, "account_failures", requestScopedQuotaFailures, "retry_after", videoRateLimitBackoff)
+			return
+		}
 		// Poll/post-processing failures are bound to the already-created upstream job.
-		if provider.IsMediaPostProcessingError(err) || (hasStage && stage == provider.VideoStagePoll) || !retriableCreate || !attemptPolicy.hasNext(attempt) {
+		if provider.IsMediaPostProcessingError(err) || (hasStage && stage == provider.VideoStagePoll) || !retriableCreate || (!attemptPolicy.hasNext(attempt) && !quotaFailoverAllowance) {
 			failureCode, publicErr := "generation_failed", err
 			upstreamStatus := 0
 			if hasStatus {
@@ -975,7 +1000,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if result.AssetID != "" {
 		job.ResultAssetID = result.AssetID
 	}
-	job.MetadataJSON = withVideoPosterURL(encodeVideoJobMetadata(videoMetadataForJob(job)), result.PosterURL)
+	metadata.DeferredAttempts = nil
+	job.MetadataJSON = withVideoPosterURL(encodeVideoJobMetadata(metadata), result.PosterURL)
 	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
 	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
@@ -1002,6 +1028,29 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	// 输入回收放在账号状态、计费和审计收尾之后，存储抖动不得延迟关键终态逻辑。
 	s.releaseVideoInputs(job)
+}
+
+func shouldDeferRequestScopedVideoRateLimit(quotaMode string, quotaFailures int) bool {
+	return strings.TrimSpace(quotaMode) == "" || quotaFailures >= 2
+}
+
+const maxDeferredVideoAttempts = 20
+
+func restoreDeferredVideoAttempts(recorder *failureAttemptRecorder, attempts []audit.Attempt) {
+	if recorder == nil {
+		return
+	}
+	for _, attempt := range boundedDeferredVideoAttempts(attempts) {
+		attempt.ID, attempt.AuditID, attempt.Number = 0, 0, 0
+		recorder.append(attempt)
+	}
+}
+
+func boundedDeferredVideoAttempts(attempts []audit.Attempt) []audit.Attempt {
+	if len(attempts) > maxDeferredVideoAttempts {
+		attempts = attempts[len(attempts)-maxDeferredVideoAttempts:]
+	}
+	return append([]audit.Attempt(nil), attempts...)
 }
 
 func videoQuotaMode(providerValue account.Provider, catalogMode, _ string) string {
@@ -1298,19 +1347,20 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 }
 
 type videoInputMetadata struct {
-	ImageURLs           []string `json:"image_urls"`
-	Preset              string   `json:"preset,omitempty"`
-	DisplayName         string   `json:"display_name,omitempty"`
-	IsExtension         bool     `json:"is_extension,omitempty"`
-	SourceTaskID        string   `json:"source_task_id,omitempty"`
-	ExtendPostID        string   `json:"extend_post_id,omitempty"`
-	ExtensionStartTime  float64  `json:"extension_start_time,omitempty"`
-	OriginalPostID      string   `json:"original_post_id,omitempty"`
-	FileAttachmentID    string   `json:"file_attachment_id,omitempty"`
-	StitchWithExtend    bool     `json:"stitch_with_extend,omitempty"`
-	RetryCount          int      `json:"retry_count,omitempty"`
-	AccountRetryCount   int      `json:"account_retry_count,omitempty"`
-	AttemptedAccountIDs []uint64 `json:"attempted_account_ids,omitempty"`
+	ImageURLs           []string        `json:"image_urls"`
+	Preset              string          `json:"preset,omitempty"`
+	DisplayName         string          `json:"display_name,omitempty"`
+	IsExtension         bool            `json:"is_extension,omitempty"`
+	SourceTaskID        string          `json:"source_task_id,omitempty"`
+	ExtendPostID        string          `json:"extend_post_id,omitempty"`
+	ExtensionStartTime  float64         `json:"extension_start_time,omitempty"`
+	OriginalPostID      string          `json:"original_post_id,omitempty"`
+	FileAttachmentID    string          `json:"file_attachment_id,omitempty"`
+	StitchWithExtend    bool            `json:"stitch_with_extend,omitempty"`
+	RetryCount          int             `json:"retry_count,omitempty"`
+	AccountRetryCount   int             `json:"account_retry_count,omitempty"`
+	AttemptedAccountIDs []uint64        `json:"attempted_account_ids,omitempty"`
+	DeferredAttempts    []audit.Attempt `json:"deferred_attempts,omitempty"`
 }
 
 func videoMetadataFromInput(input VideoInput) videoInputMetadata {
