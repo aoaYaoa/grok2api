@@ -34,6 +34,7 @@ var (
 	statsigActionPattern              = regexp.MustCompile(`createServerReference\)\s*\(\s*["']([a-f0-9]{32,64})["']`)
 	statsigIndexPattern               = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*\[(\d+)\]\s*,\s*16`)
 	statsigLazyModulePattern          = regexp.MustCompile(`\.A\((\d+)\)`)
+	statsigBotoxExportPattern         = regexp.MustCompile(`["']botoxSign["']\s*,\s*0`)
 	statsigChunkPattern               = regexp.MustCompile(`["']((?:/_next/)?static/chunks/[^"']+\.js)["']`)
 	statsigRelativeChunkPattern       = regexp.MustCompile(`["']([^"'/?#]+\.js)["']`)
 	statsigAnonUserPattern            = regexp.MustCompile(`anonUserId\\?"\s*:\s*\\?"([^"\\]+)`)
@@ -379,6 +380,22 @@ func extractStatsigIndexes(script string) []int {
 }
 
 func extractStatsigSignerModuleID(script string) (int, bool) {
+	for _, export := range statsigBotoxExportPattern.FindAllStringIndex(script, -1) {
+		start := export[0] - 2048
+		if start < 0 {
+			start = 0
+		}
+		matches := statsigLazyModulePattern.FindAllStringSubmatchIndex(script[start:export[0]], -1)
+		if len(matches) == 0 {
+			continue
+		}
+		match := matches[len(matches)-1]
+		value, err := strconv.Atoi(script[start+match[2] : start+match[3]])
+		if err == nil && value > 0 {
+			return value, true
+		}
+	}
+
 	marker := strings.Index(script, "x-statsig-id")
 	if marker < 0 {
 		return 0, false

@@ -447,6 +447,16 @@ func TestExtractStatsigActionsAndIndexesFromObfuscatedChunks(t *testing.T) {
 	}
 }
 
+func TestExtractStatsigSignerModuleIDFindsSeparatedBotoxExport(t *testing.T) {
+	script := strings.Repeat("p", 4096) +
+		`e.A(1111111);let load=async()=>(await e.A(4629918)).default();e.s(["botoxSign",0,load],831076);` +
+		strings.Repeat("x", 8192) + `headers.set("x-statsig-id",signature)`
+	moduleID, ok := extractStatsigSignerModuleID(script)
+	if !ok || moduleID != 4629918 {
+		t.Fatalf("moduleID=%d ok=%v", moduleID, ok)
+	}
+}
+
 func TestExtractStatsigChallengeAndAnimationMaterials(t *testing.T) {
 	challenge, err := extractStatsigChallenge(append(append([]byte("0:prefix:o86,"), []byte{1, 2, 3, 4}...), []byte("1:suffix")...))
 	if err != nil || !bytes.Equal(challenge, []byte{1, 2, 3, 4}) {
