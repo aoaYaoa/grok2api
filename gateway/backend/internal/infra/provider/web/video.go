@@ -295,9 +295,6 @@ func (e *videoMissingURLError) MediaJobRetrySafe() bool {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
-	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
-	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
@@ -311,6 +308,30 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if request.IsExtension {
 		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
 	}
+	parentID := ""
+	rawReferences := make([]string, 0, 1+len(request.ReferenceURLs))
+	if imageURL := strings.TrimSpace(request.ImageURL); imageURL != "" {
+		rawReferences = append(rawReferences, imageURL)
+	}
+	for _, rawReference := range request.ReferenceURLs {
+		if value := strings.TrimSpace(rawReference); value != "" {
+			rawReferences = append(rawReferences, value)
+		}
+	}
+	references := make([]uploadedFile, 0, len(rawReferences))
+	for _, rawReference := range rawReferences {
+		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
+		if referenceErr != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(referenceErr), 0, referenceErr)
+		}
+		references = append(references, reference)
+	}
+	if len(references) > 0 {
+		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0].URI, "", "video_reference_media_post")
+		if err != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
+		}
+	}
 	segments := videoSegments(request.Duration)
 	if len(segments) == 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
@@ -321,6 +342,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		resolution = "720p"
 	}
 	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
+	if len(references) > 0 {
+		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
+	}
 	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
@@ -754,6 +778,66 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	return uploaded, nil
 }
 
+func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress.Lease, token, mediaType, mediaURL, prompt, stage string) (string, error) {
+	payload := map[string]any{"mediaType": mediaType}
+	if mediaURL != "" {
+		payload["mediaUrl"] = mediaURL
+	}
+	if prompt != "" {
+		payload["prompt"] = prompt
+	}
+	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/media/post/create", payload, time.Minute)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	return parseMediaPostResponseWithDiagnostics(response, func(upstreamErr *webMediaUpstreamError) {
+		a.logWebMediaUpstreamRejection(stage, response, upstreamErr)
+	})
+}
+
+func parseMediaPostResponse(response *http.Response) (string, error) {
+	return parseMediaPostResponseWithDiagnostics(response, nil)
+}
+
+func parseMediaPostResponseWithDiagnostics(response *http.Response, onUpstreamError func(*webMediaUpstreamError)) (string, error) {
+	const responseLimit = 2 << 20
+	readLimit := responseLimit
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		readLimit = webMediaDiagnosticBodyLimit
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(readLimit)+1))
+	if err != nil {
+		return "", fmt.Errorf("读取媒体 Post 响应: %w", err)
+	}
+	truncated := len(body) > readLimit
+	if truncated {
+		body = body[:readLimit]
+	}
+	if truncated && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		return "", fmt.Errorf("创建媒体 Post 响应超过安全上限")
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		return "", provider.ErrUnauthorized
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		upstreamErr := newWebMediaUpstreamError(response.StatusCode, body, truncated)
+		if onUpstreamError != nil {
+			onUpstreamError(upstreamErr)
+		}
+		return "", upstreamErr
+	}
+	var value struct {
+		Post struct {
+			ID string `json:"id"`
+		} `json:"post"`
+	}
+	if json.Unmarshal(body, &value) != nil || strings.TrimSpace(value.Post.ID) == "" {
+		return "", fmt.Errorf("创建媒体 Post 响应无效")
+	}
+	return strings.TrimSpace(value.Post.ID), nil
+}
+
 func (a *Adapter) loadStoredVideoReference(ctx context.Context, assetID string, maxBytes int64) (provider.ImageInput, error) {
 	reader, ok := a.assets.(provider.ImageAssetReader)
 	if !ok {
@@ -1113,9 +1197,11 @@ func videoCreatePayload(prompt string, args ...any) map[string]any {
 		"modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
 		"enableImageStreaming": true, "sendFinalMetadata": true, "kind": "CONVERSATION_KIND_IMAGINE",
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": modelMap}},
-		"mediaGenInput": map[string]any{"textToVideo": map[string]any{
+	}
+	if len(imageURLs) == 0 {
+		payload["mediaGenInput"] = map[string]any{"textToVideo": map[string]any{
 			"prompt": prompt, "aspectRatio": ratio, "duration": seconds, "resolutionName": resolution,
-		}},
+		}}
 	}
 	if isSingleReference && len(attachments) > 0 {
 		payload["fileAttachments"] = attachments

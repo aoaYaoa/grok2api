@@ -118,6 +118,24 @@ func TestWebChatPricingUsesGrok45(t *testing.T) {
 	}
 }
 
+func TestParseMediaPostResponsePreservesStatusAndPostID(t *testing.T) {
+	postID, err := parseMediaPostResponse(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"post":{"id":"post_1","videos":[{"id":"post_1"}]}}`)),
+	})
+	if err != nil || postID != "post_1" {
+		t.Fatalf("postID=%q err=%v", postID, err)
+	}
+	_, err = parseMediaPostResponse(&http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"challenge"}`)),
+	})
+	var upstreamErr *webMediaUpstreamError
+	if !errors.As(err, &upstreamErr) || upstreamErr.status != http.StatusForbidden {
+		t.Fatalf("forbidden error = %#v", err)
+	}
+}
+
 func TestNormalizeOpenAIInputSeparatesTextAndImages(t *testing.T) {
 	dataURI := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	content, _ := json.Marshal([]any{
@@ -1677,6 +1695,42 @@ func TestTextToVideoPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 		if _, exists := payload[field]; exists {
 			t.Fatalf("legacy field %q leaked into text-to-video payload: %#v", field, payload)
 		}
+	}
+}
+
+func TestVideoCreatePayloadSingleImageUsesAttachmentProtocol(t *testing.T) {
+	payload := videoCreatePayload("让杯子缓慢旋转", "post_1", "16:9", "720p", 6, []uploadedFile{{ID: "file_1", URI: "https://assets.grok.com/image.png"}}, "custom")
+	if payload["modelName"] != "imagine-video-gen" || payload["message"] != "https://assets.grok.com/image.png  让杯子缓慢旋转 --mode=custom" || payload["enableSideBySide"] != false {
+		t.Fatalf("payload = %#v", payload)
+	}
+	attachments, ok := payload["fileAttachments"].([]string)
+	if !ok || !slices.Equal(attachments, []string{"file_1"}) {
+		t.Fatalf("fileAttachments = %#v", payload["fileAttachments"])
+	}
+	if mediaGenInput, exists := payload["mediaGenInput"]; exists {
+		t.Fatalf("image payload must not contain textToVideo mediaGenInput: %#v", mediaGenInput)
+	}
+	config := nestedMap(payload, "responseMetadata", "modelConfigOverride", "modelMap", "videoGenModelConfig")
+	if config["parentPostId"] != "post_1" || config["videoLength"] != 6 || config["resolutionName"] != "720p" || config["isReferenceToVideo"] != nil {
+		t.Fatalf("videoGenModelConfig = %#v", config)
+	}
+}
+
+func TestVideoCreatePayloadMultipleReferencesUsesReferenceProtocol(t *testing.T) {
+	payload := videoCreatePayload("一起运动", "post_1", "16:9", "720p", 6, []uploadedFile{
+		{ID: "file_1", URI: "https://assets.grok.com/a.png"},
+		{ID: "file_2", URI: "https://assets.grok.com/b.png"},
+	}, "custom")
+	if _, exists := payload["mediaGenInput"]; exists {
+		t.Fatalf("reference payload must not contain textToVideo: %#v", payload)
+	}
+	if _, exists := payload["fileAttachments"]; exists {
+		t.Fatalf("multi-reference payload must not use single attachment field: %#v", payload["fileAttachments"])
+	}
+	config := nestedMap(payload, "responseMetadata", "modelConfigOverride", "modelMap", "videoGenModelConfig")
+	references, ok := config["imageReferences"].([]string)
+	if !ok || !slices.Equal(references, []string{"https://assets.grok.com/a.png", "https://assets.grok.com/b.png"}) || config["isReferenceToVideo"] != true {
+		t.Fatalf("videoGenModelConfig = %#v", config)
 	}
 }
 

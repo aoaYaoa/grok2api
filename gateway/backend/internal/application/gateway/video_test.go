@@ -201,16 +201,6 @@ func TestVideoRouteParametersRejectConsoleReferenceLimits(t *testing.T) {
 	if err := validateVideoRouteParameters(account.ProviderBuild, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 8, 15); err != nil {
 		t.Fatalf("Build 1.5 references error = %v", err)
 	}
-	// Web 新协议只有文本生视频抓包证据；不能退回已删除的 media-post 旧链路。
-	if err := validateVideoRouteParameters(account.ProviderWeb, provider.VideoOperationGenerate, "grok-imagine-video", "720p", false, 0, 15); err != nil {
-		t.Fatalf("Web text video error = %v", err)
-	}
-	if err := validateVideoRouteParameters(account.ProviderWeb, provider.VideoOperationGenerate, "grok-imagine-video", "720p", true, 0, 6); !errors.Is(err, ErrVideoOperationUnsupported) {
-		t.Fatalf("Web image video error = %v", err)
-	}
-	if err := validateVideoRouteParameters(account.ProviderWeb, provider.VideoOperationGenerate, "grok-imagine-video", "720p", false, 1, 6); !errors.Is(err, ErrVideoOperationUnsupported) {
-		t.Fatalf("Web reference video error = %v", err)
-	}
 }
 
 func TestRoutesForVideoParametersKeepsCompatibleSameNameProviders(t *testing.T) {
@@ -274,6 +264,24 @@ func TestVideo1080pValidationUsesResolvedUpstreamModel(t *testing.T) {
 	}
 	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "1080p", false, 1, 6); !errors.Is(err, ErrVideoOperationUnsupported) {
 		t.Fatalf("reference 1080p error = %v", err)
+	}
+}
+
+func TestVideoWebImageInputAdmission(t *testing.T) {
+	tests := []struct {
+		name           string
+		hasImage       bool
+		referenceCount int
+	}{
+		{name: "image to video", hasImage: true},
+		{name: "single reference", referenceCount: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateVideoRouteParameters(account.ProviderWeb, provider.VideoOperationGenerate, "grok-imagine-video", "720p", test.hasImage, test.referenceCount, 6); err != nil {
+				t.Fatalf("Web image video admission error = %v", err)
+			}
+		})
 	}
 }
 
