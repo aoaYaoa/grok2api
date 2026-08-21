@@ -24,9 +24,9 @@ import (
 
 const (
 	maxLegacyImageResponseBytes = 64 << 20
-	legacyImageStandardModel = "Console/grok-imagine-image"
-	legacyImageQualityModel  = "Console/grok-imagine-image-quality"
-	legacyImageEditModel     = "Console/grok-imagine-image"
+	legacyImageStandardModel    = "grok-imagine-image"
+	legacyImageQualityModel     = "grok-imagine-image-quality"
+	legacyImageEditModel        = "grok-imagine-image-edit"
 )
 
 func legacyImageModel(pro bool) string {
