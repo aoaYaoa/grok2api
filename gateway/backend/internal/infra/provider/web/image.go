@@ -18,6 +18,7 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
+	"github.com/google/uuid"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -857,16 +858,20 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		images = append(images, image)
 	}
 	assets := make([]string, 0, len(images))
+	assetSources := make(map[string]int, 2)
 	for _, image := range images {
 		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "image_edit_upload")
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
-		if uploaded.MetadataID == "" {
-			return nil, fmt.Errorf("上传图片成功但上游未返回 fileMetadataId")
+		asset, source := imageEditInputAsset(uploaded)
+		if asset == "" {
+			return nil, fmt.Errorf("上传图片成功但上游未返回可用图片资产标识")
 		}
-		assets = append(assets, uploaded.MetadataID)
+		assets = append(assets, asset)
+		assetSources[source]++
 	}
+	a.log().Info("web_image_edit_references_bound", "count", len(assets), "file_uri_uuid", assetSources["file_uri_uuid"], "metadata_id", assetSources["metadata_id"])
 	payload := buildImageEditPayload(request.Prompt, assets, ratio)
 	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine")
 	if err != nil {
@@ -908,6 +913,24 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		result.QuotaUnits = 1
 	}
 	return result, err
+}
+
+func imageEditInputAsset(uploaded uploadedFile) (string, string) {
+	if parsed, err := url.Parse(strings.TrimSpace(uploaded.URI)); err == nil {
+		for _, segment := range strings.Split(parsed.Path, "/") {
+			if len(segment) < 36 {
+				continue
+			}
+			candidate := segment[:36]
+			if _, err := uuid.Parse(candidate); err == nil {
+				return candidate, "file_uri_uuid"
+			}
+		}
+	}
+	if value := strings.TrimSpace(uploaded.MetadataID); value != "" {
+		return value, "metadata_id"
+	}
+	return "", ""
 }
 
 func buildImageEditPayload(prompt string, assets []string, aspectRatio string) map[string]any {

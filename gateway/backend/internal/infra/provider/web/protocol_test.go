@@ -1171,6 +1171,21 @@ func TestDecodeDirectFileUploadResponse(t *testing.T) {
 	}
 }
 
+func TestImageEditInputAssetPrefersUUIDFromFileURI(t *testing.T) {
+	const assetID = "123e4567-e89b-12d3-a456-426614174000"
+	value, source := imageEditInputAsset(uploadedFile{
+		MetadataID: "file-metadata-1",
+		URI:        "https://assets.grok.com/users/test/uploads/" + assetID + "/content",
+	})
+	if value != assetID || source != "file_uri_uuid" {
+		t.Fatalf("value=%q source=%q", value, source)
+	}
+	value, source = imageEditInputAsset(uploadedFile{MetadataID: "file-metadata-2"})
+	if value != "file-metadata-2" || source != "metadata_id" {
+		t.Fatalf("fallback value=%q source=%q", value, source)
+	}
+}
+
 func TestWebMediaStreamErrorRedactsSensitiveValues(t *testing.T) {
 	err := webMediaStreamError(map[string]any{
 		"message": "Bearer sensitive-token from owner@example.com at https://grok.com/private?token=secret",
