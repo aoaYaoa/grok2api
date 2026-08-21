@@ -223,6 +223,57 @@ func TestVideoStartStoresInlineReferencesIndependentlyOfPublicBaseURL(t *testing
 	}
 }
 
+func TestVideoStartUsesExplicitConsoleModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{
+		"provider":"grok_console",
+		"prompt":"move",
+		"video_length":10,
+		"resolution_name":"720p",
+		"source_image_urls":["https://example.com/reference.png"]
+	}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || len(videoGateway.created) != 1 {
+		t.Fatalf("status=%d body=%s jobs=%d", recorder.Code, recorder.Body.String(), len(videoGateway.created))
+	}
+	input := videoGateway.created[0]
+	if input.PublicModel != "Console/grok-imagine-video" || input.Prompt != "move" || input.Duration != 10 || input.Resolution != "720p" || len(input.ReferenceURLs) != 1 {
+		t.Fatalf("input=%#v", input)
+	}
+}
+
+func TestVideoStartRejectsUnknownProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
+	videoGateway := &fakeLegacyVideoGateway{}
+	handler := NewHandler(Options{PublicEnabled: true}, authenticator, videoGateway)
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/video/start", bytes.NewBufferString(`{
+		"provider":"grok_unknown",
+		"prompt":"move"
+	}`))
+	request.Header.Set("Authorization", "Bearer g2-direct-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest || len(videoGateway.created) != 0 {
+		t.Fatalf("status=%d body=%s jobs=%d", recorder.Code, recorder.Body.String(), len(videoGateway.created))
+	}
+}
+
 func TestVideoStartKeepsWebModelForFifteenSecondSingleReferenceGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authenticator := &fakeClientAuthenticator{wantRaw: "g2-direct-key"}
