@@ -19,7 +19,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -71,7 +70,6 @@ type videoTask struct {
 type videoStartRequest struct {
 	Prompt           string          `json:"prompt"`
 	Preset           string          `json:"preset"`
-	Provider         string          `json:"provider"`
 	AspectRatio      string          `json:"aspect_ratio"`
 	VideoLength      int             `json:"video_length"`
 	Resolution       string          `json:"resolution_name"`
@@ -381,16 +379,6 @@ func (h *Handler) videoStart(c *gin.Context) {
 		return
 	}
 	request.Prompt = strings.TrimSpace(request.Prompt)
-	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
-	if request.Provider == "" {
-		request.Provider = "grok_web"
-	}
-	switch request.Provider {
-	case "grok_web", "grok_console":
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"detail": "provider must be grok_web or grok_console"})
-		return
-	}
 	request.Preset = strings.ToLower(strings.TrimSpace(request.Preset))
 	if request.Preset == "" {
 		request.Preset = "normal"
@@ -455,10 +443,6 @@ func (h *Handler) videoStart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "参考图处理失败，请重新选择图片"})
 		return
 	}
-	publicModel := "grok-imagine-video"
-	if request.Provider == "grok_console" {
-		publicModel = "Console/grok-imagine-video"
-	}
 	taskIDs := make([]string, 0, request.Concurrent)
 	for index := 0; index < request.Concurrent; index++ {
 		taskID, err := newTaskID()
@@ -467,7 +451,7 @@ func (h *Handler) videoStart(c *gin.Context) {
 			return
 		}
 		job, err := h.videoGateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
-			RequestID: taskID, ClientKey: clientKey, PublicModel: publicModel, Operation: provider.VideoOperationGenerate,
+			RequestID: taskID, ClientKey: clientKey, PublicModel: "grok-imagine-video",
 			Prompt: request.Prompt, Preset: request.Preset, Duration: request.VideoLength, AspectRatio: request.AspectRatio,
 			Resolution: request.Resolution, ReferenceURLs: references,
 			IsExtension: request.IsVideoExtension, ExtendPostID: request.ExtendPostID,

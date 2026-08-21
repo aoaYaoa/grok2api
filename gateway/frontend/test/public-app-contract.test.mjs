@@ -78,19 +78,6 @@ test("NSFW and video workspaces guard duplicate starts and expose timeline exten
   assert.doesNotMatch(grid, /onPlay=\{\(\) => onActivate/);
 });
 
-test("video workspace routes generation to Console while preserving Web timeline extension", async () => {
-  const video = await readFile(path.join(root, "src/public/pages/video-page.tsx"), "utf8");
-  const videoAPI = await readFile(path.join(root, "src/public/features/video/video-api.ts"), "utf8");
-
-  assert.match(videoAPI, /provider\?: "grok_web" \| "grok_console"/);
-  assert.match(video, /provider: isExtension \? "grok_web" : "grok_console"/);
-  assert.match(video, /Math\.max\(0, 7 - references\.length\)/);
-  assert.match(video, /\.slice\(0, 7\)/);
-  assert.match(video, /references\.length \? \["6", "10"\] : \["6", "10", "15"\]/);
-  assert.match(video, /references\.length.*length === "15".*setLength\("10"\)/s);
-  assert.match(video, /\{references\.length\}\/7/);
-});
-
 test("NSFW local references show a validated preview before task upload", async () => {
   const nsfw = await readFile(path.join(root, "src/public/pages/nsfw-page.tsx"), "utf8");
 
