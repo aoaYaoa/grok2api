@@ -1,17 +1,18 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `909bb8109fcc56b34612066630f5c0bf4e43e517`
+- Commit: `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7`
 - Version: `v3.1.4`
-- Imported: `2026-08-20`
+- Imported: `2026-08-21`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `909bb8109fcc56b34612066630f5c0bf4e43e517`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
 
 - Missing-thinking and empty-stream quality retries with durable account penalties and protocol-safe terminal events.
 - Build refresh-token import and persistence recovery, Grok TUI compaction compatibility, and reasoning-effort audit fields.
 - Shared proxy profiles with bounded automatic assignment, trusted client-IP recording, and account quota/status UI improvements.
+- Current `mediaGenInput` video generation payload, Web text-only routing for image-video requests, bounded request diagnostics, and configurable empty-stream cooldowns.
 
 - Current Imagine `mediaGenInput` editing, browser Clearance reacquisition, Basic media quota routing, and Console video admission limits.
 - Clash subscription parsing, VLESS Reality transport, configurable quality probes, media audit accounting, and soft cooldown for interrupted streams.

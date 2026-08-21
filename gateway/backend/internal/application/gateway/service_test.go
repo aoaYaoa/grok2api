@@ -443,8 +443,8 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("interrupted account health = %#v, err=%v", interruptedAccount, err)
 	}
 	remaining := time.Until(*interruptedAccount.CooldownUntil)
-	if remaining < 23*time.Hour || remaining > 24*time.Hour+time.Minute {
-		t.Fatalf("idle stream cooldown = %s, want about 24h", remaining)
+	if remaining < 14*time.Minute || remaining > 15*time.Minute+time.Minute {
+		t.Fatalf("idle stream cooldown = %s, want about 15m", remaining)
 	}
 }
 
@@ -552,6 +552,15 @@ func TestRoutingAttemptPolicy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPinnedRequestAttemptPolicyAlwaysAllowsOneAttempt(t *testing.T) {
+	for _, configured := range []int{1, 6, unlimitedRoutingAttempts} {
+		policy := newRequestRoutingAttemptPolicy(configured, true)
+		if !policy.allows(0) || policy.allows(1) || policy.hasNext(0) {
+			t.Fatalf("configured=%d pinned policy = %#v", configured, policy)
+		}
 	}
 }
 
@@ -1225,7 +1234,7 @@ func TestUnpricedVoiceRemainsAvailableToFiniteClientKey(t *testing.T) {
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, nil, 1)
 	executed := false
-	result, err := service.executeVoice(ctx, "req-voice-billing", clientkey.Key{ID: 1, BillingLimitUSDTicks: 1}, voiceModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, audit.PricingResult{}, func(account.Provider) bool {
+	result, err := service.executeVoice(ctx, "req-voice-billing", clientkey.Key{ID: 1, BillingLimitUSDTicks: 1}, voiceModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, audit.PricingResult{}, "", "", nil, func(account.Provider) bool {
 		return true
 	}, func(context.Context, account.Provider, account.Credential, string) (voiceExecutionResult, error) {
 		executed = true
@@ -1296,7 +1305,7 @@ func TestVoicePricingSettlesTTSAndRESTSTTUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("TTS pricing unavailable")
 	}
-	ttsResult, err := service.executeVoice(ctx, "req-priced-tts", limitedKey, ttsModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, ttsPricing, func(account.Provider) bool {
+	ttsResult, err := service.executeVoice(ctx, "req-priced-tts", limitedKey, ttsModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, ttsPricing, "", "", nil, func(account.Provider) bool {
 		return true
 	}, func(context.Context, account.Provider, account.Credential, string) (voiceExecutionResult, error) {
 		return voiceExecutionResult{response: jsonVoiceResponse(http.StatusOK, map[string]any{"ok": true}), pricing: ttsPricing}, nil
@@ -1319,7 +1328,7 @@ func TestVoicePricingSettlesTTSAndRESTSTTUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("STT pricing unavailable")
 	}
-	sttResult, err := service.executeVoice(ctx, "req-priced-stt", limitedKey, sttModel, audit.OperationSTT, modeldomain.CapabilitySTT, true, audit.PricingResult{}, func(account.Provider) bool {
+	sttResult, err := service.executeVoice(ctx, "req-priced-stt", limitedKey, sttModel, audit.OperationSTT, modeldomain.CapabilitySTT, true, audit.PricingResult{}, "", "", nil, func(account.Provider) bool {
 		return true
 	}, func(context.Context, account.Provider, account.Credential, string) (voiceExecutionResult, error) {
 		return voiceExecutionResult{response: jsonVoiceResponse(http.StatusOK, map[string]any{"text": "hello"}), pricing: sttPricing}, nil
@@ -1360,7 +1369,7 @@ func TestVoicePricingSettlesTTSAndRESTSTTUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := false
-	_, err = service.executeVoice(ctx, "req-capped-tts", cappedKey, ttsModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, ttsPricing, func(account.Provider) bool {
+	_, err = service.executeVoice(ctx, "req-capped-tts", cappedKey, ttsModel, audit.OperationTTS, modeldomain.CapabilityTTS, true, ttsPricing, "", "", nil, func(account.Provider) bool {
 		return true
 	}, func(context.Context, account.Provider, account.Credential, string) (voiceExecutionResult, error) {
 		executed = true
@@ -4429,16 +4438,20 @@ func TestIsUpstreamStreamFailureIncludesIdleTimeout(t *testing.T) {
 
 func TestStreamFailureHealthPenaltyOnlyLongCoolsTrulyEmptyIdle(t *testing.T) {
 	t.Parallel()
-	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{})
-	if status != http.StatusGatewayTimeout || cooldown != qualityIdleAccountCooldown {
+	status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, 15*time.Minute)
+	if status != http.StatusGatewayTimeout || cooldown != 15*time.Minute {
 		t.Fatalf("empty idle penalty = (%d, %s)", status, cooldown)
+	}
+	status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, 0)
+	if status != http.StatusGatewayTimeout || cooldown != qualityIdleAccountCooldown {
+		t.Fatalf("zero idle cooldown must fall back to default (%d, %s)", status, cooldown)
 	}
 	for _, usage := range []Usage{
 		{OutputObserved: true},
 		{OutputTokens: 1},
 		{ReasoningTokens: 1},
 	} {
-		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage)
+		status, cooldown = streamFailureHealthPenalty("upstream_stream_idle_timeout", usage, 15*time.Minute)
 		if status != 0 || cooldown != 0 {
 			t.Fatalf("non-empty idle usage %#v received long penalty (%d, %s)", usage, status, cooldown)
 		}

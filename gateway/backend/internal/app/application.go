@@ -499,12 +499,13 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 
 func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:         value.Enabled,
-		MaxAttempts:     value.MaxAttempts,
-		HoldTimeout:     value.HoldTimeout.Value(),
-		MinOutputTokens: int64(value.MinOutputTokens),
-		OnExhausted:     value.OnExhausted,
-		AccountCooldown: value.AccountCooldown.Value(),
+		Enabled:             value.Enabled,
+		MaxAttempts:         value.MaxAttempts,
+		HoldTimeout:         value.HoldTimeout.Value(),
+		MinOutputTokens:     int64(value.MinOutputTokens),
+		OnExhausted:         value.OnExhausted,
+		AccountCooldown:     value.AccountCooldown.Value(),
+		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
 	}
 }
 
@@ -596,6 +597,17 @@ func (a *Application) Run(ctx context.Context) error {
 	startBackground("response_ownership_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, responseCleanupInterval, "response_ownership_cleanup", func(runCtx context.Context) error {
 			return a.cleanupExpiredResponses(runCtx, time.Now().UTC())
+		})
+		return nil
+	})
+	startBackground("audit_retention_cleanup", func(taskCtx context.Context) error {
+		a.runPeriodicTask(taskCtx, time.Hour, "audit_retention_cleanup", func(runCtx context.Context) error {
+			retentionDays := a.settings.Get().Config.Audit.RetentionDays
+			if retentionDays == 0 {
+				return nil
+			}
+			_, err := a.audits.PurgeOutdated(runCtx, retentionDays)
+			return err
 		})
 		return nil
 	})

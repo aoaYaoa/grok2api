@@ -358,6 +358,9 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		Method:                    c.Request.Method,
+		Path:                      c.Request.URL.Path,
+		Headers:                   c.Request.Header.Clone(),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -400,6 +403,9 @@ func (h *Handler) createMessage(c *gin.Context) {
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		Method:                    c.Request.Method,
+		Path:                      c.Request.URL.Path,
+		Headers:                   c.Request.Header.Clone(),
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
@@ -414,8 +420,13 @@ func (h *Handler) generateImage(c *gin.Context) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片生成仅支持 application/json")
 		return
 	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
+		return
+	}
 	var request imageGenerationRequest
-	if decodeSingleJSON(c.Request.Body, &request, false) != nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.Prompt) == "" {
+	if decodeSingleJSON(bytes.NewReader(body), &request, false) != nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.Prompt) == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片请求缺少有效 model 或 prompt")
 		return
 	}
@@ -461,6 +472,7 @@ func (h *Handler) generateImage(c *gin.Context) {
 		Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
 		Resolution: request.Resolution, Quality: quality, ResponseFormat: request.ResponseFormat,
 		Streaming: request.Stream, PartialImages: partialImages,
+		Method: c.Request.Method, Path: c.Request.URL.Path, Headers: c.Request.Header.Clone(),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -735,8 +747,13 @@ func (h *Handler) editImage(c *gin.Context) {
 		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片编辑仅支持 application/json")
 		return
 	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
+		return
+	}
 	var request imageEditJSONRequest
-	if err := decodeSingleJSON(c.Request.Body, &request, false); err != nil {
+	if err := decodeSingleJSON(bytes.NewReader(body), &request, false); err != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片编辑 JSON 请求无效")
 		return
 	}
@@ -824,6 +841,7 @@ func (h *Handler) editImage(c *gin.Context) {
 		ImageURLs: imageURLs, Count: count, Size: size, AspectRatio: aspectRatio,
 		Resolution: resolution, Quality: quality, ResponseFormat: request.ResponseFormat,
 		Streaming: request.Stream, PartialImages: partialImages,
+		Method: c.Request.Method, Path: c.Request.URL.Path, Headers: c.Request.Header.Clone(),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -1303,6 +1321,9 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		Method:                    c.Request.Method,
+		Path:                      c.Request.URL.Path,
+		Headers:                   c.Request.Header.Clone(),
 	}
 	var result *gateway.Result
 	if compact {
@@ -1314,7 +1335,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream && !compact, streamProtocolResponses)
+	h.writeResponsesResult(c, result, request.Stream && !compact, request.Model)
 }
 
 func isJSONRequest(c *gin.Context) bool {
@@ -1374,14 +1395,18 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 }
 
 func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool, protocol streamProtocol) {
-	h.writeProtocolResult(c, result, stream, false, protocol)
+	h.writeProtocolResult(c, result, stream, false, protocol, "")
+}
+
+func (h *Handler) writeResponsesResult(c *gin.Context, result *gateway.Result, stream bool, fallbackModel string) {
+	h.writeProtocolResult(c, result, stream, false, streamProtocolResponses, fallbackModel)
 }
 
 func (h *Handler) writeAnthropicResult(c *gin.Context, result *gateway.Result, stream bool) {
-	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic)
+	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic, "")
 }
 
-func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol) {
+func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol, fallbackModel string) {
 	usage := gateway.Usage{}
 	responseID := ""
 	errorCode := ""
@@ -1413,7 +1438,7 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	}
 	var err error
 	if stream {
-		metadata, copyErr := copyStream(c.Writer, result.Body, protocol, result.MarkFirstToken)
+		metadata, copyErr := copyStreamWithFallbackModel(c.Writer, result.Body, protocol, result.MarkFirstToken, fallbackModel)
 		usage, responseID, err = metadata.Usage, metadata.ResponseID, copyErr
 		if metadata.StreamFailure != nil && result.RecordStreamFailure != nil {
 			result.RecordStreamFailure(*metadata.StreamFailure)
@@ -1450,9 +1475,14 @@ type responseMetadata struct {
 }
 
 func copyStream(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func()) (responseMetadata, error) {
+	return copyStreamWithFallbackModel(writer, source, protocol, onFirstToken, "")
+}
+
+func copyStreamWithFallbackModel(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol, onFirstToken func(), fallbackModel string) (responseMetadata, error) {
 	inspector := &responseInspector{protocol: protocol, onFirstToken: onFirstToken}
-	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat}
+	markerFilter := internalSSEMarkerFilter{enabled: protocol == streamProtocolChat || protocol == streamProtocolAnthropic}
 	var compat responsesCompatState
+	compat.model = strings.TrimSpace(fallbackModel)
 	buffer := make([]byte, responseCopyBufferBytes)
 	received := 0
 	transferred := 0
@@ -1581,21 +1611,29 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 		}
 		compat.rememberFromMeta(meta)
 		id := compat.ensureID()
-		response := map[string]any{
-			"id":                 id,
-			"object":             "response",
-			"created_at":         compat.createdAt,
-			"completed_at":       compat.createdAt,
-			"status":             "incomplete",
-			"output":             []any{},
-			"error":              nil,
-			"incomplete_details": map[string]any{"reason": code},
+		// Grok TUI 0.2.93 treats any response.incomplete as fatal
+		// max_tokens_truncation (not retryable), ignoring incomplete_details.reason.
+		// Stream aborts are transport failures — emit response.failed so the
+		// client can retry instead of killing the turn.
+		model := strings.TrimSpace(meta.Model)
+		if model == "" {
+			model = strings.TrimSpace(compat.model)
 		}
-		if model := strings.TrimSpace(meta.Model); model != "" {
-			response["model"] = model
+		response := map[string]any{
+			"id":           id,
+			"object":       "response",
+			"created_at":   compat.createdAt,
+			"completed_at": compat.createdAt,
+			"status":       "failed",
+			"model":        model,
+			"output":       []any{},
+			"error": map[string]any{
+				"code":    "server_error",
+				"message": code + ": " + message,
+			},
 		}
 		event := map[string]any{
-			"type":            "response.incomplete",
+			"type":            "response.failed",
 			"id":              id,
 			"sequence_number": meta.SequenceNumber + 1,
 			"response":        response,
@@ -1605,7 +1643,7 @@ func streamAbortTrailer(protocol streamProtocol, cause error, meta responseMetad
 		if err != nil {
 			return nil
 		}
-		return []byte("event: response.incomplete\ndata: " + string(payload) + "\n\n")
+		return []byte("event: response.failed\ndata: " + string(payload) + "\n\n")
 	case streamProtocolAnthropic:
 		payload, err := json.Marshal(map[string]any{
 			"type":  "error",
@@ -1629,13 +1667,13 @@ func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
 	if !f.enabled {
 		return chunk
 	}
-	marker := []byte(reasoningStartSSEComment + "\n\n")
 	f.pending = append(f.pending, chunk...)
 	result := make([]byte, 0, len(f.pending))
 	for {
-		if index := bytes.Index(f.pending, marker); index >= 0 {
+		index, markerLength := nextInternalSSEMarker(f.pending)
+		if index >= 0 {
 			result = append(result, f.pending[:index]...)
-			f.pending = f.pending[index+len(marker):]
+			f.pending = f.pending[index+markerLength:]
 			continue
 		}
 		if final {
@@ -1644,17 +1682,32 @@ func (f *internalSSEMarkerFilter) Filter(chunk []byte, final bool) []byte {
 			return result
 		}
 		keep := 0
-		limit := min(len(f.pending), len(marker)-1)
-		for size := limit; size > 0; size-- {
-			if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
-				keep = size
-				break
+		for _, marker := range internalSSEMarkers {
+			limit := min(len(f.pending), len(marker)-1)
+			for size := limit; size > keep; size-- {
+				if bytes.Equal(f.pending[len(f.pending)-size:], marker[:size]) {
+					keep = size
+					break
+				}
 			}
 		}
 		result = append(result, f.pending[:len(f.pending)-keep]...)
 		f.pending = f.pending[len(f.pending)-keep:]
 		return result
 	}
+}
+
+func nextInternalSSEMarker(value []byte) (int, int) {
+	index := -1
+	length := 0
+	for _, marker := range internalSSEMarkers {
+		candidate := bytes.Index(value, marker)
+		if candidate >= 0 && (index < 0 || candidate < index) {
+			index = candidate
+			length = len(marker)
+		}
+	}
+	return index, length
 }
 
 func copyJSON(writer gin.ResponseWriter, source io.Reader, protocol streamProtocol) (responseMetadata, error) {
@@ -1708,7 +1761,15 @@ type responseInspector struct {
 	terminalFailure bool
 }
 
-const reasoningStartSSEComment = ": grok2api-reasoning-start"
+const (
+	reasoningStartSSEComment    = ": grok2api-reasoning-start"
+	reasoningEvidenceSSEComment = ": grok2api-reasoning-evidence"
+)
+
+var internalSSEMarkers = [][]byte{
+	[]byte(reasoningStartSSEComment + "\n\n"),
+	[]byte(reasoningEvidenceSSEComment + "\n\n"),
+}
 
 func (i *responseInspector) Inspect(chunk []byte) {
 	i.pending = append(i.pending, chunk...)
@@ -1764,6 +1825,10 @@ func (i *responseInspector) Inspect(chunk []byte) {
 			}
 		}
 	}
+}
+
+func (i *responseInspector) Metadata() responseMetadata {
+	return normalizeMetadataUsage(i.metadata, i.protocol)
 }
 
 func (i *responseInspector) observeReasoningStart() {
@@ -1880,10 +1945,6 @@ func containsGeneratedDelta(data []byte, protocol streamProtocol) bool {
 		}
 	}
 	return false
-}
-
-func (i *responseInspector) Metadata() responseMetadata {
-	return normalizeMetadataUsage(i.metadata, i.protocol)
 }
 
 func normalizeMetadataUsage(metadata responseMetadata, protocol streamProtocol) responseMetadata {

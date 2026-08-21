@@ -232,7 +232,7 @@ qualityGuard:
 		t.Fatalf("qualityGuard = %#v", value.QualityGuard)
 	}
 	retry := value.QualityGuard.RequestRetry
-	if retry.Enabled || retry.MaxAttempts != 6 || retry.HoldTimeout.Value() != 3*time.Second || retry.MinOutputTokens != 32 || retry.OnExhausted != "fail_closed" || retry.AccountCooldown.Value() != 24*time.Hour {
+	if retry.Enabled || retry.MaxAttempts != 6 || retry.HoldTimeout.Value() != 30*time.Second || retry.MinOutputTokens != 8 || retry.OnExhausted != "fail_closed" || retry.AccountCooldown.Value() != 12*time.Hour {
 		t.Fatalf("loaded requestRetry defaults = %#v", retry)
 	}
 }
@@ -240,7 +240,7 @@ qualityGuard:
 func TestDefaultQualityGuardRequestRetryContract(t *testing.T) {
 	t.Parallel()
 	got := defaultConfig().QualityGuard.RequestRetry
-	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 3*time.Second || got.MinOutputTokens != 32 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 24*time.Hour {
+	if got.Enabled || got.MaxAttempts != 6 || got.HoldTimeout.Value() != 30*time.Second || got.MinOutputTokens != 8 || got.OnExhausted != "fail_closed" || got.AccountCooldown.Value() != 12*time.Hour || got.IdleAccountCooldown.Value() != 15*time.Minute {
 		t.Fatalf("requestRetry defaults = %#v", got)
 	}
 }
@@ -264,6 +264,12 @@ func TestQualityGuardRequestRetryAccountCooldownBounds(t *testing.T) {
 			})
 			if (err != nil) != test.wantErr {
 				t.Fatalf("validate cooldown %s: err=%v, wantErr=%t", test.value, err, test.wantErr)
+			}
+			err = validateQualityGuardRequestRetry(QualityGuardRequestRetryConfig{
+				Enabled: true, IdleAccountCooldown: Duration(test.value),
+			})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validate idle cooldown %s: err=%v, wantErr=%t", test.value, err, test.wantErr)
 			}
 		})
 	}
@@ -423,6 +429,27 @@ func TestRoutingMaxAttemptsSupportsLargeCredentialPools(t *testing.T) {
 	cfg.Routing.MaxAttempts = -2
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("values below unlimited sentinel should be rejected")
+	}
+}
+
+func TestValidateAuditRetentionDaysRange(t *testing.T) {
+	for _, days := range []int{-1, 366} {
+		cfg := defaultConfig()
+		cfg.Secrets.JWTSecret = "12345678901234567890123456789012"
+		cfg.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		cfg.Audit.RetentionDays = days
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("audit retentionDays %d should be rejected", days)
+		}
+	}
+	for _, days := range []int{0, 7, 365} {
+		cfg := defaultConfig()
+		cfg.Secrets.JWTSecret = "12345678901234567890123456789012"
+		cfg.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		cfg.Audit.RetentionDays = days
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("audit retentionDays %d should be valid: %v", days, err)
+		}
 	}
 }
 

@@ -100,24 +100,6 @@ func TestWebImagePublicNamesMatchProtocolProducts(t *testing.T) {
 	}
 }
 
-func TestParseMediaPostResponsePreservesStatusAndPostID(t *testing.T) {
-	postID, err := parseMediaPostResponse(&http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{"post":{"id":"post_1","videos":[{"id":"post_1"}]}}`)),
-	})
-	if err != nil || postID != "post_1" {
-		t.Fatalf("postID=%q err=%v", postID, err)
-	}
-	_, err = parseMediaPostResponse(&http.Response{
-		StatusCode: http.StatusForbidden,
-		Body:       io.NopCloser(strings.NewReader(`{"error":"challenge"}`)),
-	})
-	var upstreamErr *webMediaUpstreamError
-	if !errors.As(err, &upstreamErr) || upstreamErr.status != http.StatusForbidden || !strings.Contains(err.Error(), "challenge") {
-		t.Fatalf("error = %#v", err)
-	}
-}
-
 func TestWebChatPricingUsesGrok45(t *testing.T) {
 	registry := provider.NewRegistry(&Adapter{})
 	for _, upstreamModel := range []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy"} {
@@ -1142,7 +1124,6 @@ func TestVideoReferenceUsesV2DirectUpload(t *testing.T) {
 		t.Fatalf("uri = %q", uri.URI)
 	}
 }
-
 func TestDecodeDirectFileUploadResponse(t *testing.T) {
 	uploaded, err := decodeDirectFileUploadResponse(strings.NewReader(`{
 		"uploadId":"upload-1",
@@ -1657,6 +1638,48 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 }
 
+func TestTextToVideoPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
+	payload := videoCreatePayload("雨后天晴！", "9:16", "480p", 6)
+	if len(payload) != 8 || payload["modelName"] != "imagine-video-gen" ||
+		payload["message"] != "雨后天晴！ --mode=custom" ||
+		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true ||
+		payload["sendFinalMetadata"] != true || payload["kind"] != "CONVERSATION_KIND_IMAGINE" {
+		t.Fatalf("payload = %#v", payload)
+	}
+
+	metadata, ok := payload["responseMetadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("responseMetadata = %#v", payload["responseMetadata"])
+	}
+	if experiments, ok := metadata["experiments"].([]any); !ok || len(experiments) != 0 {
+		t.Fatalf("experiments = %#v", metadata["experiments"])
+	}
+	override, ok := metadata["modelConfigOverride"].(map[string]any)
+	if !ok {
+		t.Fatalf("modelConfigOverride = %#v", metadata["modelConfigOverride"])
+	}
+	modelMap, ok := override["modelMap"].(map[string]any)
+	if !ok || len(modelMap) != 0 {
+		t.Fatalf("modelMap = %#v", override["modelMap"])
+	}
+
+	mediaGenInput, ok := payload["mediaGenInput"].(map[string]any)
+	if !ok {
+		t.Fatalf("mediaGenInput = %#v", payload["mediaGenInput"])
+	}
+	textToVideo, ok := mediaGenInput["textToVideo"].(map[string]any)
+	if !ok || textToVideo["prompt"] != "雨后天晴！" || textToVideo["aspectRatio"] != "9:16" ||
+		textToVideo["duration"] != 6 || textToVideo["resolutionName"] != "480p" {
+		t.Fatalf("textToVideo = %#v", mediaGenInput["textToVideo"])
+	}
+
+	for _, field := range []string{"temporary", "videoGenModelConfig", "parentPostId"} {
+		if _, exists := payload[field]; exists {
+			t.Fatalf("legacy field %q leaked into text-to-video payload: %#v", field, payload)
+		}
+	}
+}
+
 func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader("limited"))}
 	_, _, err := parseVideoStream(response, nil)
@@ -1672,8 +1695,17 @@ func TestGenerateVideoClassifiesOnlyExplicitHTTPRejectionAsCreateFailure(t *test
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/rest/media/post/create":
-			_, _ = io.WriteString(writer, `{"post":{"id":"post_1"}}`)
+			t.Error("text-to-video unexpectedly used the retired media-post endpoint")
+			writer.WriteHeader(http.StatusInternalServerError)
 		case "/rest/app-chat/conversations/new":
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Errorf("decode video payload: %v", err)
+			}
+			mediaGenInput, _ := payload["mediaGenInput"].(map[string]any)
+			if _, ok := mediaGenInput["textToVideo"].(map[string]any); !ok {
+				t.Errorf("textToVideo payload = %#v", payload)
+			}
 			writer.WriteHeader(status)
 			if status == http.StatusOK {
 				_, _ = io.WriteString(writer, `{}`)

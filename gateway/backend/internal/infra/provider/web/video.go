@@ -295,6 +295,9 @@ func (e *videoMissingURLError) MediaJobRetrySafe() bool {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
+	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
@@ -308,32 +311,6 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if request.IsExtension {
 		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
 	}
-	parentID := ""
-	rawReferences := make([]string, 0, 1+len(request.ReferenceURLs))
-	if imageURL := strings.TrimSpace(request.ImageURL); imageURL != "" {
-		rawReferences = append(rawReferences, imageURL)
-	}
-	for _, rawReference := range request.ReferenceURLs {
-		if value := strings.TrimSpace(rawReference); value != "" {
-			rawReferences = append(rawReferences, value)
-		}
-	}
-	references := make([]uploadedFile, 0, len(rawReferences))
-	for _, rawReference := range rawReferences {
-		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
-		if referenceErr != nil {
-			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(referenceErr), 0, referenceErr)
-		}
-		references = append(references, reference)
-	}
-	if len(references) > 0 {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0].URI, "", "video_reference_media_post")
-	} else {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt, "video_prompt_media_post")
-	}
-	if err != nil {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
-	}
 	segments := videoSegments(request.Duration)
 	if len(segments) == 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
@@ -343,7 +320,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
+	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
 	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
@@ -1079,7 +1056,22 @@ func videoSegments(seconds int) []int {
 	return []int{seconds}
 }
 
-func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []uploadedFile, preset string) map[string]any {
+func videoCreatePayload(prompt string, args ...any) map[string]any {
+	var parentID, ratio, resolution, preset string
+	var seconds int
+	var references []uploadedFile
+	if len(args) == 3 {
+		ratio, _ = args[0].(string)
+		resolution, _ = args[1].(string)
+		seconds, _ = args[2].(int)
+	} else if len(args) >= 6 {
+		parentID, _ = args[0].(string)
+		ratio, _ = args[1].(string)
+		resolution, _ = args[2].(string)
+		seconds, _ = args[3].(int)
+		references, _ = args[4].([]uploadedFile)
+		preset, _ = args[5].(string)
+	}
 	config := map[string]any{
 		"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution,
 	}
@@ -1113,9 +1105,17 @@ func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int,
 			message = strings.Join(imageURLs, " ") + "  " + prompt + " " + modeFlag
 		}
 	}
+	modelMap := map[string]any{}
+	if len(imageURLs) > 0 {
+		modelMap["videoGenModelConfig"] = config
+	}
 	payload := map[string]any{
-		"temporary": true, "modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
-		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
+		"modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
+		"enableImageStreaming": true, "sendFinalMetadata": true, "kind": "CONVERSATION_KIND_IMAGINE",
+		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": modelMap}},
+		"mediaGenInput": map[string]any{"textToVideo": map[string]any{
+			"prompt": prompt, "aspectRatio": ratio, "duration": seconds, "resolutionName": resolution,
+		}},
 	}
 	if isSingleReference && len(attachments) > 0 {
 		payload["fileAttachments"] = attachments
