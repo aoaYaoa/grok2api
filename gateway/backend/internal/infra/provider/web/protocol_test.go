@@ -880,14 +880,19 @@ func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("imageToImage = %#v", mediaGenInput["imageToImage"])
 	}
+	metadata, ok := payload["responseMetadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("responseMetadata = %#v", payload["responseMetadata"])
+	}
+	modelMap := nestedMap(metadata, "modelConfigOverride", "modelMap")
 	if len(payload) != 6 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
-		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true {
+		payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true || modelMap["imageEditModel"] != "imagine" {
 		t.Fatalf("payload = %#v", payload)
 	}
 	if imageToImage["prompt"] != "改成兔子" || imageToImage["aspectRatio"] != "1:1" || !slices.Equal(imageToImage["inputAssets"].([]string), assets) {
 		t.Fatalf("imageToImage = %#v", imageToImage)
 	}
-	for _, field := range []string{"temporary", "enableImageGeneration", "imageGenerationCount", "config", "responseMetadata", "kind", "parentPostId"} {
+	for _, field := range []string{"temporary", "enableImageGeneration", "enableImageStreaming", "imageGenerationCount", "config", "kind", "parentPostId"} {
 		if _, exists := payload[field]; exists {
 			t.Fatalf("legacy field %q leaked into payload: %#v", field, payload)
 		}
