@@ -36,8 +36,7 @@ type uploadedFile struct {
 	// responses only contain fileId or uploadId, which remain valid for chat
 	// attachment flows that already accept those references.
 	ID string
-	// MetadataID is populated only from fileMetadata.fileMetadataId and remains
-	// the fallback when an upload response has no asset UUID in fileUri.
+	// MetadataID is populated only from fileMetadata.fileMetadataId.
 	MetadataID string
 	URI        string
 }

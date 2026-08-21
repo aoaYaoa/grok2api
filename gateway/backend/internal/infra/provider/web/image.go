@@ -18,7 +18,6 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
-	"github.com/google/uuid"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -857,23 +856,28 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		}
 		images = append(images, image)
 	}
-	assets := make([]string, 0, len(images))
-	assetSources := make(map[string]int, 2)
+	references := make([]string, 0, len(images))
+	parentID := ""
 	for _, image := range images {
 		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "image_edit_upload")
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
-		asset, source := imageEditInputAsset(uploaded)
-		if asset == "" {
-			return nil, fmt.Errorf("上传图片成功但上游未返回可用图片资产标识")
+		if uploaded.URI == "" {
+			return nil, fmt.Errorf("上传图片成功但上游未返回 fileUri")
 		}
-		assets = append(assets, asset)
-		assetSources[source]++
+		references = append(references, uploaded.URI)
+		postID, postErr := a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", uploaded.URI, "", "image_edit_media_post")
+		if postErr != nil {
+			return nil, postErr
+		}
+		if parentID == "" {
+			parentID = postID
+		}
 	}
-	a.log().Info("web_image_edit_references_bound", "count", len(assets), "file_uri_uuid", assetSources["file_uri_uuid"], "metadata_id", assetSources["metadata_id"])
-	payload := buildImageEditPayload(request.Prompt, assets, ratio)
-	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine")
+	a.log().Info("web_image_edit_references_bound", "count", len(references), "protocol", "media_post", "parent_post", parentID != "")
+	payload := buildImageEditPayload(request.Prompt, references, parentID, ratio)
+	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.ImageTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine/post/"+parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -915,43 +919,20 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 	return result, err
 }
 
-func imageEditInputAsset(uploaded uploadedFile) (string, string) {
-	if parsed, err := url.Parse(strings.TrimSpace(uploaded.URI)); err == nil {
-		assetID := ""
-		for _, segment := range strings.Split(parsed.Path, "/") {
-			if len(segment) < 36 {
-				continue
-			}
-			candidate := segment[:36]
-			if _, err := uuid.Parse(candidate); err == nil {
-				assetID = candidate
-			}
-		}
-		if assetID != "" {
-			return assetID, "file_uri_uuid"
-		}
-	}
-	if value := strings.TrimSpace(uploaded.MetadataID); value != "" {
-		return value, "metadata_id"
-	}
-	return "", ""
-}
-
-func buildImageEditPayload(prompt string, assets []string, aspectRatio string) map[string]any {
-	imageToImage := map[string]any{
-		"prompt":      prompt,
-		"inputAssets": assets,
-	}
+func buildImageEditPayload(prompt string, references []string, parentID, aspectRatio string) map[string]any {
+	config := map[string]any{"imageReferences": references, "parentPostId": parentID}
 	if aspectRatio != "" {
-		imageToImage["aspectRatio"] = aspectRatio
+		config["aspectRatio"] = aspectRatio
 	}
 	return map[string]any{
-		"modelName": "imagine-image-edit", "message": prompt,
-		"enableSideBySide": true, "sendFinalMetadata": true,
+		"temporary": true, "modelName": "imagine-image-edit", "message": prompt,
+		"enableImageGeneration": true, "returnImageBytes": false, "returnRawGrokInXaiRequest": false,
+		"enableImageStreaming": true, "imageGenerationCount": 2, "forceConcise": false,
+		"enableSideBySide": true, "sendFinalMetadata": true, "isReasoning": false,
+		"disableTextFollowUps": true, "disableMemory": false, "forceSideBySide": false,
 		"responseMetadata": map[string]any{"modelConfigOverride": map[string]any{"modelMap": map[string]any{
-			"imageEditModel": "imagine",
+			"imageEditModel": "imagine", "imageEditModelConfig": config,
 		}}},
-		"mediaGenInput": map[string]any{"imageToImage": imageToImage},
 	}
 }
 

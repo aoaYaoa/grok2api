@@ -869,39 +869,38 @@ func TestImageEditRejectsUnsupportedCountAndStreamingOptions(t *testing.T) {
 	}
 }
 
-func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
-	assets := []string{"metadata-1", "metadata-2"}
-	payload := buildImageEditPayload("改成兔子", assets, "1:1")
-	mediaGenInput, ok := payload["mediaGenInput"].(map[string]any)
-	if !ok {
-		t.Fatalf("mediaGenInput = %#v", payload["mediaGenInput"])
-	}
-	imageToImage, ok := mediaGenInput["imageToImage"].(map[string]any)
-	if !ok {
-		t.Fatalf("imageToImage = %#v", mediaGenInput["imageToImage"])
-	}
+func TestBuildImageEditPayloadPreservesMediaPostReference(t *testing.T) {
+	references := []string{"https://assets.grok.com/users/test/reference/content"}
+	payload := buildImageEditPayload("改成兔子", references, "post-1", "1:1")
 	metadata, ok := payload["responseMetadata"].(map[string]any)
 	if !ok {
 		t.Fatalf("responseMetadata = %#v", payload["responseMetadata"])
 	}
 	modelMap := nestedMap(metadata, "modelConfigOverride", "modelMap")
-	if len(payload) != 6 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
-		payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true || modelMap["imageEditModel"] != "imagine" {
+	config, ok := modelMap["imageEditModelConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("imageEditModelConfig = %#v", modelMap["imageEditModelConfig"])
+	}
+	if payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
+		payload["temporary"] != true || payload["enableImageGeneration"] != true ||
+		payload["enableImageStreaming"] != true || payload["imageGenerationCount"] != 2 ||
+		payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true ||
+		modelMap["imageEditModel"] != "imagine" {
 		t.Fatalf("payload = %#v", payload)
 	}
-	if imageToImage["prompt"] != "改成兔子" || imageToImage["aspectRatio"] != "1:1" || !slices.Equal(imageToImage["inputAssets"].([]string), assets) {
-		t.Fatalf("imageToImage = %#v", imageToImage)
+	if config["parentPostId"] != "post-1" || config["aspectRatio"] != "1:1" ||
+		!slices.Equal(config["imageReferences"].([]string), references) {
+		t.Fatalf("imageEditModelConfig = %#v", config)
 	}
-	for _, field := range []string{"temporary", "enableImageGeneration", "enableImageStreaming", "imageGenerationCount", "config", "kind", "parentPostId"} {
+	for _, field := range []string{"mediaGenInput", "config", "kind", "parentPostId"} {
 		if _, exists := payload[field]; exists {
-			t.Fatalf("legacy field %q leaked into payload: %#v", field, payload)
+			t.Fatalf("unexpected field %q leaked into payload: %#v", field, payload)
 		}
 	}
-	withoutRatio := buildImageEditPayload("edit", []string{"metadata-1"}, "")
-	mediaGenInput = withoutRatio["mediaGenInput"].(map[string]any)
-	imageToImage = mediaGenInput["imageToImage"].(map[string]any)
-	if _, exists := imageToImage["aspectRatio"]; exists {
-		t.Fatalf("empty aspect ratio leaked into payload: %#v", imageToImage)
+	withoutRatio := buildImageEditPayload("edit", references, "post-1", "")
+	config = nestedMap(withoutRatio, "responseMetadata", "modelConfigOverride", "modelMap")["imageEditModelConfig"].(map[string]any)
+	if _, exists := config["aspectRatio"]; exists {
+		t.Fatalf("empty aspect ratio leaked into payload: %#v", config)
 	}
 }
 
@@ -1168,22 +1167,6 @@ func TestDecodeDirectFileUploadResponse(t *testing.T) {
 	}
 	if _, err := decodeDirectFileUploadResponse(strings.NewReader(`{"fileMetadata":{}}`)); err == nil {
 		t.Fatal("response without any file identifier was accepted")
-	}
-}
-
-func TestImageEditInputAssetPrefersUUIDFromFileURI(t *testing.T) {
-	const userID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-	const assetID = "123e4567-e89b-12d3-a456-426614174000"
-	value, source := imageEditInputAsset(uploadedFile{
-		MetadataID: "file-metadata-1",
-		URI:        "https://assets.grok.com/users/" + userID + "/uploads/" + assetID + "/content",
-	})
-	if value != assetID || source != "file_uri_uuid" {
-		t.Fatalf("value=%q source=%q", value, source)
-	}
-	value, source = imageEditInputAsset(uploadedFile{MetadataID: "file-metadata-2"})
-	if value != "file-metadata-2" || source != "metadata_id" {
-		t.Fatalf("fallback value=%q source=%q", value, source)
 	}
 }
 

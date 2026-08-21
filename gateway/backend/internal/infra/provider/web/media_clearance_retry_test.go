@@ -294,6 +294,7 @@ func TestImageEditReplaysWholeFlowWithRefreshedClearance(t *testing.T) {
 		t.Run(challengeStage, func(t *testing.T) {
 			var solverCalls atomic.Int32
 			var uploadCalls atomic.Int32
+			var mediaPostCalls atomic.Int32
 			var generationCalls atomic.Int32
 			server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
 				switch request.URL.Path {
@@ -309,6 +310,19 @@ func TestImageEditReplaysWholeFlowWithRefreshedClearance(t *testing.T) {
 					}
 					writer.Header().Set("Content-Type", "application/json")
 					_, _ = writer.Write([]byte(`{"uploadId":"upload-1","fileMetadata":{"fileMetadataId":"file-1","fileUri":"users/test/reference/content"}}`))
+					return
+				case "/rest/media/post/create":
+					mediaPostCalls.Add(1)
+					assertTestClearanceCookie(t, request, solverCalls.Load())
+					var payload map[string]any
+					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+						t.Fatalf("decode media post payload: %v", err)
+					}
+					if payload["mediaType"] != "MEDIA_POST_TYPE_IMAGE" || payload["mediaUrl"] != "https://assets.grok.com/users/test/reference/content" {
+						t.Errorf("media post payload = %#v", payload)
+					}
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = writer.Write([]byte(`{"post":{"id":"post-1"}}`))
 					return
 				case "/rest/app-chat/conversations/new":
 					call := generationCalls.Add(1)
@@ -349,9 +363,9 @@ func TestImageEditReplaysWholeFlowWithRefreshedClearance(t *testing.T) {
 			if challengeStage == "generation" {
 				wantGeneration = 2
 			}
-			if solverCalls.Load() != 2 || uploadCalls.Load() != 2 || generationCalls.Load() != wantGeneration {
-				t.Fatalf("solver/upload/generation=%d/%d/%d, want 2/2/%d",
-					solverCalls.Load(), uploadCalls.Load(), generationCalls.Load(), wantGeneration)
+			if solverCalls.Load() != 2 || uploadCalls.Load() != 2 || mediaPostCalls.Load() != wantGeneration || generationCalls.Load() != wantGeneration {
+				t.Fatalf("solver/upload/media-post/generation=%d/%d/%d/%d, want 2/2/%d/%d",
+					solverCalls.Load(), uploadCalls.Load(), mediaPostCalls.Load(), generationCalls.Load(), wantGeneration, wantGeneration)
 			}
 		})
 	}
@@ -362,6 +376,7 @@ func TestImageEditStructuredForbiddenDoesNotRetryOrRefresh(t *testing.T) {
 		t.Run(rejectedStage, func(t *testing.T) {
 			var solverCalls atomic.Int32
 			var uploadCalls atomic.Int32
+			var mediaPostCalls atomic.Int32
 			var generationCalls atomic.Int32
 			server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
 				switch request.URL.Path {
@@ -376,6 +391,11 @@ func TestImageEditStructuredForbiddenDoesNotRetryOrRefresh(t *testing.T) {
 					}
 					writer.Header().Set("Content-Type", "application/json")
 					_, _ = writer.Write([]byte(`{"uploadId":"upload-1","fileMetadata":{"fileMetadataId":"file-1","fileUri":"users/test/reference/content"}}`))
+				case "/rest/media/post/create":
+					mediaPostCalls.Add(1)
+					assertTestClearanceCookie(t, request, solverCalls.Load())
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = writer.Write([]byte(`{"post":{"id":"post-1"}}`))
 				case "/rest/app-chat/conversations/new":
 					generationCalls.Add(1)
 					assertTestClearanceCookie(t, request, solverCalls.Load())
@@ -413,11 +433,14 @@ func TestImageEditStructuredForbiddenDoesNotRetryOrRefresh(t *testing.T) {
 				t.Fatalf("upload calls=%d, want 2", uploadCalls.Load())
 			}
 			if rejectedStage == "upload" {
+				if mediaPostCalls.Load() != 0 {
+					t.Fatalf("media post calls=%d, want 0", mediaPostCalls.Load())
+				}
 				if generationCalls.Load() != 0 {
 					t.Fatalf("generation calls=%d, want 0", generationCalls.Load())
 				}
-			} else if generationCalls.Load() != 2 {
-				t.Fatalf("generation calls=%d, want 2", generationCalls.Load())
+			} else if mediaPostCalls.Load() != 2 || generationCalls.Load() != 2 {
+				t.Fatalf("media post/generation calls=%d/%d, want 2/2", mediaPostCalls.Load(), generationCalls.Load())
 			}
 		})
 	}
