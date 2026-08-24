@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -301,7 +303,12 @@ func (s *Service) executeImage(
 			continue
 		}
 		if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden && attempt == 0 && attemptPolicy.hasNext(attempt) {
-			_, _ = readRetryableBody(response.Body)
+			body, readErr := readRetryableBody(response.Body)
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			failure := newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			if readErr != nil || failure.SafetyRejection || failure.RequestScopedForbidden {
+				break
+			}
 			delete(excluded, credential.ID)
 			if selection != nil {
 				selection.RetryAccount(credential.ID)
@@ -362,7 +369,7 @@ func (s *Service) executeImage(
 				}
 			}
 			quotaKind, _ := s.providers.QuotaKind(route.Provider)
-			refreshMode, decrementMode := quotaFinalizationModes(effectiveQuotaMode, quotaRefreshGroup)
+			refreshMode, decrementMode, availabilityMode := quotaFinalizationModes(effectiveQuotaMode, quotaRefreshGroup)
 			if successful && quotaKind == provider.QuotaRemoteWindow && refreshMode != "" {
 				if decrementMode != "" && decrementMode != "weekly" {
 					units := max(1, response.QuotaUnits)
@@ -379,6 +386,9 @@ func (s *Service) executeImage(
 					}
 				}
 				s.accounts.QueueQuotaRefresh(accountID, refreshMode)
+				if availabilityMode != "" && availabilityMode != refreshMode {
+					s.accounts.QueueQuotaRefresh(accountID, availabilityMode)
+				}
 			}
 			if err := budget.run("audit", finalizationAuditBudget, func(stageCtx context.Context) error {
 				return s.audits.Create(stageCtx, record)
@@ -396,10 +406,17 @@ func (s *Service) executeImage(
 // upstream windows atomically, while the local fence must charge the exact
 // window selected for this account so concurrent media requests cannot
 // over-allocate during the short refresh delay.
-func quotaFinalizationModes(effectiveMode, refreshGroup string) (refreshMode, decrementMode string) {
+func quotaFinalizationModes(effectiveMode, refreshGroup string) (refreshMode, decrementMode, availabilityMode string) {
+	// Availability-only Imagine products on paid Web tiers are governed by the
+	// shared weekly pool. Refresh its numeric counter and also re-read the
+	// product group so available=false/nextAvailableAt can install an exact
+	// product fence that overrides weekly routing.
+	if effectiveMode == "weekly" {
+		return effectiveMode, effectiveMode, refreshGroup
+	}
 	refreshMode = effectiveMode
 	if refreshGroup != "" {
 		refreshMode = refreshGroup
 	}
-	return refreshMode, effectiveMode
+	return refreshMode, effectiveMode, ""
 }

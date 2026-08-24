@@ -1542,9 +1542,9 @@ attemptLoop:
 			}
 			failureHandled := false
 			if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
-				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-				s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
-				failureHandled = reconcileErr == nil && exhausted
+				state, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+				s.applyRateLimitReconciliation(ctx, credential, response.StatusCode, retryAfter, state, reconcileErr)
+				failureHandled = true
 			} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
 				// Explicit Free exhaustion uses a rolling 24-hour window. The account
 				// billing period may be weekly and must not delay the next probe.
@@ -1594,8 +1594,13 @@ attemptLoop:
 			if lastFailure.AccountScoped && !failureHandled {
 				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 			} else if !lastFailure.AccountScoped && response.StatusCode >= http.StatusInternalServerError {
-				// 5xx 短冷却：本请求已 excluded，跨请求避免立刻再打同一坏号。
-				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+				// Provider-wide 5xx responses should rotate this request and briefly
+				// isolate the account across requests, but must not grow the durable
+				// account failure count exponentially. Preserve the real status in
+				// health diagnostics while applying the explicit soft policy.
+				if markErr := s.selector.markSoftFailure(ctx, credential, response.StatusCode, retryAfter); markErr != nil {
+					s.logger.Warn("upstream_soft_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "error", markErr)
+				}
 			}
 			lease.Release()
 			lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
@@ -2126,6 +2131,23 @@ func isTerminalRequestForbidden(upstreamProvider accountdomain.Provider, failure
 func forcesAccountFailover(status int, upstreamProvider accountdomain.Provider) bool {
 	return upstreamProvider == accountdomain.ProviderBuild &&
 		(status == http.StatusPaymentRequired || status == http.StatusForbidden || status == http.StatusTooManyRequests)
+}
+
+func (s *Service) applyRateLimitReconciliation(ctx context.Context, credential accountdomain.Credential, status int, retryAfter time.Duration, state accountapp.RateLimitReconcileState, reconcileErr error) {
+	s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
+	if reconcileErr == nil && state == accountapp.RateLimitReconcileExhausted {
+		return
+	}
+	if credential.Provider == accountdomain.ProviderConsole && status == http.StatusTooManyRequests {
+		// A Console 429 with available quota, an in-progress cross-instance probe,
+		// or an inconclusive /usage request is transient. Isolate the account for
+		// this Retry-After window without growing its durable failure count.
+		if err := s.selector.markSoftFailure(ctx, credential, status, retryAfter); err != nil {
+			s.logger.Warn("console_rate_limit_soft_cooldown_failed", "account_id", credential.ID, "state", state, "error", err)
+		}
+		return
+	}
+	s.selector.MarkFailure(ctx, credential, status, retryAfter)
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

@@ -1,13 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7`
+- Commit: `6463c6a3910cf120d37ff81c63d079ce619127f1`
 - Version: `v3.1.4`
-- Imported: `2026-08-21`
+- Imported: `2026-08-24`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `6463c6a3910cf120d37ff81c63d079ce619127f1`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Shared weekly Web Imagine limits with authoritative refresh preservation and product availability fencing.
+- Stale-page Statsig recovery for Web media, scoped access-cookie authentication fallback, and transient Build failure isolation.
+- Provider-prefixed public model names, SuperGrok Plus billing recognition, and bounded content/reasoning output-loop guards.
 
 - Missing-thinking and empty-stream quality retries with durable account penalties and protocol-safe terminal events.
 - Build refresh-token import and persistence recovery, Grok TUI compaction compatibility, and reasoning-effort audit fields.

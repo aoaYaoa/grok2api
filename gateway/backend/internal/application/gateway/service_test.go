@@ -1489,6 +1489,70 @@ func TestGenerateImageUnlimitedAttemptsRetainsEgressRetry(t *testing.T) {
 	}
 }
 
+func TestGenerateImagePolicyForbiddenDoesNotRetry(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "image-policy-forbidden.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	now := time.Now().UTC()
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierSuper,
+		Name: "image-policy-forbidden", SourceKey: "image-policy-forbidden", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const model = "grok-image-policy-forbidden"
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{{
+		PublicID: model, Provider: account.ProviderWeb, UpstreamModel: model,
+		Capability: modeldomain.CapabilityImage, Enabled: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, now); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &webImageStreamAdapter{
+		forbiddenRemaining: 1,
+		forbiddenBody:      `{"error":{"code":"content-moderation","message":"rejected"}}`,
+	}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, unlimitedRoutingAttempts)
+
+	result, err := service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-policy-forbidden", ClientKey: clientkey.Key{ID: 1, Name: "image-key"},
+		PublicModel: model, Prompt: "test", Count: 1, ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Body.Close()
+	body, readErr := io.ReadAll(result.Body)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	result.Finalize(Usage{}, "", "")
+	if result.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "content-moderation") {
+		t.Fatalf("policy response status=%d body=%s", result.StatusCode, body)
+	}
+	if attempts := adapter.Attempts(); len(attempts) != 1 || attempts[0] != credential.ID {
+		t.Fatalf("policy attempts = %#v, want one attempt on account %d", attempts, credential.ID)
+	}
+}
+
 func TestGatewayDoesNotPersistStatelessConsoleResponses(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "console-stateless.db"))
@@ -3327,6 +3391,88 @@ func TestGatewayGeneric429CoolsAccountAndRotates(t *testing.T) {
 	}
 }
 
+func TestGatewayNonAccount5xxSoftCoolsAndRotates(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "soft-5xx.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+
+	credentials := make([]account.Credential, 0, 2)
+	for index, name := range []string{"gateway-a", "gateway-b"} {
+		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: name,
+			ExpiresAt: time.Now().Add(time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive,
+			Priority: 200 - index, MaxConcurrent: 1,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		credentials = append(credentials, credential)
+	}
+	if err := accountRepo.UpdateHealth(ctx, credentials[0].ID, account.ProviderBuild, 3, nil, "prior account failure", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-soft-5xx"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range credentials {
+		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-soft-5xx"}, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "soft-5xx-key", Prefix: "soft5xx", SecretHash: strings.Repeat("3", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{
+		credentials[0].ID: {{status: http.StatusGatewayTimeout, body: `{"error":"temporary upstream timeout"}`}},
+		credentials[1].ID: {{status: http.StatusOK, body: `{"id":"resp-soft-5xx-b"}`}},
+	}}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, 30*time.Second, 30*time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+
+	before := time.Now().UTC()
+	result, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-soft-5xx", ClientKey: clientKey, PublicModel: "grok-soft-5xx",
+		Body: []byte(`{"model":"grok-soft-5xx","input":"hello"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Finalize(Usage{}, "resp-soft-5xx-b", "")
+	_ = result.Body.Close()
+	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
+		t.Fatalf("non-account 5xx must rotate, attempts=%#v", attempts)
+	}
+	cooled, err := accountRepo.Get(ctx, credentials[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cooled.AuthStatus != account.AuthStatusActive || cooled.FailureCount != 3 || cooled.LastError != "upstream status 504" || cooled.CooldownUntil == nil {
+		t.Fatalf("non-account 5xx soft cooldown state = %#v", cooled)
+	}
+	cooldown := cooled.CooldownUntil.Sub(before)
+	if cooldown < 4*time.Second || cooldown > 6*time.Second {
+		t.Fatalf("non-account 5xx cooldown = %s, want ~5s", cooldown)
+	}
+}
+
 func TestGatewayExhausted429PreservesLastBodyInFailure(t *testing.T) {
 	// When all attempts fail, CreateResponse returns UpstreamFailure (sanitized).
 	// captureResponse must reattach the diagnostic body so subsequent classification
@@ -4058,6 +4204,7 @@ type webImageStreamAdapter struct {
 	attempts           []uint64
 	unauthorizedID     uint64
 	forbiddenRemaining int
+	forbiddenBody      string
 }
 
 type retrySafeImageStatusError struct{ status int }
@@ -4165,6 +4312,7 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 	a.attempts = append(a.attempts, request.Credential.ID)
 	unauthorizedID := a.unauthorizedID
 	forbidden := a.forbiddenRemaining > 0
+	forbiddenBody := a.forbiddenBody
 	if forbidden {
 		a.forbiddenRemaining--
 	}
@@ -4173,9 +4321,12 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 		return nil, failureErr
 	}
 	if forbidden {
+		if forbiddenBody == "" {
+			forbiddenBody = `{"error":"egress session rejected"}`
+		}
 		return &provider.Response{
 			StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: make(http.Header),
-			Body: io.NopCloser(strings.NewReader(`{"error":"egress session rejected"}`)),
+			Body: io.NopCloser(strings.NewReader(forbiddenBody)),
 		}, nil
 	}
 	if request.Credential.ID == unauthorizedID {

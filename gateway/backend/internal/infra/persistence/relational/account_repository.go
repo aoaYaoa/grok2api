@@ -39,7 +39,10 @@ type quotaBreakdownJSON struct {
 
 const (
 	accountUpdateBatchSize      = 500
-	accountPaidPlanSignal       = `(LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_code), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('super', 'supergrok', 'supergrokpro', 'supergrokheavy', 'supergroklite', 'grokpro', 'xpremium', 'xpremiumplus', 'apikey') OR LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_name), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('super', 'supergrok', 'supergrokpro', 'supergrokheavy', 'supergroklite', 'grokpro', 'xpremium', 'xpremiumplus', 'apikey'))`
+	accountNormalizedPlanCode   = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_code), ' ', ''), '_', ''), '-', ''), '+', 'plus'))`
+	accountNormalizedPlanName   = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_name), ' ', ''), '_', ''), '-', ''), '+', 'plus'))`
+	accountPaidPlanNames        = `'super', 'supergrok', 'supergrokpro', 'supergrokheavy', 'supergroklite', 'supergrokplus', 'grokpro', 'xpremium', 'xpremiumplus', 'apikey'`
+	accountPaidPlanSignal       = `(` + accountNormalizedPlanCode + ` IN (` + accountPaidPlanNames + `) OR ` + accountNormalizedPlanName + ` IN (` + accountPaidPlanNames + `) OR substr(` + accountNormalizedPlanCode + `, 1, 9) = 'supergrok' OR substr(` + accountNormalizedPlanName + `, 1, 9) = 'supergrok')`
 	accountFreePlanSignal       = `(LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_code), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('free', 'grokfree', 'freetier', 'basic', 'grokbasic', 'xbasic') OR LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(billing.plan_name), ' ', ''), '_', ''), '-', ''), '+', 'plus')) IN ('free', 'grokfree', 'freetier', 'basic', 'grokbasic', 'xbasic'))`
 	accountPaidBillingSignals   = `(` + accountPaidPlanSignal + ` OR billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0)`
 	accountPaidBillingPredicate = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND ` + accountPaidBillingSignals + `)`
@@ -670,11 +673,13 @@ func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, provider
 	if provider != account.ProviderWeb && quotaMode == "" {
 		return result, nil
 	}
-	modes := make([]string, 0, 2)
-	// Paid Web chat routes are governed by the shared weekly pool. Imagine
-	// products have independent authoritative windows and must not be hidden by
-	// a weekly row merely because the same account also has paid chat access.
-	if provider == account.ProviderWeb && !account.IsWebImagineQuotaMode(quotaMode) {
+	modes := make([]string, 0, 3)
+	webImagineMode := provider == account.ProviderWeb && account.IsWebImagineQuotaMode(quotaMode)
+	// Paid Web routes use the shared weekly pool. Imagine may additionally
+	// expose a product-specific remainingQueries window (notably for Basic and
+	// older response shapes); load both and prefer the exact product window
+	// below, falling back to weekly only for confirmed Super/Heavy accounts.
+	if provider == account.ProviderWeb {
 		modes = append(modes, "weekly")
 	}
 	if provider == account.ProviderWeb && quotaMode == account.QuotaModeWebImageEdit {
@@ -701,10 +706,23 @@ func (r *AccountRepository) getRoutingQuotaWindows(ctx context.Context, provider
 		webTiers[credential.ID] = credential.WebTier
 	}
 	for _, row := range rows {
-		if provider == account.ProviderWeb && quotaMode == account.QuotaModeWebImageEdit {
-			if row.Mode != webImageEditRoutingQuotaMode(webTiers[row.AccountID]) {
-				continue
+		if webImagineMode {
+			tier := webTiers[row.AccountID]
+			productMode := quotaMode
+			if quotaMode == account.QuotaModeWebImageEdit {
+				productMode = webImageEditRoutingQuotaMode(tier)
 			}
+			switch {
+			case row.Mode == productMode:
+				// An explicit product window is more precise than the shared pool,
+				// regardless of query order.
+				result[row.AccountID] = toRoutingQuotaWindowDomain(row)
+			case row.Mode == "weekly" && (tier == account.WebTierSuper || tier == account.WebTierHeavy):
+				if existing, exists := result[row.AccountID]; !exists || existing.Mode != productMode {
+					result[row.AccountID] = toRoutingQuotaWindowDomain(row)
+				}
+			}
+			continue
 		}
 		if _, exists := result[row.AccountID]; !exists {
 			result[row.AccountID] = toRoutingQuotaWindowDomain(row)

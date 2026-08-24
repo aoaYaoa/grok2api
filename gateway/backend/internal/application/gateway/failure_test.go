@@ -112,6 +112,11 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 			upstreamCode:           "permission-denied",
 		},
 		{
+			name: "safety rejection code", body: `{"code":"safety-rejection","error":"rejected"}`,
+			requestScopedForbidden: true,
+			upstreamCode:           "safety-rejection",
+		},
+		{
 			name: "bare permission-denied", body: `{"code":"permission_denied","error":"denied"}`,
 			upstreamCode: "permission_denied",
 		},

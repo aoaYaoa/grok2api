@@ -211,8 +211,7 @@ function ImagineQuotaRow({ windows, locale, t }: { windows: WebQuotaWindow[]; lo
         const window = windowsByMode.get(mode)!;
         const exhausted = window.remaining <= 0;
         const hasTotal = window.total > 0;
-        const used = hasTotal ? Math.max(0, window.total - window.remaining) : 0;
-        const percent = hasTotal ? Math.max(0, Math.min(100, used / window.total * 100)) : 0;
+        const percent = hasTotal ? Math.max(0, Math.min(100, window.remaining / window.total * 100)) : 0;
         const label = imagineModeLabel(mode, t);
         return (
           <Tooltip key={mode}>

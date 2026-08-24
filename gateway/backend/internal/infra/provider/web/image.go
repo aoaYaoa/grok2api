@@ -1631,8 +1631,18 @@ func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *eg
 				_ = a.invalidateSignedStatsig(http.MethodPost, endpoint)
 				return response, nil
 			}
-			// Structured JSON responses are application policy decisions. They
-			// must not invalidate Clearance, affect egress health, or be replayed.
+			// Code 7 is the application-layer equivalent of reloading the Grok
+			// page: refresh only the path-bound Statsig signature and replay the
+			// explicitly rejected POST once. It is not a Cloudflare challenge, so
+			// the current Clearance lease remains valid.
+			if isStatsigRefreshableMediaError(upstreamErr, body) {
+				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
+					continue
+				}
+				return response, nil
+			}
+			// Remaining structured JSON responses are application policy decisions.
+			// They must not invalidate Clearance, affect egress health, or be replayed.
 			if upstreamErr.bodyKind == "json" || attempt > 0 || !a.invalidateSignedStatsig(http.MethodPost, endpoint) {
 				return response, nil
 			}
@@ -1651,11 +1661,36 @@ func (a *Adapter) postStreamingJSONWithReferer(ctx context.Context, cfg Config, 
 			return nil, err
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			if response.StatusCode == http.StatusForbidden && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
-				_ = response.Body.Close()
-				continue
-			}
 			if response.StatusCode == http.StatusForbidden {
+				body, readErr := io.ReadAll(io.LimitReader(response.Body, webMediaDiagnosticBodyLimit+1))
+				_ = response.Body.Close()
+				if readErr != nil {
+					return nil, fmt.Errorf("读取 Grok Web 403 响应: %w", readErr)
+				}
+				truncated := len(body) > webMediaDiagnosticBodyLimit
+				if truncated {
+					body = body[:webMediaDiagnosticBodyLimit]
+				}
+				upstreamErr := newWebMediaUpstreamError(response.StatusCode, body, truncated)
+				response.Body = io.NopCloser(bytes.NewReader(body))
+				response.ContentLength = int64(len(body))
+				if isClearanceRefreshableMediaError(upstreamErr) {
+					lease.InvalidateClearance()
+					_ = a.invalidateSignedStatsig(http.MethodPost, endpoint)
+					return response, nil
+				}
+				if isStatsigRefreshableMediaError(upstreamErr, body) {
+					if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
+						continue
+					}
+					return response, nil
+				}
+				if upstreamErr.bodyKind == "json" {
+					return response, nil
+				}
+				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
+					continue
+				}
 				a.feedbackAntiBot(ctx, lease, endpoint)
 			}
 			return response, nil

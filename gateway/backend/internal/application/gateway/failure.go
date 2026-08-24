@@ -238,7 +238,8 @@ func isSafetyRejection(text string) bool {
 func isRequestScopedForbidden(upstreamCode, text string) bool {
 	switch normalizeFailureCode(upstreamCode) {
 	case "invalid_argument", "invalid_arguments", "invalid_parameter", "invalid_parameters",
-		"invalid_request", "bad_request", "invalid_params":
+		"invalid_request", "bad_request", "invalid_params", "content_moderated", "content_moderation",
+		"content_policy", "safety_rejection":
 		return true
 	}
 	return containsAny(text,

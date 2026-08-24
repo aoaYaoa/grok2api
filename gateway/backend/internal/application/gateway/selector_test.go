@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -809,9 +810,13 @@ func TestSelectorWebCatalogCapabilityStillEnforcesTier(t *testing.T) {
 }
 
 func TestImageQuotaFinalizationKeepsEffectiveConsumptionFence(t *testing.T) {
-	refreshMode, decrementMode := quotaFinalizationModes(account.QuotaModeWebImagePro, account.QuotaGroupWebImagine)
-	if refreshMode != account.QuotaGroupWebImagine || decrementMode != account.QuotaModeWebImagePro {
-		t.Fatalf("refresh=%q decrement=%q", refreshMode, decrementMode)
+	refreshMode, decrementMode, availabilityMode := quotaFinalizationModes(account.QuotaModeWebImagePro, account.QuotaGroupWebImagine)
+	if refreshMode != account.QuotaGroupWebImagine || decrementMode != account.QuotaModeWebImagePro || availabilityMode != "" {
+		t.Fatalf("refresh=%q decrement=%q availability=%q", refreshMode, decrementMode, availabilityMode)
+	}
+	refreshMode, decrementMode, availabilityMode = quotaFinalizationModes("weekly", account.QuotaGroupWebImagine)
+	if refreshMode != "weekly" || decrementMode != "weekly" || availabilityMode != account.QuotaGroupWebImagine {
+		t.Fatalf("shared weekly refresh=%q decrement=%q availability=%q", refreshMode, decrementMode, availabilityMode)
 	}
 }
 
@@ -1691,7 +1696,48 @@ func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
 	}
 
 	before = time.Now().UTC()
-	selector.MarkFailure(ctx, hard, 0, 0)
+	if err := selector.markSoftFailure(ctx, hard, http.StatusGatewayTimeout, 0); err != nil {
+		t.Fatal(err)
+	}
+	soft5xx, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if soft5xx.FailureCount != hard.FailureCount {
+		t.Fatalf("soft 5xx failure count = %d, want preserved %d", soft5xx.FailureCount, hard.FailureCount)
+	}
+	if soft5xx.LastError != "upstream status 504" {
+		t.Fatalf("soft 5xx diagnostic = %q", soft5xx.LastError)
+	}
+	if soft5xx.CooldownUntil == nil {
+		t.Fatal("soft 5xx did not set cooldown")
+	}
+	cooldown = soft5xx.CooldownUntil.Sub(before)
+	if cooldown < 4*time.Second || cooldown > 6*time.Second {
+		t.Fatalf("soft 5xx cooldown = %s, want ~5s", cooldown)
+	}
+
+	before = time.Now().UTC()
+	if err := selector.markSoftFailure(ctx, soft5xx, http.StatusServiceUnavailable, 12*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	softRetryAfter, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if softRetryAfter.FailureCount != hard.FailureCount {
+		t.Fatalf("Retry-After soft failure count = %d, want preserved %d", softRetryAfter.FailureCount, hard.FailureCount)
+	}
+	if softRetryAfter.CooldownUntil == nil {
+		t.Fatal("Retry-After soft failure did not set cooldown")
+	}
+	cooldown = softRetryAfter.CooldownUntil.Sub(before)
+	if cooldown < 11*time.Second || cooldown > 13*time.Second {
+		t.Fatalf("Retry-After soft cooldown = %s, want ~12s", cooldown)
+	}
+
+	before = time.Now().UTC()
+	selector.MarkFailure(ctx, softRetryAfter, 0, 0)
 	preserved, err := accounts.Get(ctx, credential.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1724,6 +1770,74 @@ func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
 	cooldown = reset.CooldownUntil.Sub(before)
 	if cooldown < 4*time.Second || cooldown > 6*time.Second {
 		t.Fatalf("after-success soft cooldown = %s, want ~5s", cooldown)
+	}
+}
+
+func TestConsoleRateLimitReconciliationUsesNonAccumulatingCooldown(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           int
+		state            accountapp.RateLimitReconcileState
+		err              error
+		wantFailureCount int
+	}{
+		{name: "quota confirmed available", status: http.StatusTooManyRequests, state: accountapp.RateLimitReconcileAvailable, wantFailureCount: 3},
+		{name: "another replica refreshing", status: http.StatusTooManyRequests, state: accountapp.RateLimitReconcileRefreshing, wantFailureCount: 3},
+		{name: "quota probe inconclusive", status: http.StatusTooManyRequests, state: accountapp.RateLimitReconcileInconclusive, err: errors.New("usage probe failed"), wantFailureCount: 3},
+		{name: "payment failure keeps hard penalty", status: http.StatusPaymentRequired, state: accountapp.RateLimitReconcileAvailable, wantFailureCount: 4},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "console-rate-limit-soft.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			if err := database.InitializeSchema(ctx); err != nil {
+				t.Fatal(err)
+			}
+			accounts := relational.NewAccountRepository(database)
+			credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+				Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO,
+				Name: "console-soft", SourceKey: "console-soft", EncryptedAccessToken: "encrypted",
+				Enabled: true, AuthStatus: account.AuthStatusActive,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := accounts.UpdateHealth(ctx, credential.ID, credential.Provider, 3, nil, "prior failures", false); err != nil {
+				t.Fatal(err)
+			}
+			credential, err = accounts.Get(ctx, credential.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, 30*time.Second, 30*time.Minute, 500*time.Millisecond)
+			service := &Service{selector: selector}
+			before := time.Now().UTC()
+
+			service.applyRateLimitReconciliation(ctx, credential, test.status, 12*time.Second, test.state, test.err)
+
+			updated, err := accounts.Get(ctx, credential.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.FailureCount != test.wantFailureCount {
+				t.Fatalf("failure count = %d, want %d", updated.FailureCount, test.wantFailureCount)
+			}
+			if updated.CooldownUntil == nil {
+				t.Fatal("expected Console 429 cooldown")
+			}
+			cooldown := updated.CooldownUntil.Sub(before)
+			if test.status == http.StatusTooManyRequests {
+				if cooldown < 11*time.Second || cooldown > 13*time.Second {
+					t.Fatalf("cooldown = %s, want ~12s", cooldown)
+				}
+			} else if cooldown < 2*time.Minute {
+				t.Fatalf("hard failure cooldown = %s, want at least 2m", cooldown)
+			}
+		})
 	}
 }
 

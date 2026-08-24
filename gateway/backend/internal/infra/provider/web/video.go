@@ -30,6 +30,7 @@ type webMediaUpstreamError struct {
 	bodyPrefixSHA256    string
 	bodyKind            string
 	cloudflareChallenge bool
+	requestScoped       bool
 }
 
 func (e *webMediaUpstreamError) Error() string {
@@ -46,10 +47,16 @@ func (e *webMediaUpstreamError) HTTPStatusCode() int {
 	return e.status
 }
 
-// RequestScopedFailure marks shared Web rate limits so the gateway can defer
-// the job instead of amplifying the limit by cycling through every account.
+// RequestScopedFailure prevents account rotation for request policy denials and
+// lets the gateway defer shared Web rate limits without amplifying them.
 func (e *webMediaUpstreamError) RequestScopedFailure() bool {
-	if e == nil || e.status != http.StatusTooManyRequests {
+	if e == nil {
+		return false
+	}
+	if e.requestScoped {
+		return true
+	}
+	if e.status != http.StatusTooManyRequests {
 		return false
 	}
 	message := strings.ToLower(e.summary)
@@ -67,6 +74,23 @@ func isClearanceRefreshableMediaError(e *webMediaUpstreamError) bool {
 		return false
 	}
 	return e.cloudflareChallenge || e.bodyKind == "empty" || e.bodyKind == "html"
+}
+
+// isStatsigRefreshableMediaError identifies application-layer rejections that
+// tell the browser to reload its page state. Grok uses code 7 for this anti-bot
+// response, but the same code can also wrap a definitive account block; blocked
+// credentials must remain terminal and must not be replayed with a fresh signature.
+func isStatsigRefreshableMediaError(e *webMediaUpstreamError, body []byte) bool {
+	if e == nil || e.requestScoped || e.status != http.StatusForbidden || e.bodyKind != "json" || provider.IsDefinitiveAccountBlockBody(body) {
+		return false
+	}
+	code, message, structured := extractWebMediaUpstreamErrorFields(body)
+	if !structured {
+		return false
+	}
+	normalized := strings.ToLower(message)
+	return code == "7" || strings.Contains(normalized, "anti-bot") ||
+		strings.Contains(normalized, "page is out of date") || strings.Contains(normalized, "reload to continue")
 }
 
 func (e *webMediaUpstreamError) providerResponse() *provider.Response {
@@ -113,7 +137,30 @@ func newWebMediaUpstreamError(status int, body []byte, truncated bool) *webMedia
 		bodyPrefixSHA256:    fmt.Sprintf("%x", digest),
 		bodyKind:            classifyWebMediaDiagnosticBody(body),
 		cloudflareChallenge: isCloudflareChallengeBody(body),
+		requestScoped:       isRequestScopedWebMediaForbidden(status, body),
 	}
+}
+
+func isRequestScopedWebMediaForbidden(status int, body []byte) bool {
+	if status != http.StatusForbidden || !json.Valid(body) || provider.IsDefinitiveAccountBlockBody(body) {
+		return false
+	}
+	code, message, structured := extractWebMediaUpstreamErrorFields(body)
+	if !structured {
+		return false
+	}
+	normalizedCode := strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(code))
+	switch normalizedCode {
+	case "content_moderated", "content_moderation", "content_policy", "safety_rejection":
+		return true
+	}
+	normalizedMessage := strings.ToLower(message)
+	return strings.Contains(normalizedMessage, "request rejected by policy") ||
+		strings.Contains(normalizedMessage, "policy rejected request") ||
+		strings.Contains(normalizedMessage, "content policy") ||
+		strings.Contains(normalizedMessage, "content moderation") ||
+		strings.Contains(normalizedMessage, "usage guidelines") ||
+		strings.Contains(normalizedMessage, "safety_check_type_")
 }
 
 func classifyWebMediaDiagnosticBody(body []byte) string {

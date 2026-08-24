@@ -44,6 +44,30 @@ func TestIsClearanceRefreshableMediaError(t *testing.T) {
 	}
 }
 
+func TestWebMediaUpstreamErrorRequestScopedFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{name: "content moderation", status: http.StatusForbidden, body: `{"error":{"code":"content-moderated","message":"rejected"}}`, want: true},
+		{name: "policy rejection", status: http.StatusForbidden, body: `{"error":"request rejected by policy"}`, want: true},
+		{name: "page reload", status: http.StatusForbidden, body: `{"code":7,"message":"This page is out of date. Reload to continue."}`},
+		{name: "blocked account", status: http.StatusForbidden, body: `{"code":7,"message":"User is blocked [WKE=unauthorized:blocked-user]"}`},
+		{name: "unknown forbidden", status: http.StatusForbidden, body: `{"error":"egress session rejected"}`},
+		{name: "shared rate limit", status: http.StatusTooManyRequests, body: `{"error":"Too many requests"}`, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := newWebMediaUpstreamError(test.status, []byte(test.body), false)
+			if got := err.RequestScopedFailure(); got != test.want {
+				t.Fatalf("request scoped=%v, want %v (summary=%q)", got, test.want, err.summary)
+			}
+		})
+	}
+}
+
 func TestWebMediaUpstreamErrorProviderResponseIsBounded(t *testing.T) {
 	err := newWebMediaUpstreamError(http.StatusForbidden, nil, false)
 	response := err.providerResponse()

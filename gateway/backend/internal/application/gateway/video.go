@@ -924,11 +924,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				failureHandled = true
 				retriableCreate = safeCreateFailure && !account.IsBuildSuper(lease.Credential, lease.Billing)
 			case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
-				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
-				s.selector.MarkQuotaStateChanged(lease.Credential.Provider, lease.Credential.ID)
-				if reconcileErr != nil || !exhausted {
-					s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
-				}
+				state, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
+				s.applyRateLimitReconciliation(failureCtx, lease.Credential, status, 0, state, reconcileErr)
 				failureHandled = true
 				retriableCreate = safeCreateFailure
 			case status == http.StatusTooManyRequests || status == http.StatusPaymentRequired:
@@ -1009,7 +1006,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	s.selector.MarkSuccess(context.Background(), lease.Credential)
-	refreshMode, decrementMode := quotaFinalizationModes(lease.QuotaMode, quotaRefreshGroup)
+	refreshMode, decrementMode, availabilityMode := quotaFinalizationModes(lease.QuotaMode, quotaRefreshGroup)
 	if decrementMode != "" && decrementMode != "weekly" {
 		quotaCtx, quotaCancel := context.WithTimeout(context.Background(), accountStateWriteTimeout)
 		updated, quotaErr := s.accounts.DecrementQuota(quotaCtx, job.AccountID, decrementMode, 1)
@@ -1025,6 +1022,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && refreshMode != "" {
 		s.accounts.QueueQuotaRefresh(job.AccountID, refreshMode)
+		if availabilityMode != "" && availabilityMode != refreshMode {
+			s.accounts.QueueQuotaRefresh(job.AccountID, availabilityMode)
+		}
 	}
 	// 输入回收放在账号状态、计费和审计收尾之后，存储抖动不得延迟关键终态逻辑。
 	s.releaseVideoInputs(job)
