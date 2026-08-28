@@ -998,7 +998,8 @@ func (s *Selector) resolveQuotaProduct(provider account.Provider, upstreamModel 
 
 func candidateEgressLeaseCooling(candidate account.RoutingCandidate, credential account.Credential, now time.Time) bool {
 	block := candidate.EgressLeaseBlock
-	return block != nil && block.AccountID == credential.ID && block.NodeID != 0 && credential.EgressNodeID == block.NodeID && now.Before(block.CooldownUntil)
+	return block != nil && block.AccountID == credential.ID && block.NodeID != 0 &&
+		(credential.EgressNodeID == 0 || credential.EgressNodeID == block.NodeID) && now.Before(block.CooldownUntil)
 }
 
 // candidateSupportsModel treats a recognized Web catalog entry as an

@@ -1,13 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `6463c6a3910cf120d37ff81c63d079ce619127f1`
-- Version: `v3.1.4`
-- Imported: `2026-08-24`
+- Commit: `62d2775cb3cd5196cc885dd98e323c90afeda023`
+- Version: `v3.1.5`
+- Imported: `2026-08-28`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `6463c6a3910cf120d37ff81c63d079ce619127f1`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `62d2775cb3cd5196cc885dd98e323c90afeda023`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Quality Guard pagination, lower status-poll overhead, and runtime-selected account lease quarantine.
+- Non-streaming idle-response cooldowns plus improved CLI and Console network-failure classification.
+- Quality Guard management-page query controls and Grok2API `v3.1.5` metadata.
 
 - Shared weekly Web Imagine limits with authoritative refresh preservation and product availability fencing.
 - Stale-page Statsig recovery for Web media, scoped access-cookie authentication fallback, and transient Build failure isolation.

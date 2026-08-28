@@ -1,8 +1,8 @@
-# Upstream 6463c6a3 Sync Implementation Plan
+# Upstream 62d2775c Sync Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Synchronize `chenyme/grok2api` from recorded marker `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7` through `6463c6a3` while preserving local public media workflows and production data.
+**Goal:** Synchronize `chenyme/grok2api` from recorded marker `d6f6e9f5f8e5d643879a4b12741f64a2e4c8d7a7` through `62d2775c` while preserving local public media workflows and production data.
 
 **Architecture:** Generate the exact upstream tree delta and apply it beneath the vendored `gateway/` prefix with Git three-way patching. Resolve overlaps against local Web video retry, React public pages, SQLite storage, media cache, and multi-WARP deployment contracts.
 
@@ -24,10 +24,10 @@
 - Modify: `gateway/UPSTREAM.md`
 
 **Interfaces:**
-- Consumes: upstream commits `d6f6e9f5..6463c6a3`
+- Consumes: upstream commits `d6f6e9f5..62d2775c`
 - Produces: path-mapped staged changes beneath `gateway/`
 
-- [ ] Generate `/tmp/grok2api-upstream-20260824.patch` with `git diff --binary --full-index d6f6e9f5 6463c6a3`.
+- [ ] Generate `/tmp/grok2api-upstream-20260828.patch` with `git diff --binary --full-index d6f6e9f5 62d2775c`.
 - [ ] Apply it using `git apply --3way --directory=gateway`.
 - [ ] Inventory unmerged paths with `git diff --name-only --diff-filter=U` and conflict markers with `rg`.
 
@@ -55,7 +55,7 @@
 - Consumes: resolved source tree
 - Produces: tested commit recording exact upstream SHA and import date
 
-- [ ] Update `gateway/UPSTREAM.md` to commit `6463c6a3` and import date `2026-08-24`.
+- [ ] Update `gateway/UPSTREAM.md` to commit `62d2775c` and import date `2026-08-28`.
 - [ ] Run focused tests for changed Go packages.
 - [ ] Run `go test ./...` and `go build ./cmd/grok2api` from `gateway/backend`.
 - [ ] Run `pnpm test`, `pnpm lint`, and `pnpm build` from `gateway/frontend`.
@@ -71,6 +71,6 @@
 - Consumes: verified sync commit
 - Produces: pushed branch and healthy production application container
 
-- [ ] Commit as `sync upstream 6463c6a3` and push the active branch to `origin`.
+- [ ] Commit as `sync upstream 62d2775c` and push the active branch to `origin`.
 - [ ] On `netcup`, fetch the active branch, detach at the new commit, build only `grok2api_go`, and recreate it with `--no-deps`.
 - [ ] Verify container health, `/healthz`, `/video`, persisted `/app/data`, and existing WARP containers.

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -1094,10 +1095,28 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		responseStartedAt = started
 		lease.markSelectorUpstreamStarted()
 		response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: credential, ForcedEgressNodeID: input.ForcedEgressNodeID, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata})
+		if err == nil && !input.Streaming && response != nil && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+			response.Body, err = peekNonEmptyResponseBody(response.Body)
+		}
 		auditBase.ReasoningEffort = normalizedMetadata.ReasoningEffort
 		err = failureAttempts.captureResponse(credential, started, response, err)
 		timing.markUpstream(time.Since(started))
 		return response, err
+	}
+	markResponseFailureAfterSuccess := func(credential accountdomain.Credential, err error) bool {
+		status, retryAfter, classified := upstreamResponseErrorHealthPenalty(err, holdCfg.IdleAccountCooldown)
+		if !classified {
+			return false
+		}
+		writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+		markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, status, retryAfter)
+		writeCancel()
+		if markErr != nil {
+			s.logger.Warn("upstream_response_health_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+		} else {
+			s.logger.Warn("upstream_response_health_retry", "request_id", input.RequestID, "account_id", credential.ID, "status", status, "minimum_cooldown", retryAfter)
+		}
+		return true
 	}
 	ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
 		started := time.Now()
@@ -1279,7 +1298,10 @@ attemptLoop:
 				err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
 			} else {
 				lease, err = s.selector.AcquirePinnedForQualityProbe(ctx, route.Provider, input.ForcedAccountID, route.ID, route.UpstreamModel, quotaMode, accountScope)
-				if err == nil && lease.Credential.EgressNodeID != input.ForcedEgressNodeID {
+				// An unbound account can still have reached the observed node through
+				// runtime pool selection. The Provider request below carries the forced
+				// node explicitly; only a conflicting concrete binding is invalid.
+				if err == nil && lease.Credential.EgressNodeID != 0 && lease.Credential.EgressNodeID != input.ForcedEgressNodeID {
 					lease.Release()
 					lease = nil
 					err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
@@ -1365,8 +1387,14 @@ attemptLoop:
 			if !isRetryableTransportFailure(credential.Provider, err) {
 				break
 			}
-			if !neterrorpkg.IsUpstreamStreamIdleTimeout(err) {
+			responseFailure := markResponseFailureAfterSuccess(credential, err)
+			if !responseFailure {
 				s.selector.MarkFailure(ctx, credential, 0, 0)
+			}
+			// The failed response is safe to retry on another account only when
+			// doing so cannot repeat an upstream-hosted tool side effect.
+			if responseFailure && qualityRequestHasReplayUnsafeHostedTools(input.Body) {
+				break attemptLoop
 			}
 			if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
 				break
@@ -1412,6 +1440,10 @@ attemptLoop:
 				} else {
 					lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 					if !isRetryableTransportFailure(credential.Provider, err) {
+						break attemptLoop
+					}
+					responseFailure := markResponseFailureAfterSuccess(credential, err)
+					if responseFailure && qualityRequestHasReplayUnsafeHostedTools(input.Body) {
 						break attemptLoop
 					}
 					if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
@@ -1531,6 +1563,10 @@ attemptLoop:
 					}
 					lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 					if !isRetryableTransportFailure(credential.Provider, err) {
+						break attemptLoop
+					}
+					responseFailure := markResponseFailureAfterSuccess(credential, err)
+					if responseFailure && qualityRequestHasReplayUnsafeHostedTools(input.Body) {
 						break attemptLoop
 					}
 					if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
@@ -1772,9 +1808,33 @@ attemptLoop:
 	return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, lastErr)
 }
 
+// peekNonEmptyResponseBody keeps empty/idle non-streaming responses inside the
+// account retry loop while replaying the byte used to prove the body exists.
+func peekNonEmptyResponseBody(body io.ReadCloser) (io.ReadCloser, error) {
+	if body == nil {
+		return nil, neterrorpkg.ErrUpstreamResponseEmpty
+	}
+	reader := bufio.NewReader(body)
+	if _, err := reader.Peek(1); err != nil {
+		_ = body.Close()
+		if errors.Is(err, io.EOF) {
+			return nil, neterrorpkg.ErrUpstreamResponseEmpty
+		}
+		return nil, &responseBodyReadError{cause: err}
+	}
+	return &replayReadCloser{Reader: reader, source: body}, nil
+}
+
+type responseBodyReadError struct{ cause error }
+
+func (e *responseBodyReadError) Error() string {
+	return fmt.Sprintf("read upstream response body: %v", e.cause)
+}
+func (e *responseBodyReadError) Unwrap() error { return e.cause }
+
 func isUpstreamStreamFailure(errorCode string) bool {
 	switch errorCode {
-	case "upstream_stream_incomplete", "upstream_stream_interrupted", "upstream_stream_idle_timeout":
+	case "upstream_stream_incomplete", "upstream_stream_interrupted", "upstream_stream_idle_timeout", "upstream_response_empty":
 		return true
 	default:
 		return false
@@ -1782,13 +1842,38 @@ func isUpstreamStreamFailure(errorCode string) bool {
 }
 
 func streamFailureHealthPenalty(errorCode string, usage Usage, idleCooldown time.Duration) (int, time.Duration) {
-	if errorCode == "upstream_stream_idle_timeout" && !usage.OutputObserved && usage.OutputTokens == 0 && usage.ReasoningTokens == 0 {
+	if (errorCode == "upstream_stream_idle_timeout" || errorCode == "upstream_response_empty") && !usage.OutputObserved && usage.OutputTokens == 0 && usage.ReasoningTokens == 0 {
 		if idleCooldown <= 0 {
 			idleCooldown = qualityIdleAccountCooldown
+		}
+		if errorCode == "upstream_response_empty" {
+			return http.StatusBadGateway, idleCooldown
 		}
 		return http.StatusGatewayTimeout, idleCooldown
 	}
 	return 0, 0
+}
+
+// upstreamResponseErrorHealthPenalty classifies failures that happen after a
+// successful response header but before a usable non-streaming body exists.
+// A truly empty response receives the configured long cooldown. If some body
+// bytes arrived before an idle timeout, retain only the ordinary short network
+// cooldown by returning a zero status/retry pair.
+func upstreamResponseErrorHealthPenalty(err error, idleCooldown time.Duration) (int, time.Duration, bool) {
+	switch {
+	case neterrorpkg.IsUpstreamResponseEmpty(err):
+		status, cooldown := streamFailureHealthPenalty("upstream_response_empty", Usage{}, idleCooldown)
+		return status, cooldown, true
+	case neterrorpkg.IsUpstreamStreamIdleTimeout(err):
+		if neterrorpkg.IdleTimeoutObservedData(err) {
+			return 0, 0, true
+		}
+		status, cooldown := streamFailureHealthPenalty("upstream_stream_idle_timeout", Usage{}, idleCooldown)
+		return status, cooldown, true
+	default:
+		var bodyReadErr *responseBodyReadError
+		return 0, 0, errors.As(err, &bodyReadErr)
+	}
 }
 
 // auditRequestSucceeded keeps transport truth (the HTTP status) separate from
