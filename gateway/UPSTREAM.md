@@ -1,13 +1,18 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `62d2775cb3cd5196cc885dd98e323c90afeda023`
+- Commit: `1c9aedc709a0d53ddcfa99349d85b925178e2b69`
 - Version: `v3.1.5`
-- Imported: `2026-08-28`
+- Imported: `2026-09-01`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `62d2775cb3cd5196cc885dd98e323c90afeda023`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `1c9aedc709a0d53ddcfa99349d85b925178e2b69`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Configurable Basic Web video-duration cap applied before upstream submission, while preserving local reference-video and extension workflows.
+- Replay-safe quality retries, bounded credential-material failure handling, and clearer pinned-account selection diagnostics.
+- Cross-account reasoning recovery, semantic stream-idle detection, root tool-schema normalization, and protocol-safe output-loop failures.
+- Compact audit billing display with shared USD tick formatting and improved provider/filter labels.
 
 - Quality Guard pagination, lower status-poll overhead, and runtime-selected account lease quarantine.
 - Non-streaming idle-response cooldowns plus improved CLI and Console network-failure classification.
