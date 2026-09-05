@@ -955,6 +955,15 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		s.logVideoGenerationFailure(job, lease.Credential, err)
+		if delay, retry := videoSelectionRetryDelay(err); retry {
+			metadata.DeferredAttempts = boundedDeferredVideoAttempts(failureAttempts.snapshot())
+			job.MetadataJSON = encodeVideoJobMetadata(metadata)
+			lease.Release()
+			lease = nil
+			s.deferVideoJobFor(parent, job, delay)
+			s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "account_or_egress_cooling", "retry_after", delay)
+			return
+		}
 		if requestScopedRateLimit && shouldDeferRequestScopedVideoRateLimit(lease.QuotaMode, requestScopedQuotaFailures) {
 			quotaMode := lease.QuotaMode
 			metadata.DeferredAttempts = boundedDeferredVideoAttempts(failureAttempts.snapshot())
