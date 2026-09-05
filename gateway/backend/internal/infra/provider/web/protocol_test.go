@@ -1662,10 +1662,9 @@ func TestParseVideoStreamFixture(t *testing.T) {
 
 func TestTextToVideoPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 	payload := videoCreatePayload("雨后天晴！", "9:16", "480p", 6)
-	if len(payload) != 8 || payload["modelName"] != "imagine-video-gen" ||
+	if len(payload) != 6 || payload["modelName"] != "imagine-video-gen" ||
 		payload["message"] != "雨后天晴！ --mode=custom" ||
-		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true ||
-		payload["sendFinalMetadata"] != true || payload["kind"] != "CONVERSATION_KIND_IMAGINE" {
+		payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true {
 		t.Fatalf("payload = %#v", payload)
 	}
 
@@ -1703,39 +1702,25 @@ func TestTextToVideoPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 }
 
 func TestVideoCreatePayloadSingleImageUsesAttachmentProtocol(t *testing.T) {
-	payload := videoCreatePayload("让杯子缓慢旋转", "post_1", "16:9", "720p", 6, []uploadedFile{{ID: "file_1", URI: "https://assets.grok.com/image.png"}}, "custom")
-	if payload["modelName"] != "imagine-video-gen" || payload["message"] != "https://assets.grok.com/image.png  让杯子缓慢旋转 --mode=custom" || payload["enableSideBySide"] != false {
+	const assetID = "123e4567-e89b-12d3-a456-426614174000"
+	payload := videoCreatePayload("让杯子缓慢旋转", "post_1", "16:9", "720p", 6, []uploadedFile{{ID: "metadata-1", URI: "https://assets.grok.com/users/6ba7b810-9dad-11d1-80b4-00c04fd430c8/uploads/" + assetID + "/content"}}, "custom")
+	mediaGenInput := nestedMap(payload, "mediaGenInput")
+	imageToVideo := mediaGenInput["imageToVideo"].(map[string]any)
+	if payload["message"] != "让杯子缓慢旋转 --mode=custom" || payload["enableSideBySide"] != true || imageToVideo["prompt"] != "让杯子缓慢旋转" || !slices.Equal(imageToVideo["inputAssets"].([]string), []string{assetID}) {
 		t.Fatalf("payload = %#v", payload)
-	}
-	attachments, ok := payload["fileAttachments"].([]string)
-	if !ok || !slices.Equal(attachments, []string{"file_1"}) {
-		t.Fatalf("fileAttachments = %#v", payload["fileAttachments"])
-	}
-	if mediaGenInput, exists := payload["mediaGenInput"]; exists {
-		t.Fatalf("image payload must not contain textToVideo mediaGenInput: %#v", mediaGenInput)
-	}
-	config := nestedMap(payload, "responseMetadata", "modelConfigOverride", "modelMap", "videoGenModelConfig")
-	imageReferences, ok := config["imageReferences"].([]string)
-	if config["parentPostId"] != "post_1" || config["videoLength"] != 6 || config["resolutionName"] != "720p" || config["isReferenceToVideo"] != true || !slices.Equal(imageReferences, []string{"https://assets.grok.com/image.png"}) {
-		t.Fatalf("videoGenModelConfig = %#v", config)
 	}
 }
 
 func TestVideoCreatePayloadMultipleReferencesUsesReferenceProtocol(t *testing.T) {
+	const firstAssetID = "123e4567-e89b-12d3-a456-426614174000"
+	const secondAssetID = "223e4567-e89b-12d3-a456-426614174000"
 	payload := videoCreatePayload("一起运动", "post_1", "16:9", "720p", 6, []uploadedFile{
-		{ID: "file_1", URI: "https://assets.grok.com/a.png"},
-		{ID: "file_2", URI: "https://assets.grok.com/b.png"},
+		{URI: "https://assets.grok.com/users/6ba7b810-9dad-11d1-80b4-00c04fd430c8/uploads/" + firstAssetID + "/content"},
+		{URI: "https://assets.grok.com/users/6ba7b810-9dad-11d1-80b4-00c04fd430c8/uploads/" + secondAssetID + "/content"},
 	}, "custom")
-	if _, exists := payload["mediaGenInput"]; exists {
-		t.Fatalf("reference payload must not contain textToVideo: %#v", payload)
-	}
-	if _, exists := payload["fileAttachments"]; exists {
-		t.Fatalf("multi-reference payload must not use single attachment field: %#v", payload["fileAttachments"])
-	}
-	config := nestedMap(payload, "responseMetadata", "modelConfigOverride", "modelMap", "videoGenModelConfig")
-	references, ok := config["imageReferences"].([]string)
-	if !ok || !slices.Equal(references, []string{"https://assets.grok.com/a.png", "https://assets.grok.com/b.png"}) || config["isReferenceToVideo"] != true {
-		t.Fatalf("videoGenModelConfig = %#v", config)
+	referenceToVideo := nestedMap(payload, "mediaGenInput")["referenceToVideo"].(map[string]any)
+	if !slices.Equal(referenceToVideo["inputAssets"].([]string), []string{firstAssetID, secondAssetID}) || referenceToVideo["prompt"] != "一起运动" {
+		t.Fatalf("referenceToVideo = %#v", referenceToVideo)
 	}
 }
 

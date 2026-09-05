@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
@@ -356,7 +358,6 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if request.IsExtension {
 		return a.generateExtendedVideo(ctx, cfg, lease, token, request)
 	}
-	parentID := ""
 	rawReferences := make([]string, 0, 1+len(request.ReferenceURLs))
 	if imageURL := strings.TrimSpace(request.ImageURL); imageURL != "" {
 		rawReferences = append(rawReferences, imageURL)
@@ -374,12 +375,6 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		}
 		references = append(references, reference)
 	}
-	if len(references) > 0 {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0].URI, "", "video_reference_media_post")
-		if err != nil {
-			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
-		}
-	}
 	if len(videoSegments(request.Duration)) == 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
 	}
@@ -392,7 +387,11 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
 	if len(references) > 0 {
-		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, request.Preset)
+		assetIDs := videoInputAssetIDs(references)
+		if len(assetIDs) != len(references) {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("上传视频参考图片后未返回可用资产 ID"))
+		}
+		payload = videoCreatePayload(request.Prompt, "", ratio, resolution, segments[0], references, request.Preset)
 	}
 	result, postIDs, lastProgress, err := a.requestVideoWithModerationRetry(ctx, cfg, lease, token, payload, request.Progress)
 	if err != nil {
@@ -1211,7 +1210,7 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 }
 
 func videoCreatePayload(prompt string, args ...any) map[string]any {
-	var parentID, ratio, resolution, preset string
+	var ratio, resolution, preset string
 	var seconds int
 	var references []uploadedFile
 	if len(args) == 3 {
@@ -1219,64 +1218,65 @@ func videoCreatePayload(prompt string, args ...any) map[string]any {
 		resolution, _ = args[1].(string)
 		seconds, _ = args[2].(int)
 	} else if len(args) >= 6 {
-		parentID, _ = args[0].(string)
+		_, _ = args[0].(string)
 		ratio, _ = args[1].(string)
 		resolution, _ = args[2].(string)
 		seconds, _ = args[3].(int)
 		references, _ = args[4].([]uploadedFile)
 		preset, _ = args[5].(string)
 	}
-	config := map[string]any{
-		"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution,
-	}
-	attachments := make([]string, 0, len(references))
-	imageURLs := make([]string, 0, len(references))
-	for _, reference := range references {
-		if reference.ID != "" {
-			attachments = append(attachments, reference.ID)
-		}
-		if reference.URI != "" {
-			imageURLs = append(imageURLs, reference.URI)
-		}
-	}
-	isSingleReference := len(imageURLs) == 1
-	if len(imageURLs) > 0 {
-		config["isVideoEdit"] = false
-	}
-	if len(imageURLs) > 0 {
-		config["isReferenceToVideo"] = true
-		config["imageReferences"] = imageURLs
-	}
 	prompt = strings.TrimSpace(prompt)
 	modeFlag := "--mode=" + videoMode(prompt, preset)
 	message := modeFlag
-	if isSingleReference {
-		message = strings.Join(imageURLs, " ") + "  " + modeFlag
-	}
 	if prompt != "" {
 		message = prompt + " " + modeFlag
-		if isSingleReference {
-			message = strings.Join(imageURLs, " ") + "  " + prompt + " " + modeFlag
-		}
-	}
-	modelMap := map[string]any{}
-	if len(imageURLs) > 0 {
-		modelMap["videoGenModelConfig"] = config
 	}
 	payload := map[string]any{
-		"modelName": "imagine-video-gen", "message": message, "enableSideBySide": !isSingleReference,
-		"enableImageStreaming": true, "sendFinalMetadata": true, "kind": "CONVERSATION_KIND_IMAGINE",
-		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": modelMap}},
+		"modelName": "imagine-video-gen", "message": message, "enableSideBySide": true,
+		"sendFinalMetadata": true,
+		"responseMetadata":  map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{}}},
 	}
-	if len(imageURLs) == 0 {
+	assetIDs := videoInputAssetIDs(references)
+	switch len(assetIDs) {
+	case 0:
 		payload["mediaGenInput"] = map[string]any{"textToVideo": map[string]any{
 			"prompt": prompt, "aspectRatio": ratio, "duration": seconds, "resolutionName": resolution,
 		}}
-	}
-	if isSingleReference && len(attachments) > 0 {
-		payload["fileAttachments"] = attachments
+	case 1:
+		payload["mediaGenInput"] = map[string]any{"imageToVideo": map[string]any{
+			"prompt": prompt, "inputAssets": assetIDs, "aspectRatio": ratio, "duration": seconds,
+			"resolutionName": resolution, "mode": videoMode(prompt, preset),
+		}}
+	default:
+		payload["mediaGenInput"] = map[string]any{"referenceToVideo": map[string]any{
+			"prompt": prompt, "inputAssets": assetIDs, "aspectRatio": ratio, "duration": seconds,
+			"resolutionName": resolution,
+		}}
 	}
 	return payload
+}
+
+func videoInputAssetIDs(references []uploadedFile) []string {
+	assetIDs := make([]string, 0, len(references))
+	for _, reference := range references {
+		assetID := ""
+		if parsed, err := url.Parse(strings.TrimSpace(reference.URI)); err == nil {
+			for _, segment := range strings.Split(parsed.Path, "/") {
+				if _, err := uuid.Parse(segment); err == nil {
+					assetID = segment
+				}
+			}
+		}
+		if assetID == "" {
+			if _, err := uuid.Parse(strings.TrimSpace(reference.ID)); err == nil {
+				assetID = strings.TrimSpace(reference.ID)
+			}
+		}
+		if assetID != "" {
+			assetIDs = append(assetIDs, assetID)
+		}
+	}
+	return assetIDs
 }
 
 func videoMode(prompt, preset string) string {
