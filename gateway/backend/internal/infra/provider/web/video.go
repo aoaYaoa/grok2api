@@ -1243,7 +1243,7 @@ func videoCreatePayload(prompt string, args ...any) map[string]any {
 	if len(imageURLs) > 0 {
 		config["isVideoEdit"] = false
 	}
-	if len(imageURLs) > 1 {
+	if len(imageURLs) > 0 {
 		config["isReferenceToVideo"] = true
 		config["imageReferences"] = imageURLs
 	}

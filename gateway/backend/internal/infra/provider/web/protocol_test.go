@@ -1715,7 +1715,8 @@ func TestVideoCreatePayloadSingleImageUsesAttachmentProtocol(t *testing.T) {
 		t.Fatalf("image payload must not contain textToVideo mediaGenInput: %#v", mediaGenInput)
 	}
 	config := nestedMap(payload, "responseMetadata", "modelConfigOverride", "modelMap", "videoGenModelConfig")
-	if config["parentPostId"] != "post_1" || config["videoLength"] != 6 || config["resolutionName"] != "720p" || config["isReferenceToVideo"] != nil {
+	imageReferences, ok := config["imageReferences"].([]string)
+	if config["parentPostId"] != "post_1" || config["videoLength"] != 6 || config["resolutionName"] != "720p" || config["isReferenceToVideo"] != true || !slices.Equal(imageReferences, []string{"https://assets.grok.com/image.png"}) {
 		t.Fatalf("videoGenModelConfig = %#v", config)
 	}
 }
