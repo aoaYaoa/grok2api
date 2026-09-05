@@ -810,6 +810,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				s.deferVideoJob(parent, job)
 				return
 			}
+			if delay, retry := videoSelectionRetryDelay(err); retry {
+				s.deferVideoJobFor(parent, job, delay)
+				s.logger.Warn("video_generation_deferred", "job_id", job.ID, "reason", "account_or_egress_cooling", "retry_after", delay)
+				return
+			}
 			if lastErr == nil {
 				lastErr = err
 			}
@@ -1773,6 +1778,24 @@ func (s *Service) videoAttemptPolicy() routingAttemptPolicy {
 		configured = 999
 	}
 	return newRoutingAttemptPolicy(configured)
+}
+
+func videoSelectionRetryDelay(err error) (time.Duration, bool) {
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) {
+		return 0, false
+	}
+	if unavailable.Reason != SelectionCooling && unavailable.Reason != SelectionModelCooling {
+		return 0, false
+	}
+	delay := unavailable.RetryAfter
+	if delay <= 0 {
+		delay = 5 * time.Second
+	}
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	return delay, true
 }
 
 func (s *Service) releaseVideoInputs(job media.Job) {

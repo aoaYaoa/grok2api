@@ -46,6 +46,30 @@ func TestVideoQuotaModeUsesCurrentWebVideoProduct(t *testing.T) {
 	}
 }
 
+func TestVideoSelectionRetryDelayDefersCoolingAccounts(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want time.Duration
+		ok   bool
+	}{
+		{name: "short cooldown", err: &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: 12 * time.Second}, want: 12 * time.Second, ok: true},
+		{name: "missing retry after", err: &SelectionUnavailableError{Reason: SelectionCooling}, want: 5 * time.Second, ok: true},
+		{name: "long cooldown capped", err: &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: 20 * time.Minute}, want: 5 * time.Minute, ok: true},
+		{name: "model cooldown", err: &SelectionUnavailableError{Reason: SelectionModelCooling, RetryAfter: time.Minute}, want: time.Minute, ok: true},
+		{name: "quota exhausted", err: &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: time.Minute}, ok: false},
+		{name: "ordinary error", err: errors.New("boom"), ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := videoSelectionRetryDelay(test.err)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("videoSelectionRetryDelay() = (%s, %t), want (%s, %t)", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
 func TestVideoQuotaFinalizationKeepsEffectiveConsumptionFence(t *testing.T) {
 	refreshMode, decrementMode, availabilityMode := quotaFinalizationModes(account.QuotaModeWebVideo720p, account.QuotaGroupWebImagine)
 	if refreshMode != account.QuotaGroupWebImagine || decrementMode != account.QuotaModeWebVideo720p || availabilityMode != "" {
