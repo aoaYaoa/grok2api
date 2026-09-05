@@ -1790,6 +1790,9 @@ func (s *Service) videoAttemptPolicy() routingAttemptPolicy {
 }
 
 func videoSelectionRetryDelay(err error) (time.Duration, bool) {
+	if errors.Is(err, infraegress.ErrBoundNodeCooling) {
+		return 5 * time.Second, true
+	}
 	var unavailable *SelectionUnavailableError
 	if !errors.As(err, &unavailable) {
 		return 0, false

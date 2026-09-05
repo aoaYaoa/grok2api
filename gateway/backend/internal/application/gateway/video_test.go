@@ -22,6 +22,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
@@ -58,6 +59,7 @@ func TestVideoSelectionRetryDelayDefersCoolingAccounts(t *testing.T) {
 		{name: "long cooldown capped", err: &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: 20 * time.Minute}, want: 5 * time.Minute, ok: true},
 		{name: "model cooldown", err: &SelectionUnavailableError{Reason: SelectionModelCooling, RetryAfter: time.Minute}, want: time.Minute, ok: true},
 		{name: "quota exhausted", err: &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: time.Minute}, ok: false},
+		{name: "bound egress cooldown", err: fmt.Errorf("绑定出口节点 2 正在冷却: %w", infraegress.ErrBoundNodeCooling), want: 5 * time.Second, ok: true},
 		{name: "ordinary error", err: errors.New("boom"), ok: false},
 	}
 	for _, test := range tests {

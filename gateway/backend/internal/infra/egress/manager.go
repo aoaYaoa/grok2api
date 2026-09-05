@@ -61,6 +61,10 @@ var errNodeSnapshotInvalidated = errors.New("egress node snapshot invalidated")
 var errClientCacheInvalidated = errors.New("egress client cache invalidated")
 var errAccountConnectionIsolationDisabled = errors.New("egress account connection isolation disabled")
 
+// ErrBoundNodeCooling lets media jobs distinguish a temporary bound-egress
+// outage from an upstream generation failure and defer safely.
+var ErrBoundNodeCooling = errors.New("bound egress node cooling")
+
 type Lease struct {
 	NodeID           uint64
 	NodeName         string
@@ -850,7 +854,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 						continue
 					}
 				}
-				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 正在冷却", boundNodeID))
+				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 正在冷却: %w", boundNodeID, ErrBoundNodeCooling))
 			}
 			return m.leaseForNode(ctx, scope, affinity, encryptedCredentialCookies, managedClearance, selected)
 		}
