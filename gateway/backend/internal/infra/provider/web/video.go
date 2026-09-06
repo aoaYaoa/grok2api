@@ -1268,9 +1268,10 @@ func videoInputAssetIDs(references []uploadedFile) []string {
 			}
 		}
 		if assetID == "" {
-			if _, err := uuid.Parse(strings.TrimSpace(reference.ID)); err == nil {
-				assetID = strings.TrimSpace(reference.ID)
-			}
+			assetID = strings.TrimSpace(reference.MetadataID)
+		}
+		if assetID == "" {
+			assetID = strings.TrimSpace(reference.ID)
 		}
 		if assetID != "" {
 			assetIDs = append(assetIDs, assetID)

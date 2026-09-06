@@ -1724,6 +1724,13 @@ func TestVideoCreatePayloadMultipleReferencesUsesReferenceProtocol(t *testing.T)
 	}
 }
 
+func TestVideoInputAssetIDsFallsBackToMetadataID(t *testing.T) {
+	ids := videoInputAssetIDs([]uploadedFile{{ID: "file-1", MetadataID: "metadata-1", URI: "https://assets.grok.com/users/test/reference/content"}})
+	if !slices.Equal(ids, []string{"metadata-1"}) {
+		t.Fatalf("asset IDs = %#v", ids)
+	}
+}
+
 func TestGenerateVideoRefreshesOnlyReloadStatsigForbidden(t *testing.T) {
 	tests := []struct {
 		name             string
