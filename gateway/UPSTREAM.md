@@ -1,13 +1,17 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `1c9aedc709a0d53ddcfa99349d85b925178e2b69`
+- Commit: `44a390b890e7a3e0dd209b95b8c29a9f2b1be8dd`
 - Version: `v3.1.5`
-- Imported: `2026-09-01`
+- Imported: `2026-09-08`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `1c9aedc709a0d53ddcfa99349d85b925178e2b69`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `44a390b890e7a3e0dd209b95b8c29a9f2b1be8dd`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Manual model routes can reuse compatibility aliases without disrupting discovered routes.
+- Upstream `Retry-After` values are capped by the configured account cooldown maximum.
+- Codex `view_image` function tools are normalized for Grok Build compatibility.
 
 - Configurable Basic Web video-duration cap applied before upstream submission, while preserving local reference-video and extension workflows.
 - Replay-safe quality retries, bounded credential-material failure handling, and clearer pinned-account selection diagnostics.
