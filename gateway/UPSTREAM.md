@@ -1,9 +1,9 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `44a390b890e7a3e0dd209b95b8c29a9f2b1be8dd`
+- Commit: `8913b53fe92307a6f111b2885ab298a43c74a9ba`
 - Version: `v3.1.5`
-- Imported: `2026-09-08`
+- Imported: `2026-09-11`
 
 ## Selected Updates
 
@@ -12,6 +12,7 @@ The Go and React sources were three-way synchronized through upstream commit `44
 - Manual model routes can reuse compatibility aliases without disrupting discovered routes.
 - Upstream `Retry-After` values are capped by the configured account cooldown maximum.
 - Codex `view_image` function tools are normalized for Grok Build compatibility.
+- Console requests drop an empty tool choice pair, and Chat/Messages preserve scoped reasoning proofs across multi-turn tool calls.
 
 - Configurable Basic Web video-duration cap applied before upstream submission, while preserving local reference-video and extension workflows.
 - Replay-safe quality retries, bounded credential-material failure handling, and clearer pinned-account selection diagnostics.
