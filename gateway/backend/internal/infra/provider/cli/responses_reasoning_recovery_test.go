@@ -273,7 +273,7 @@ func TestRecoverReasoningDecodeFailureResetsSessionWithoutOpaqueInput(t *testing
 			}
 			return jsonHTTPResponse(request, http.StatusBadRequest, `{"error":"Could not decode the compaction blob. Ensure it is unmodified from the compact response."}`), nil
 		case 2:
-			if request.Header.Get("x-grok-session-id") != "" || request.Header.Get("x-grok-conv-id") != "" || strings.Contains(string(data), `"prompt_cache_key"`) {
+			if request.Header.Get("x-grok-session-id") != "" || request.Header.Get("x-grok-conv-id") != "" || request.Header.Get("x-grok-conv-group-id") != "" || strings.Contains(string(data), `"prompt_cache_key"`) {
 				t.Fatalf("stateless recovery headers=%#v body=%s", request.Header, data)
 			}
 			return jsonHTTPResponse(request, http.StatusOK, `{"id":"resp_ok","status":"completed","output":[]}`), nil

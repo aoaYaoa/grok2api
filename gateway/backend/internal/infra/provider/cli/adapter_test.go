@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -278,7 +279,7 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 		}
 		requestUUID, requestErr := uuid.Parse(requestID)
 		agentUUID, agentErr := uuid.Parse(r.Header.Get("x-grok-agent-id"))
-		if requestErr != nil || requestUUID.Version() != uuid.Version(4) || agentErr != nil || agentUUID.Version() != uuid.Version(4) || sessionID != expectedSessionID || r.Header.Get("x-grok-conv-id") != sessionID {
+		if requestErr != nil || requestUUID.Version() != uuid.Version(4) || agentErr != nil || agentUUID.Version() != uuid.Version(4) || sessionID != expectedSessionID || r.Header.Get("x-grok-conv-id") != sessionID || r.Header.Get("x-grok-conv-group-id") != grokConversationGroupID(sessionID) {
 			t.Fatalf("client identity headers = %#v", r.Header)
 		}
 		for _, legacy := range []string{"x-grok-client-surface", "x-grok-client-name", "x-grok-conversation-id", "x-grok-session-id-legacy", "x-grok-request-id"} {
@@ -1447,5 +1448,69 @@ func TestForwardResponsePreservesTruncatedRateLimitDiagnostic(t *testing.T) {
 	defer response.Body.Close()
 	if response.Diagnostic == nil || !response.Diagnostic.BodyTruncated || len(response.Diagnostic.Body) != provider.MaxDiagnosticBodyBytes {
 		t.Fatalf("diagnostic = %#v", response.Diagnostic)
+	}
+}
+
+// TestListModelsRegistersUpstreamReasoningMenu replays a real cli-chat-proxy
+// /v1/models payload (grok-build 1.0.40 era) and checks the live reasoning
+// menu drives domain capabilities the same way it drives grok-build's picker.
+func TestListModelsRegistersUpstreamReasoningMenu(t *testing.T) {
+	modeldomain.ResetUpstreamProfiles()
+	t.Cleanup(modeldomain.ResetUpstreamProfiles)
+	catalog, err := os.ReadFile("testdata/build_models_catalog.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://cli-chat-proxy.grok.com/v1"}, cipher)
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(catalog)), Request: request}, nil
+	})
+	models, err := adapter.ListModels(context.Background(), account.Credential{EncryptedAccessToken: encrypted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0] != "grok-4.7" || models[1] != "grok-4.6" {
+		t.Fatalf("models = %#v", models)
+	}
+	for _, model := range models {
+		profile, ok := modeldomain.UpstreamProfile(model)
+		if !ok {
+			t.Fatalf("%s profile not registered", model)
+		}
+		wantMenu := []string{"xhigh", "high", "medium", "low"}
+		if strings.Join(profile.ReasoningEfforts, ",") != strings.Join(wantMenu, ",") || profile.DefaultReasoningEffort != "high" || !profile.SupportsReasoningEffort || profile.ContextWindow != 500000 {
+			t.Fatalf("%s profile = %#v", model, profile)
+		}
+		if got := modeldomain.DefaultReasoningEffort(model); got != "high" {
+			t.Fatalf("%s default = %q", model, got)
+		}
+		if !modeldomain.SupportsReasoningEffort(model, "xhigh") || modeldomain.SupportsReasoningEffort(model, "max") || modeldomain.SupportsReasoningEffort(model, "none") {
+			t.Fatalf("%s effort gate drifted from catalog", model)
+		}
+	}
+	if profile, _ := modeldomain.UpstreamProfile("grok-4.7"); profile.MaxCompletionTokens != 1000000 || !profile.SupportsBackendSearch {
+		t.Fatalf("grok-4.7 profile = %#v", profile)
+	}
+	if profile, _ := modeldomain.UpstreamProfile("grok-4.6"); profile.MaxCompletionTokens != 0 || profile.SupportsBackendSearch {
+		t.Fatalf("grok-4.6 profile = %#v", profile)
+	}
+}
+
+func TestCatalogEntryReasoningMenuAcceptsBareAndObjectEntries(t *testing.T) {
+	var entry buildModelCatalogEntry
+	if err := json.Unmarshal([]byte(`{"id":"m","reasoningEfforts":["low",{"value":"max","default":true},{"label":"no value"},"","medium"],"contextWindow":1234,"supportsReasoningEffort":true}`), &entry); err != nil {
+		t.Fatal(err)
+	}
+	profile := modeldomain.NormalizeUpstreamProfile(entry.upstreamProfile())
+	if strings.Join(profile.ReasoningEfforts, ",") != "low,max,medium" || profile.DefaultReasoningEffort != "max" || profile.ContextWindow != 1234 || !profile.SupportsReasoningEffort {
+		t.Fatalf("profile = %#v", profile)
 	}
 }

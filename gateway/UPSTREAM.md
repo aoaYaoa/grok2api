@@ -1,13 +1,15 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `906b9493b099d192381c698d4e320fafeccb851c`
+- Commit: `5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42`
 - Version: `v3.1.6`
-- Imported: `2026-09-21`
+- Imported: `2026-09-23`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `906b9493b099d192381c698d4e320fafeccb851c`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Grok Build 1.0.40 headers, conversation grouping, and catalog-driven reasoning menus are supported, including `minimal`, `max`, and Grok 4.7 capability metadata.
 
 - Manual model routes can reuse compatibility aliases without disrupting discovered routes.
 - Upstream `Retry-After` values are capped by the configured account cooldown maximum.

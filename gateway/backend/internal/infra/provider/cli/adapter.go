@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -810,6 +811,22 @@ type buildModelCatalogEntry struct {
 		ModelID string `json:"modelId"`
 		Hidden  bool   `json:"hidden"`
 	} `json:"_meta"`
+	// Reasoning and budget metadata, mirroring the keys grok-build reads in
+	// xai-grok-shell remote/client.rs parse_remote_model_value. Snake and camel
+	// case spellings are both accepted there, so both are accepted here.
+	ContextWindow            int64  `json:"context_window"`
+	ContextWindowCamel       int64  `json:"contextWindow"`
+	MaxCompletionTokens      int64  `json:"max_completion_tokens"`
+	MaxCompletionTokensCamel int64  `json:"maxCompletionTokens"`
+	ReasoningEffort          string `json:"reasoning_effort"`
+	ReasoningEffortCamel     string `json:"reasoningEffort"`
+	SupportsReasoningEffort  *bool  `json:"supports_reasoning_effort"`
+	SupportsReasoningCamel   *bool  `json:"supportsReasoningEffort"`
+	SupportsBackendSearch    bool   `json:"supports_backend_search"`
+	// reasoning_efforts entries are either bare strings ("high") or objects
+	// {value,id,label,description,default}; decode lazily per entry.
+	ReasoningEfforts      []json.RawMessage `json:"reasoning_efforts"`
+	ReasoningEffortsCamel []json.RawMessage `json:"reasoningEfforts"`
 }
 
 // modelIdentifier keeps the legacy top-level id authoritative and uses the
@@ -821,6 +838,81 @@ func (e buildModelCatalogEntry) modelIdentifier() string {
 		return ""
 	}
 	return firstNonEmpty(e.ID, e.Model, e.ModelID, e.Meta.Model, e.Meta.ModelID)
+}
+
+// reasoningMenu decodes reasoning_efforts the way grok-build's
+// parse_reasoning_effort_options does: each entry is a bare effort string or an
+// object with a required `value`; unreadable entries are skipped instead of
+// discarding the whole menu. It returns the ordered values and the entry
+// flagged default (empty when none is flagged).
+func (e buildModelCatalogEntry) reasoningMenu() (values []string, defaultValue string) {
+	raw := e.ReasoningEfforts
+	if len(raw) == 0 {
+		raw = e.ReasoningEffortsCamel
+	}
+	for _, entry := range raw {
+		var bare string
+		if err := json.Unmarshal(entry, &bare); err == nil {
+			if bare = strings.TrimSpace(bare); bare != "" {
+				values = append(values, bare)
+			}
+			continue
+		}
+		var option struct {
+			Value   string `json:"value"`
+			Default bool   `json:"default"`
+		}
+		if err := json.Unmarshal(entry, &option); err != nil {
+			continue
+		}
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+		if option.Default && defaultValue == "" {
+			defaultValue = value
+		}
+	}
+	return values, defaultValue
+}
+
+// upstreamProfile projects the catalog entry onto the domain profile.
+func (e buildModelCatalogEntry) upstreamProfile() modeldomain.UpstreamModelProfile {
+	menu, menuDefault := e.reasoningMenu()
+	supports := false
+	switch {
+	case e.SupportsReasoningEffort != nil:
+		supports = *e.SupportsReasoningEffort
+	case e.SupportsReasoningCamel != nil:
+		supports = *e.SupportsReasoningCamel
+	}
+	contextWindow := e.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = e.ContextWindowCamel
+	}
+	maxCompletion := e.MaxCompletionTokens
+	if maxCompletion <= 0 {
+		maxCompletion = e.MaxCompletionTokensCamel
+	}
+	return modeldomain.UpstreamModelProfile{
+		ReasoningEfforts:        menu,
+		DefaultReasoningEffort:  firstNonEmpty(menuDefault, e.ReasoningEffort, e.ReasoningEffortCamel),
+		SupportsReasoningEffort: supports,
+		ContextWindow:           clampInt(contextWindow),
+		MaxCompletionTokens:     clampInt(maxCompletion),
+		SupportsBackendSearch:   e.SupportsBackendSearch,
+	}
+}
+
+func clampInt(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(value)
 }
 
 func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credential, accessToken, base string) ([]string, int, error) {
@@ -869,6 +961,9 @@ func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credentia
 		}
 		seen[identifier] = struct{}{}
 		models = append(models, identifier)
+		// Publish the live reasoning menu / context budget so effort validation,
+		// aliases, and catalog output follow the upstream catalog like grok-build does.
+		modeldomain.RegisterUpstreamModelProfile(identifier, item.upstreamProfile())
 	}
 	a.recordModelsETag(credential.ID, resp.Header.Get("ETag"))
 	return models, resp.StatusCode, nil
@@ -1034,6 +1129,9 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 		if sessionID != "" {
 			req.Header.Set("x-grok-session-id", sessionID)
 			req.Header.Set("x-grok-conv-id", sessionID)
+			// grok-build derives x-grok-conv-group-id from the root session so the
+			// proxy can group a root conversation with its subagent descendants.
+			req.Header.Set("x-grok-conv-group-id", grokConversationGroupID(sessionID))
 		}
 		req.Header.Set("x-grok-req-id", requestID)
 		// The gateway cannot reliably recover the CLI prompt index from a stateless API request.
@@ -1078,6 +1176,17 @@ func grokSessionID(promptCacheKey string) (string, error) {
 		return parsed.String(), nil
 	}
 	return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, []byte("grok2api:session:"+key), 8).String(), nil
+}
+
+// grokConversationGroupIDNamespace mirrors xai-grok-shell `CONVERSATION_GROUP_NAMESPACE`.
+const grokConversationGroupIDNamespace = "xai:grok-build:conversation-group:"
+
+// grokConversationGroupID reproduces grok-build `derive_conversation_group_id`:
+// UUIDv5(NAMESPACE_OID, namespace + root_session_id). The gateway treats each
+// stable session as its own root conversation, so the group id derives from the
+// same session id sent as x-grok-conv-id.
+func grokConversationGroupID(rootSessionID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(grokConversationGroupIDNamespace+rootSessionID)).String()
 }
 
 func injectPromptCacheKey(body []byte, clientKey string) ([]byte, error) {

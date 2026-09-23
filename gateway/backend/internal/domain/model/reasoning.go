@@ -11,12 +11,13 @@ import (
 type ReasoningEffort = string
 
 const (
-	ReasoningEffortNone   ReasoningEffort = "none"
-	ReasoningEffortLow    ReasoningEffort = "low"
-	ReasoningEffortMedium ReasoningEffort = "medium"
-	ReasoningEffortHigh   ReasoningEffort = "high"
-	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
-	ReasoningEffortMax    ReasoningEffort = "max"
+	ReasoningEffortNone    ReasoningEffort = "none"
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortXHigh   ReasoningEffort = "xhigh"
+	ReasoningEffortMax     ReasoningEffort = "max"
 )
 
 const GrokComposer25Fast = "grok-composer-2.5-fast"
@@ -25,6 +26,7 @@ const grokComposerModelPrefix = "grok-composer-"
 
 // reasoningEffortSuffixes is ordered longest-first so "xhigh" wins over "high".
 var reasoningEffortSuffixes = []string{
+	ReasoningEffortMinimal,
 	ReasoningEffortXHigh,
 	ReasoningEffortMedium,
 	ReasoningEffortHigh,
@@ -33,18 +35,35 @@ var reasoningEffortSuffixes = []string{
 	ReasoningEffortMax,
 }
 
+// knownReasoningEfforts is the full grok-build wire vocabulary
+// (xai-grok-sampling-types ReasoningEffort). Upstream catalog menus are
+// filtered against it so a tier this gateway cannot name is never advertised.
+var knownReasoningEfforts = map[string]struct{}{
+	ReasoningEffortNone: {}, ReasoningEffortMinimal: {}, ReasoningEffortLow: {}, ReasoningEffortMedium: {},
+	ReasoningEffortHigh: {}, ReasoningEffortXHigh: {}, ReasoningEffortMax: {},
+}
+
+// IsKnownReasoningEffort reports whether value is a grok-build wire effort tier.
+func IsKnownReasoningEffort(value string) bool {
+	_, ok := knownReasoningEfforts[strings.ToLower(strings.TrimSpace(value))]
+	return ok
+}
+
 // grokReasoningCapabilities maps external public model IDs to the reasoning levels
 // generally accepted by the model family. Provider-specific wire restrictions are
 // applied by providerReasoningEffortOverrides:
 //   - grok-4.5: low/medium/high (reasoning cannot be disabled; no xhigh/max)
-//   - grok-4.6: low/medium/high/xhigh (xhigh is a real upstream effort; max stays guarded)
+//   - grok-4.6 / grok-4.7: low/medium/high/xhigh (xhigh is a real upstream effort; max stays guarded)
 //   - grok-4.3: none/low/medium/high
 //   - grok-4.20-multi-agent: low/medium/high/xhigh (effort controls agent count)
 //
 // Unknown models default to none-only and never expand into effort aliases.
+// When the Build catalog advertises a reasoning menu for a model (see
+// RegisterUpstreamModelProfile), that live menu takes precedence over this table.
 var grokReasoningCapabilities = map[string][]string{
 	"grok-4.5":                     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 	"grok-4.6":                     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh},
+	"grok-4.7":                     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh},
 	"grok-4.3":                     {ReasoningEffortNone, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 	"grok-build-0.1":               {ReasoningEffortNone},
 	"grok-4.20-0309-reasoning":     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
@@ -183,16 +202,7 @@ func DefaultReasoningEffort(publicModel string) string {
 	if _, effort, ok := ParseReasoningModelAlias(publicModel); ok {
 		return effort
 	}
-	levels := SupportedReasoningEfforts(publicModel)
-	for _, level := range levels {
-		if level == ReasoningEffortMedium {
-			return level
-		}
-	}
-	if len(levels) > 0 {
-		return levels[0]
-	}
-	return ReasoningEffortNone
+	return preferredReasoningEffort(externalModelSlug(publicModel), SupportedReasoningEfforts(publicModel))
 }
 
 // DefaultReasoningEffortForProvider returns a configurable Provider default.
@@ -201,7 +211,25 @@ func DefaultReasoningEffortForProvider(providerValue account.Provider, publicMod
 	if _, effort, ok := ParseReasoningModelAlias(publicModel); ok && SupportsReasoningEffortForProvider(providerValue, publicModel, effort) {
 		return effort
 	}
-	levels := SupportedReasoningEffortsForProvider(providerValue, publicModel)
+	return preferredReasoningEffort(externalModelSlug(publicModel), SupportedReasoningEffortsForProvider(providerValue, publicModel))
+}
+
+func reasoningEffortsForSlug(slug string) []string {
+	if profile, ok := UpstreamProfile(slug); ok && len(profile.ReasoningEfforts) > 0 {
+		return append([]string(nil), profile.ReasoningEfforts...)
+	}
+	if levels, ok := grokReasoningCapabilities[slug]; ok {
+		return append([]string(nil), levels...)
+	}
+	return []string{ReasoningEffortNone}
+}
+
+// preferredReasoningEffort picks the default among levels: the catalog-declared
+// default when the live menu provides one, otherwise medium, otherwise the first level.
+func preferredReasoningEffort(slug string, levels []string) string {
+	if profile, ok := UpstreamProfile(slug); ok && profile.DefaultReasoningEffort != "" && levelsContain(levels, profile.DefaultReasoningEffort) {
+		return profile.DefaultReasoningEffort
+	}
 	for _, level := range levels {
 		if level == ReasoningEffortMedium {
 			return level
@@ -211,13 +239,6 @@ func DefaultReasoningEffortForProvider(providerValue account.Provider, publicMod
 		return levels[0]
 	}
 	return ReasoningEffortNone
-}
-
-func reasoningEffortsForSlug(slug string) []string {
-	if levels, ok := grokReasoningCapabilities[slug]; ok {
-		return append([]string(nil), levels...)
-	}
-	return []string{ReasoningEffortNone}
 }
 
 // ReasoningAliasPublicIDs returns effort-suffixed aliases for a base public model ID.

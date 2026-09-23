@@ -107,10 +107,10 @@ func convertMessagesRequestWithReasoningReplay(body []byte, model string, cache 
 		if request.OutputConfig != nil && request.OutputConfig.Effort != "" {
 			effort = request.OutputConfig.Effort
 		}
+		// Every grok-build wire tier passes through; the Build normalizer folds
+		// tiers the selected model's catalog menu does not offer.
 		switch effort {
-		case "minimal":
-			effort = "low"
-		case "low", "medium", "high", "xhigh", "max":
+		case "minimal", "low", "medium", "high", "xhigh", "max":
 		default:
 			return nil, ResponseOptions{}, fmt.Errorf("不支持 output_config.effort=%q", effort)
 		}
