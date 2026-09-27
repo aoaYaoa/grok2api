@@ -7,6 +7,8 @@ services:
     environment:
       TZ: Asia/Shanghai
       GROK2API_CONFIG_SOURCE: /run/grok2api/config.yaml
+      GROK2API_PUBLIC_AUTH_USERNAME: "${GROK2API_PUBLIC_AUTH_USERNAME:-}"
+      GROK2API_PUBLIC_AUTH_PASSWORD: "${GROK2API_PUBLIC_AUTH_PASSWORD:-}"
     ports:
       - "${GROK2API_PORT:-18002}:8000"
     volumes:

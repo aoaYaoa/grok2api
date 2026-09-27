@@ -20,7 +20,7 @@ export async function publicFetch<T>(key: string, input: RequestInfo | URL, init
   const headers = new Headers(init.headers);
   if (key) headers.set("Authorization", `Bearer ${key}`);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers, credentials: "include" });
   const text = await response.text();
   let payload: unknown = null;
   if (text) {
@@ -33,7 +33,7 @@ export async function publicFetch<T>(key: string, input: RequestInfo | URL, init
 export async function publicSSE<T>(key: string, url: string, onFrame: (frame: SSEFrame<T>) => void, signal?: AbortSignal) {
   const headers = new Headers({ Accept: "text/event-stream" });
   if (key) headers.set("Authorization", `Bearer ${key}`);
-  const response = await fetch(url, { headers, signal });
+  const response = await fetch(url, { headers, signal, credentials: "include" });
   if (!response.ok || !response.body) {
     const text = await response.text();
     throw new PublicAPIError(response.status, sanitizePublicError(text, `${response.status} ${response.statusText}`));
@@ -53,7 +53,7 @@ export async function publicSSERequest<T>(key: string, url: string, init: Reques
   headers.set("Accept", "text/event-stream");
   if (key) headers.set("Authorization", `Bearer ${key}`);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(url, { ...init, headers, signal });
+  const response = await fetch(url, { ...init, headers, signal, credentials: "include" });
   if (!response.ok || !response.body) throw new PublicAPIError(response.status, sanitizePublicError(await response.text(), `${response.status} ${response.statusText}`));
   const parser = createSSEParser(); const reader = response.body.getReader(); const decoder = new TextDecoder();
   while (true) { const { done, value } = await reader.read(); for (const frame of parser.push(decoder.decode(value || new Uint8Array(), { stream: !done }))) onFrame(frame as SSEFrame<T>); if (done) break; }

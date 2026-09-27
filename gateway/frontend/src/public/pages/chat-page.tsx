@@ -55,7 +55,7 @@ export function ChatPage() {
     const body: Record<string, unknown> = { model, messages: apiMessages, stream: true, temperature, top_p: topP };
     if (reasoning !== "default") body.reasoning_effort = reasoning;
     try {
-      const response = await fetch(publicEndpoints.chat, { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(body), signal: controller.signal });
+      const response = await fetch(publicEndpoints.chat, { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(body), signal: controller.signal, credentials: "include" });
       if (!response.ok || !response.body) throw new Error((await response.text()) || `请求失败: ${response.status}`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

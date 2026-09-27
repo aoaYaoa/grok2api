@@ -2,6 +2,7 @@ package legacy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,134 @@ type testKeyError string
 func (e testKeyError) Error() string { return string(e) }
 
 const errInvalidTestKey = testKeyError("invalid test key")
+
+func TestPublicPasswordLoginSetsSessionCookieForProtectedRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-client-secret"}
+	handler := NewHandler(Options{
+		PublicEnabled:      true,
+		PublicKey:          "legacy-public-key",
+		ClientKey:          "g2-client-secret",
+		PublicAuthUsername: "grok",
+		PublicAuthPassword: "test-password-42!",
+		PublicAuthSecret:   "test-session-secret",
+		SecureCookies:      false,
+	}, authenticator)
+	router := gin.New()
+	handler.Register(router, func(group *gin.RouterGroup) {
+		group.GET("/identity", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	}, nil)
+
+	body := strings.NewReader(`{"username":"grok","password":"test-password-42!"}`)
+	login := httptest.NewRequest(http.MethodPost, "/v1/public/auth/login", body)
+	login.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	router.ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", loginRecorder.Code, loginRecorder.Body.String())
+	}
+	var loginPayload map[string]any
+	if err := json.Unmarshal(loginRecorder.Body.Bytes(), &loginPayload); err != nil || loginPayload["authenticated"] != true {
+		t.Fatalf("login payload = %s", loginRecorder.Body.String())
+	}
+	cookie := loginRecorder.Result().Cookies()
+	if len(cookie) != 1 || cookie[0].Name != publicSessionCookieName || !cookie[0].HttpOnly {
+		t.Fatalf("session cookie = %#v", cookie)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/identity", nil)
+	request.AddCookie(cookie[0])
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("cookie-authenticated route status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPublicPasswordLoginRejectsWrongPassword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(Options{
+		PublicEnabled:      true,
+		PublicAuthUsername: "grok",
+		PublicAuthPassword: "test-password-42!",
+		PublicAuthSecret:   "test-session-secret",
+	}, &fakeClientAuthenticator{wantRaw: "unused"})
+	router := gin.New()
+	handler.Register(router, nil, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/auth/login", strings.NewReader(`{"username":"grok","password":"wrong"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Fatalf("wrong password set cookies = %#v", recorder.Result().Cookies())
+	}
+}
+
+func TestPublicPasswordAuthRejectsArbitraryBearerWhenLegacyPublicKeyIsUnset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(Options{
+		PublicEnabled:      true,
+		ClientKey:          "g2-client-secret",
+		PublicAuthUsername: "grok",
+		PublicAuthPassword: "test-password-42!",
+		PublicAuthSecret:   "test-session-secret",
+	}, &fakeClientAuthenticator{wantRaw: "g2-client-secret"})
+	router := gin.New()
+	handler.Register(router, func(group *gin.RouterGroup) {
+		group.GET("/identity", func(c *gin.Context) { c.Status(http.StatusOK) })
+	}, nil)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/identity", nil)
+	request.Header.Set("Authorization", "Bearer anything")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("arbitrary bearer status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPublicLogoutInvalidatesSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authenticator := &fakeClientAuthenticator{wantRaw: "g2-client-secret"}
+	handler := NewHandler(Options{
+		PublicEnabled:      true,
+		ClientKey:          "g2-client-secret",
+		PublicAuthUsername: "grok",
+		PublicAuthPassword: "test-password-42!",
+		PublicAuthSecret:   "test-session-secret",
+		SecureCookies:      false,
+	}, authenticator)
+	router := gin.New()
+	handler.Register(router, func(group *gin.RouterGroup) {
+		group.GET("/identity", func(c *gin.Context) { c.Status(http.StatusOK) })
+	}, nil)
+
+	login := httptest.NewRequest(http.MethodPost, "/v1/public/auth/login", strings.NewReader(`{"username":"grok","password":"test-password-42!"}`))
+	login.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	router.ServeHTTP(loginRecorder, login)
+	cookie := loginRecorder.Result().Cookies()[0]
+
+	logout := httptest.NewRequest(http.MethodPost, "/v1/public/auth/logout", nil)
+	logout.AddCookie(cookie)
+	logoutRecorder := httptest.NewRecorder()
+	router.ServeHTTP(logoutRecorder, logout)
+	if logoutRecorder.Code != http.StatusOK {
+		t.Fatalf("logout status = %d body=%s", logoutRecorder.Code, logoutRecorder.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/public/identity", nil)
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("logged-out route status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
 
 func TestPublicRoutesMapLegacyKeyToPersistentClientKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)

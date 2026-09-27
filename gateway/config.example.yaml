@@ -50,6 +50,8 @@ legacy:
   cachePath: "./data/legacy-cache"
   assetVersion: "go"
   publicEnabled: true
+  # [按需修改] 公共工作台账号名；密码仅通过 GROK2API_PUBLIC_AUTH_PASSWORD 环境变量注入。
+  publicAuthUsername: ""
   # [按需修改] 仅旧公共工作台兼容接口使用；React 管理端使用管理员会话。
   adminKey: ""
   publicKey: ""

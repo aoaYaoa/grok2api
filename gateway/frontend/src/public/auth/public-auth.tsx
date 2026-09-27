@@ -5,7 +5,7 @@ import { publicEndpoints, publicFetch } from "@/public/api/client";
 import { publicRoutePaths } from "@/public/app/public-paths.mjs";
 import { clearPublicKey, loadPublicKey, savePublicKey } from "@/public/auth/key-storage";
 
-type AuthState = { key: string; ready: boolean; authenticated: boolean; login: (key: string) => Promise<void>; logout: () => void };
+type AuthState = { key: string; ready: boolean; authenticated: boolean; login: (username: string, password: string) => Promise<void>; logout: () => Promise<void> };
 const AuthContext = createContext<AuthState | null>(null);
 
 async function verify(key: string) { await publicFetch(key, publicEndpoints.verify, { cache: "no-store" }); }
@@ -25,14 +25,19 @@ export function PublicAuthProvider({ children }: { children: ReactNode }) {
     return () => { active = false; };
   }, []);
 
-  const login = useCallback(async (value: string) => {
-    const next = value.trim();
-    await verify(next);
-    await savePublicKey(next);
-    setKey(next);
+  const login = useCallback(async (username: string, password: string) => {
+    await publicFetch("", publicEndpoints.authLogin, {
+      method: "POST",
+      body: JSON.stringify({ username: username.trim(), password }),
+    });
+    await savePublicKey("");
+    setKey("");
     setAuthenticated(true);
   }, []);
-  const logout = useCallback(() => { clearPublicKey(); setKey(""); setAuthenticated(false); }, []);
+  const logout = useCallback(async () => {
+    try { await publicFetch(key, publicEndpoints.authLogout, { method: "POST" }); } catch { /* local logout still clears the UI */ }
+    clearPublicKey(); setKey(""); setAuthenticated(false);
+  }, [key]);
   const value = useMemo(() => ({ key, ready, authenticated, login, logout }), [key, ready, authenticated, login, logout]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

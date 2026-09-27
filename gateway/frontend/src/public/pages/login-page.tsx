@@ -13,7 +13,8 @@ export function LoginPage() {
   const auth = usePublicAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [key, setKey] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -25,12 +26,12 @@ export function LoginPage() {
     event.preventDefault();
     setSubmitting(true);
     try {
-      await auth.login(key);
+      await auth.login(username, password);
       const from = (location.state as { from?: string } | null)?.from || publicRoutePaths.chat;
       navigate(from, { replace: true });
-      toast.success("验证成功");
+      toast.success("登录成功");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Public Key 验证失败");
+      toast.error(error instanceof Error ? error.message : "用户名或密码错误");
     } finally { setSubmitting(false); }
   }
 
@@ -42,10 +43,12 @@ export function LoginPage() {
           <a href="https://github.com/chenyme/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub" className="grid size-11 place-items-center rounded-md hover:bg-accent"><GitHubMark className="size-5" /></a>
         </div>
         <form onSubmit={submit} className="space-y-4">
-          <label className="block text-sm font-medium" htmlFor="public-key">Public Key</label>
+          <label className="block text-sm font-medium" htmlFor="public-username">账号</label>
+          <Input id="public-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" className="h-11" placeholder="输入账号" />
+          <label className="block text-sm font-medium" htmlFor="public-password">密码</label>
           <div className="relative">
-            <Input id="public-key" type={show ? "text" : "password"} value={key} onChange={(event) => setKey(event.target.value)} autoComplete="current-password" className="h-11 pr-12" placeholder="未设置密钥时可留空" />
-            <button type="button" onClick={() => setShow((value) => !value)} className="absolute right-0 top-0 grid size-11 place-items-center text-muted-foreground" aria-label={show ? "隐藏 Public Key" : "显示 Public Key"}>{show ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button>
+            <Input id="public-password" type={show ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" className="h-11 pr-12" placeholder="输入密码" />
+            <button type="button" onClick={() => setShow((value) => !value)} className="absolute right-0 top-0 grid size-11 place-items-center text-muted-foreground" aria-label={show ? "隐藏密码" : "显示密码"}>{show ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button>
           </div>
           <Button type="submit" className="h-11 w-full" disabled={submitting}><LogIn className="size-4" />{submitting ? "验证中..." : "进入工作台"}</Button>
         </form>

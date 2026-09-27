@@ -22,6 +22,8 @@ import (
 
 const (
 	DatabaseURLEnv                = "GROK2API_DATABASE_URL"
+	PublicAuthUsernameEnv         = "GROK2API_PUBLIC_AUTH_USERNAME"
+	PublicAuthPasswordEnv         = "GROK2API_PUBLIC_AUTH_PASSWORD"
 	StatsigModeManual             = "manual"
 	StatsigModeURL                = "url"
 	ClearanceModeManual           = "manual"
@@ -102,13 +104,15 @@ func (c FrontendConfig) EffectivePublicAPIBaseURL() string {
 }
 
 type LegacyConfig struct {
-	StaticPath    string `yaml:"staticPath"`
-	CachePath     string `yaml:"cachePath"`
-	AssetVersion  string `yaml:"assetVersion"`
-	PublicEnabled bool   `yaml:"publicEnabled"`
-	AdminKey      string `yaml:"adminKey"`
-	PublicKey     string `yaml:"publicKey"`
-	ClientKey     string `yaml:"clientKey"`
+	StaticPath         string `yaml:"staticPath"`
+	CachePath          string `yaml:"cachePath"`
+	AssetVersion       string `yaml:"assetVersion"`
+	PublicEnabled      bool   `yaml:"publicEnabled"`
+	AdminKey           string `yaml:"adminKey"`
+	PublicKey          string `yaml:"publicKey"`
+	ClientKey          string `yaml:"clientKey"`
+	PublicAuthUsername string `yaml:"publicAuthUsername"`
+	PublicAuthPassword string `yaml:"-"`
 }
 
 type DatabaseConfig struct {
@@ -413,6 +417,12 @@ func Load(path string) (Config, error) {
 // overrides after YAML and before CLI overrides. Empty values are ignored so
 // Compose can pass an optional variable without changing existing deployments.
 func applyEnvironmentOverrides(cfg *Config) error {
+	if value := strings.TrimSpace(os.Getenv(PublicAuthUsernameEnv)); value != "" {
+		cfg.Legacy.PublicAuthUsername = value
+	}
+	if value := os.Getenv(PublicAuthPasswordEnv); value != "" {
+		cfg.Legacy.PublicAuthPassword = value
+	}
 	value := strings.TrimSpace(os.Getenv(DatabaseURLEnv))
 	if value == "" {
 		return nil

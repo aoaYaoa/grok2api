@@ -1,6 +1,8 @@
 export const publicKeyStorage = "grok2api_public_key";
 
 export const publicEndpoints = Object.freeze({
+  authLogin: "/v1/public/auth/login",
+  authLogout: "/v1/public/auth/logout",
   verify: "/v1/public/verify",
   models: "/v1/public/models",
   chat: "/v1/public/chat/completions",

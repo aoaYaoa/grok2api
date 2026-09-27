@@ -24,7 +24,7 @@ export function PublicShell() {
   const navigate = useNavigate();
   const { resolvedTheme, setTheme } = useTheme();
   const [moreOpen, setMoreOpen] = useState(false);
-  const logout = () => { auth.logout(); navigate(publicRoutePaths.login, { replace: true }); };
+  const logout = () => { void auth.logout(); navigate(publicRoutePaths.login, { replace: true }); };
   return (
     <div className="min-h-dvh bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b border-sidebar-border bg-sidebar/95 backdrop-blur">

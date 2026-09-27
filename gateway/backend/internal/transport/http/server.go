@@ -40,23 +40,26 @@ import (
 )
 
 type Dependencies struct {
-	Logger              *slog.Logger
-	RequestTimeout      time.Duration
-	MaxBodyBytes        int64
-	TrustedProxies      []string
-	ConcurrencyGate     *middleware.ConcurrencyGate
-	SecureCookies       bool
-	SwaggerEnabled      bool
-	PublicAPIBaseURL    string
-	FrontendStaticPath  string
-	LegacyStaticPath    string
-	LegacyCachePath     string
-	LegacyAssetVersion  string
-	LegacyPublicEnabled bool
-	LegacyAdminKey      string
-	LegacyPublicKey     string
-	LegacyClientKey     string
-	LegacyAllowNSFW     bool
+	Logger                   *slog.Logger
+	RequestTimeout           time.Duration
+	MaxBodyBytes             int64
+	TrustedProxies           []string
+	ConcurrencyGate          *middleware.ConcurrencyGate
+	SecureCookies            bool
+	SwaggerEnabled           bool
+	PublicAPIBaseURL         string
+	FrontendStaticPath       string
+	LegacyStaticPath         string
+	LegacyCachePath          string
+	LegacyAssetVersion       string
+	LegacyPublicEnabled      bool
+	LegacyAdminKey           string
+	LegacyPublicKey          string
+	LegacyClientKey          string
+	LegacyPublicAuthUsername string
+	LegacyPublicAuthPassword string
+	LegacyPublicAuthSecret   string
+	LegacyAllowNSFW          bool
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
 	Readiness              func(context.Context) ReadinessSnapshot
 	Ready                  func(context.Context) bool
@@ -222,6 +225,10 @@ func New(deps Dependencies) *gin.Engine {
 		AdminKey:            deps.LegacyAdminKey,
 		PublicKey:           deps.LegacyPublicKey,
 		ClientKey:           deps.LegacyClientKey,
+		PublicAuthUsername:  deps.LegacyPublicAuthUsername,
+		PublicAuthPassword:  deps.LegacyPublicAuthPassword,
+		PublicAuthSecret:    deps.LegacyPublicAuthSecret,
+		SecureCookies:       deps.SecureCookies,
 		StorageType:         "sqlite",
 		AllowNSFW:           deps.LegacyAllowNSFW,
 		Accounts:            deps.Accounts,

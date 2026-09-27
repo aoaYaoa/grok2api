@@ -168,13 +168,28 @@ func (f *fakeImageGenerator) EditImage(_ context.Context, input gateway.ImageEdi
 	}, nil
 }
 
-func TestImagineConfigDoesNotRequirePageKey(t *testing.T) {
+func TestImagineConfigRequiresPublicSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewHandler(Options{PublicEnabled: true, AllowNSFW: true}, nil)
+	handler := NewHandler(Options{
+		PublicEnabled:      true,
+		AllowNSFW:          true,
+		ClientKey:          "g2-direct-key",
+		PublicAuthUsername: "grok",
+		PublicAuthPassword: "test-password-42!",
+		PublicAuthSecret:   "test-session-secret",
+	}, &fakeClientAuthenticator{wantRaw: "g2-direct-key"})
 	router := gin.New()
 	handler.Register(router, nil, nil)
 
+	login := httptest.NewRequest(http.MethodPost, "/v1/public/auth/login", strings.NewReader(`{"username":"grok","password":"test-password-42!"}`))
+	login.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	router.ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginRecorder.Code, loginRecorder.Body.String())
+	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/public/imagine/config", nil)
+	request.AddCookie(loginRecorder.Result().Cookies()[0])
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"nsfw":true`) {
