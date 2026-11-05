@@ -231,6 +231,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	webAdapter.SetLogger(logger)
 	webAdapter.SetVideoAssetStore(legacyVideoStore)
 	consoleAdapter := consoleprovider.NewAdapter(consoleProviderConfig(cfg), egressManager, cipher, mediaService)
+	consoleAdapter.SetLogger(logger)
+	consoleAdapter.SetCredentialCacheStore(accountRepo)
 	providers := provider.NewRegistry(cliAdapter, webAdapter, consoleAdapter)
 	if err := providers.Validate(); err != nil {
 		if runtimeStore != nil {
@@ -350,6 +352,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	selector.UpdateSegmentedSelector(cfg.Routing.SegmentedSelectorEnabled, cfg.Routing.SegmentedMinCandidates, cfg.Routing.SegmentedWindowSize)
 	selector.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 	accountService.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+	accountService.UpdateAutoDeleteConsoleUnlinked(cfg.Accounts.AutoDeleteConsoleUnlinked)
 	egressManager.UpdateAccountIsolatedConnections(cfg.Routing.AccountIsolatedConnections)
 	invalidationService := invalidationapp.NewService(invalidationBus, invalidationSourceInstance(cfg), func(event repository.InvalidationEvent) {
 		selector.ApplyInvalidation(event)
@@ -359,7 +362,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
-	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.QualityGuard.RequestRetry))
+	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.QualityGuard))
 	gatewayService.UpdateVideoMaxAttempts(cfg.Routing.VideoMaxAttempts)
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
 	gatewayService.SetLogger(logger)
@@ -414,10 +417,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressService.ConfigureAutoAssignBounds(next.Routing.AutoAssignMaxNodeShare, next.Routing.AutoAssignMaxMigrationShare)
 		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+		accountService.UpdateAutoDeleteConsoleUnlinked(next.Accounts.AutoDeleteConsoleUnlinked)
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
-		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.QualityGuard.RequestRetry))
+		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.QualityGuard))
 		gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
 		gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
 		gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
@@ -498,17 +502,26 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 	}
 }
 
-func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
+func qualityRetryRuntime(value config.QualityGuardConfig) gateway.QualityRetryRuntime {
+	retry := value.RequestRetry
 	return gateway.QualityRetryRuntime{
-		Enabled:                         value.Enabled,
-		MaxAttempts:                     value.MaxAttempts,
-		HoldTimeout:                     value.HoldTimeout.Value(),
-		MinOutputTokens:                 int64(value.MinOutputTokens),
-		OnExhausted:                     value.OnExhausted,
-		AccountCooldown:                 value.AccountCooldown.Value(),
-		IdleAccountCooldown:             value.IdleAccountCooldown.Value(),
-		MinEncryptedBytes:               value.MinEncryptedBytes,
-		EncryptedBytesPerReasoningToken: value.EncryptedBytesPerReasoningToken,
+		// Auto-disable needs request-path detection even when the YAML retry
+		// switch is off. Derive this at runtime so turning auto-disable off
+		// restores the original policy without persisting a second switch.
+		Enabled:                         retry.Enabled || retry.AutoDisable,
+		MaxAttempts:                     retry.MaxAttempts,
+		HoldTimeout:                     retry.HoldTimeout.Value(),
+		MinOutputTokens:                 int64(retry.MinOutputTokens),
+		OnExhausted:                     retry.OnExhausted,
+		AutoDisable:                     retry.AutoDisable,
+		AccountCooldown:                 retry.AccountCooldown.Value(),
+		IdleAccountCooldown:             retry.IdleAccountCooldown.Value(),
+		MinEncryptedBytes:               retry.MinEncryptedBytes,
+		EncryptedBytesPerReasoningToken: retry.EncryptedBytesPerReasoningToken,
+		SoftTPS:                         value.SoftTPS,
+		HardTPS:                         value.HardTPS,
+		MinGenerationMS:                 value.MinimumGenerationWindow.Value().Milliseconds(),
+		FailClosed:                      value.FailClosed,
 	}
 }
 

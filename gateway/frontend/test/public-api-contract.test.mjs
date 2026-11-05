@@ -11,6 +11,8 @@ const videoTaskState = await import("../src/public/features/video/video-task-sta
 test("public API contract preserves every active workspace endpoint", () => {
   assert.ok(contracts, "missing public API contract module");
   assert.deepEqual(contracts.publicEndpoints, {
+    authLogin: "/v1/public/auth/login",
+    authLogout: "/v1/public/auth/logout",
     verify: "/v1/public/verify",
     models: "/v1/public/models",
     chat: "/v1/public/chat/completions",

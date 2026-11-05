@@ -44,8 +44,8 @@
 <td valign="middle">Right Code 是一个企业级 AI Agent 分发平台，主要提供稳定的 Claude Code、Codex、Gemini 等模型的中转服务。充值即可开票，企业、团队用户一对一对接。感谢 Right Code 提供的 Tokens 支持，点击 <a href="https://www.right.codes/register">此处</a> 注册并开始使用！</td>
 </tr>
 <tr>
-<td width="200" align="center" valign="middle"><a href="https://www.swiftproxy.net/?ref=grok2api"><img src="frontend/public/sponner/swift-proxy.png" alt="Swiftproxy" width="180"></a></td>
-<td valign="middle">Swiftproxy 提供 9000 万+ 纯净住宅 IP，覆盖全球 220+ 个国家和地区，支持 HTTP(S)/SOCKS5、IP 轮换、Sticky Session 及精准地域定位，为 API 服务和自动化工作流提供稳定的全球网络访问，适用于 API 请求、自动化、数据采集及地域访问等场景。住宅代理低至 $0.7/GB，支持免费测试，使用优惠码 PROXY90 可享 9 折优惠。<a href="https://www.swiftproxy.net/?ref=grok2api">立即体验 Swiftproxy</a>。</td>
+<td width="200" align="center" valign="middle"><a href="https://www.rapidproxy.io/?ref=grok2api"><img src="frontend/public/sponner/rapid-proxy.jpg" alt="RapidProxy" width="180"></a></td>
+<td valign="middle">RapidProxy is a data collection proxy solution built for developers, providing stable and reliable residential proxy services. With 90M+ global residential IPs and 200+ country coverage, intelligent rotation, and precise geo-targeting, it helps projects such as web scraping, AI data training, SEO monitoring, and e-commerce data analysis break through access restrictions and improve data collection efficiency. It supports mainstream automation frameworks such as Playwright, Selenium, and Puppeteer, with prices as low as $0.65/GB — <a href="https://www.rapidproxy.io/?ref=grok2api">start your free test now</a>.</td>
 </tr>
 </table>
 
@@ -314,9 +314,13 @@ qualityGuard:
     holdTimeout: 3s
     minOutputTokens: 32
     onExhausted: fail_closed # fail_open | fail_closed
+    # Disable on the first confirmed missing-thinking or degraded-speed hit.
+    autoDisable: true
+    accountCooldown: 12h
+    idleAccountCooldown: 15m
 ```
 
-`requestRetry` runs on the gateway request path and is independent of the sidecar. It is off by default. When enabled, a thinking-model stream with enough visible output and no reasoning is **not delivered**; another account is tried. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Image, video, tool, stored-response, and ForcedEgress probe requests are unchanged.
+`requestRetry` runs on the gateway request path and is independent of the sidecar. The example above explicitly enables it; built-in defaults and `config.example.yaml` leave both `enabled` and `autoDisable` off. Either switch enables request-path quality checks and retries. A thinking-model stream with enough visible output and no streamed reasoning is **not delivered**; another account is tried. `autoDisable: true` disables an account on the first confirmed missing-thinking or degraded output-speed hit (soft-TPS, hard-TPS, or buffered-burst). The Account Maintenance switch controls `autoDisable`; turning it off restores the YAML `requestRetry.enabled` policy. If every attempt still has no reasoning, `onExhausted` either returns `503 quality_degraded` or delivers the last body. Context compaction is exempt from both missing-thinking and output-speed account penalties. Image, video, stored-response, and ForcedEgress probe requests are unchanged. Grok TUI tool turns stay held so 0-thinking dumps cannot skip the gate.
 
 ```bash
 docker compose --profile quality-guard up -d --build

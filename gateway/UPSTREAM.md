@@ -1,13 +1,18 @@
 # Upstream
 
 - Remote: `https://github.com/chenyme/grok2api`
-- Commit: `5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42`
-- Version: `v3.1.6`
-- Imported: `2026-09-23`
+- Commit: `e2fd7ab481a30a1965bb61395d437154cf247c92`
+- Version: `v3.1.8`
+- Imported: `2026-11-05`
 
 ## Selected Updates
 
-The Go and React sources were three-way synchronized through upstream commit `5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42`. Local public workspaces, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+The Go and React sources were three-way synchronized through upstream commit `e2fd7ab481a30a1965bb61395d437154cf247c92`. Local public workspaces, password login, media caching, video extension, five-minute recovery, cross-account retry, WARP routing, SQLite storage, and deployment layout remain preserved.
+
+- Imagine websocket responses are isolated by request ID; video retries preserve the requesting key's account scope and worker-shutdown recovery.
+- Console weekly shared usage, WorkOS/API-key credential recovery, egress cooldowns, and optional account-maintenance controls are synchronized. Automatic deletion of unlinked Console accounts remains off by default.
+- Build consent-token handling, voice timeouts and STT billing, transient retry tracking, Go 1.27 HTTP/2 tests, and dependency security updates are included.
+- Local NSFW request overrides, non-streaming empty-body recovery, HEIC uploads, and LiveKit remain preserved. Console DPoP clock-skew support and its upstream tests are restored together.
 
 - Grok Build 1.0.40 headers, conversation grouping, and catalog-driven reasoning menus are supported, including `minimal`, `max`, and Grok 4.7 capability metadata.
 

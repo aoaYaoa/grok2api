@@ -138,10 +138,12 @@ type ClientKeyDefaultsConfig struct {
 
 // AccountsConfig 是管理接口使用的账号池维护策略输入。
 type AccountsConfig struct {
-	MarkBuildForbiddenReauth  bool
-	BuildForbiddenReauthCodes []string
+	AutoDisableDegradedAccounts bool
+	MarkBuildForbiddenReauth    bool
+	BuildForbiddenReauthCodes   []string
 	// ExcludeBuildBotFlaggedFromScheduling drops bot-risk Build accounts from scheduling only.
 	ExcludeBuildBotFlaggedFromScheduling bool
+	AutoDeleteConsoleUnlinked            bool
 	AutoCleanReauthEnabled               bool
 	AutoCleanReauthInterval              string
 	AutoCleanReauthMinAge                string
@@ -152,6 +154,9 @@ type AccountsConfig struct {
 	BuildForbiddenReauthCodesProvided bool
 	// ExcludeBuildBotFlaggedFromSchedulingProvided preserves the value when an older management client omits the field.
 	ExcludeBuildBotFlaggedFromSchedulingProvided bool
+	AutoDeleteConsoleUnlinkedProvided            bool
+	// AutoDisableDegradedAccountsProvided preserves config.yaml when an older management client omits the field.
+	AutoDisableDegradedAccountsProvided bool
 }
 
 // EditableConfig 聚合管理端允许修改的运行参数。
@@ -445,12 +450,17 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		base.Accounts.BuildForbiddenReauthCodes = append([]string(nil), value.Accounts.BuildForbiddenReauthCodes...)
 	}
 	base.Accounts.ExcludeBuildBotFlaggedFromScheduling = value.Accounts.ExcludeBuildBotFlaggedFromScheduling
+	base.Accounts.AutoDeleteConsoleUnlinked = value.Accounts.AutoDeleteConsoleUnlinked
+	if value.Accounts.AutoDisableDegradedAccounts != nil {
+		base.QualityGuard.RequestRetry.AutoDisable = *value.Accounts.AutoDisableDegradedAccounts
+	}
 	return base
 }
 
 func toDomainConfig(value config.Config) settingsdomain.Config {
 	randomDelay := value.Batch.RandomDelay.Value()
 	accountIsolatedConnections := value.Routing.AccountIsolatedConnections
+	autoDisableDegradedAccounts := value.QualityGuard.RequestRetry.AutoDisable
 	return settingsdomain.Config{
 		Server: settingsdomain.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
 		ProviderBuild: settingsdomain.ProviderBuildConfig{
@@ -509,9 +519,11 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
 		},
 		Accounts: settingsdomain.AccountsConfig{
+			AutoDisableDegradedAccounts:          &autoDisableDegradedAccounts,
 			MarkBuildForbiddenReauth:             value.Accounts.MarkBuildForbiddenReauth,
 			BuildForbiddenReauthCodes:            append([]string(nil), value.Accounts.BuildForbiddenReauthCodes...),
 			ExcludeBuildBotFlaggedFromScheduling: value.Accounts.ExcludeBuildBotFlaggedFromScheduling,
+			AutoDeleteConsoleUnlinked:            value.Accounts.AutoDeleteConsoleUnlinked,
 			AutoCleanReauthEnabled:               value.Accounts.AutoCleanReauthEnabled,
 			AutoCleanReauthInterval:              value.Accounts.AutoCleanReauthInterval.Value(),
 			AutoCleanReauthMinAge:                value.Accounts.AutoCleanReauthMinAge.Value(),
@@ -612,6 +624,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.ClientKeyDefaults.RPMLimit = input.ClientKeyDefaults.RPMLimit
 	next.ClientKeyDefaults.MaxConcurrent = input.ClientKeyDefaults.MaxConcurrent
 	if input.AccountsProvided {
+		if input.Accounts.AutoDisableDegradedAccountsProvided {
+			next.QualityGuard.RequestRetry.AutoDisable = input.Accounts.AutoDisableDegradedAccounts
+		}
 		if input.Accounts.MarkBuildForbiddenReauthProvided {
 			next.Accounts.MarkBuildForbiddenReauth = input.Accounts.MarkBuildForbiddenReauth
 		}
@@ -620,6 +635,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		}
 		if input.Accounts.ExcludeBuildBotFlaggedFromSchedulingProvided {
 			next.Accounts.ExcludeBuildBotFlaggedFromScheduling = input.Accounts.ExcludeBuildBotFlaggedFromScheduling
+		}
+		if input.Accounts.AutoDeleteConsoleUnlinkedProvided {
+			next.Accounts.AutoDeleteConsoleUnlinked = input.Accounts.AutoDeleteConsoleUnlinked
 		}
 		next.Accounts.AutoCleanReauthEnabled = input.Accounts.AutoCleanReauthEnabled
 		next.Accounts.AutoCleanIncludeDisabled = input.Accounts.AutoCleanIncludeDisabled
@@ -753,12 +771,16 @@ func toEditable(cfg config.Config) EditableConfig {
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: cfg.ClientKeyDefaults.RPMLimit, MaxConcurrent: cfg.ClientKeyDefaults.MaxConcurrent},
 		Accounts: AccountsConfig{
+			AutoDisableDegradedAccounts:                  cfg.QualityGuard.RequestRetry.AutoDisable,
+			AutoDisableDegradedAccountsProvided:          true,
 			MarkBuildForbiddenReauth:                     cfg.Accounts.MarkBuildForbiddenReauth,
 			BuildForbiddenReauthCodes:                    append([]string(nil), cfg.Accounts.BuildForbiddenReauthCodes...),
 			ExcludeBuildBotFlaggedFromScheduling:         cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling,
+			AutoDeleteConsoleUnlinked:                    cfg.Accounts.AutoDeleteConsoleUnlinked,
 			MarkBuildForbiddenReauthProvided:             true,
 			BuildForbiddenReauthCodesProvided:            true,
 			ExcludeBuildBotFlaggedFromSchedulingProvided: true,
+			AutoDeleteConsoleUnlinkedProvided:            true,
 			AutoCleanReauthEnabled:                       cfg.Accounts.AutoCleanReauthEnabled,
 			AutoCleanReauthInterval:                      cfg.Accounts.AutoCleanReauthInterval.String(),
 			AutoCleanReauthMinAge:                        cfg.Accounts.AutoCleanReauthMinAge.String(),

@@ -47,9 +47,9 @@ func TestSettingsResponseIncludesBuildTokenAuth(t *testing.T) {
 
 func TestSettingsResponseIncludesRecommendedBuildBaseline(t *testing.T) {
 	response := newSettingsResponse(settingsapp.Snapshot{RecommendedProviderBuild: settingsapp.ProviderBuildRecommendation{
-		ClientVersion: "1.0.40", UserAgent: "grok-shell/1.0.40 (linux; x86_64)",
+		ClientVersion: "1.0.60", UserAgent: "grok-shell/1.0.60 (linux; x86_64)",
 	}})
-	if response.RecommendedProviderBuild.ClientVersion != "1.0.40" || response.RecommendedProviderBuild.UserAgent == "" {
+	if response.RecommendedProviderBuild.ClientVersion != "1.0.60" || response.RecommendedProviderBuild.UserAgent == "" {
 		t.Fatalf("recommended build = %#v", response.RecommendedProviderBuild)
 	}
 }
@@ -152,7 +152,7 @@ func TestLegacySettingsRequestPreservesBuildForbiddenCodesWhenOmitted(t *testing
 		t.Fatal(err)
 	}
 	input := dto.toApplication()
-	if !input.AccountsProvided || !input.Accounts.MarkBuildForbiddenReauthProvided || input.Accounts.BuildForbiddenReauthCodesProvided {
+	if !input.AccountsProvided || !input.Accounts.MarkBuildForbiddenReauthProvided || input.Accounts.BuildForbiddenReauthCodesProvided || input.Accounts.AutoDisableDegradedAccountsProvided {
 		t.Fatalf("legacy field presence was not preserved: %#v", input.Accounts)
 	}
 }

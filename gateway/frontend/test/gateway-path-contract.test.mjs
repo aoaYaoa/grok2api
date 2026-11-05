@@ -90,7 +90,7 @@ test("v3.0.5 Creative Console is wired into the customized admin shell", async (
   const api = await readFile(path.join(frontendRoot, "src/features/creative-console/creative-console-api.ts"), "utf8").catch(() => "");
   const page = await readFile(path.join(frontendRoot, "src/features/creative-console/creative-console-page.tsx"), "utf8").catch(() => "");
 
-  assert.equal(packageJSON.dependencies.marked, "^18.0.6");
+  assert.equal(packageJSON.dependencies.marked, "^18.1.1");
   assert.equal(packageJSON.dependencies["@shadcn/react"], "^0.2.1");
   assert.match(paths, /creativeConsole:\s*"\/creative-console"/);
   assert.match(router, /gatewayRoutePaths\.creativeConsole/);
@@ -139,7 +139,8 @@ test("web quota cells show official remaining capacity and disclose missing medi
 
   assert.match(quota, /formatNumber\(window\.remaining, locale, 0\).*formatNumber\(window\.total, locale, 0\)/s);
   assert.match(quota, /window\.remaining \/ window\.total \* 100/);
-  assert.doesNotMatch(quota, /window\.total - window\.remaining/);
+  const webQuota = quota.slice(quota.indexOf("export function WebQuota("));
+  assert.doesNotMatch(webQuota, /window\.total - window\.remaining/);
   assert.match(quota, /const remainingPercent = Math\.max\(0, 100 - usedPercent\)/);
   assert.match(quota, /formatNumber\(remainingPercent, locale, 1\)/);
   assert.match(quota, /width: `\$\{remainingPercent\}%`/);

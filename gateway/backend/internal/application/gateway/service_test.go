@@ -222,6 +222,9 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	if len(adapter.attempts) != 2 || adapter.attempts[0] != first.ID || adapter.attempts[1] != second.ID {
 		t.Fatalf("attempts = %#v", adapter.attempts)
 	}
+	if got := adapter.transientRetries; len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("payment failover transient retries = %#v, want [0 0]", got)
+	}
 	identity := resolveBuildSessionIdentity(clientKey.ID, account.ProviderBuild, "grok-test", "", "claude-session", nil)
 	expectedCacheKey := identity.upstreamID
 	if adapter.lastPromptCacheKey != expectedCacheKey {
@@ -253,6 +256,9 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("ownership = %#v, err = %v", ownership, err)
 	}
 
+	service.UpdateQualityRetry(QualityRetryRuntime{
+		Enabled: true, AutoDisable: true, MinOutputTokens: 32, SoftTPS: 1, HardTPS: 2,
+	})
 	compacted, err := service.CreateResponse(ctx, Input{
 		RequestID: "req-compact", ClientKey: clientKey, PublicModel: "grok-test", PromptCacheSeed: "claude-session",
 		Body: []byte(`{"model":"grok-test","stream":true,"input":[{"role":"user","content":"continue"},{"type":"compaction_trigger"}]}`), Streaming: true,
@@ -265,12 +271,25 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatal("first token marker is nil")
 	}
 	compacted.MarkFirstToken()
-	compacted.Finalize(Usage{}, "resp-compact", "")
+	time.Sleep(2 * time.Millisecond)
+	compacted.Finalize(Usage{Reported: true, OutputTokens: 120}, "resp-compact", "")
 	_ = compacted.Body.Close()
 	logs, total, err = auditRepo.List(ctx, 0, 10)
 	if err != nil || total != 2 || logs[0].Operation != audit.OperationCompaction || !logs[0].Streaming || logs[0].FirstTokenMS == nil {
 		t.Fatalf("compaction audit = %#v, total=%d, err=%v", logs, total, err)
 	}
+	assertCompactionSpeedExempt := func(record audit.Record) {
+		t.Helper()
+		class, _, _ := audit.ClassifyOutputSpeed(record.OutputTokens, record.ReasoningTokens, *record.FirstTokenMS, record.DurationMS, 1, 2, 1000, false)
+		if class == "" {
+			t.Fatal("compaction fixture must exceed the speed threshold")
+		}
+		credential, err := accountRepo.Get(ctx, second.ID)
+		if err != nil || !credential.Enabled {
+			t.Fatalf("compaction must not disable its account: %#v, err=%v", credential, err)
+		}
+	}
+	assertCompactionSpeedExempt(logs[0])
 	if _, err := responseRepo.Get(ctx, "resp-compact", clientKey.ID, time.Now().UTC()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("compaction response ownership err = %v", err)
 	}
@@ -279,7 +298,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	// the quality hold and is labeled compaction only in the audit record, so
 	// Provider routing and stored-response ownership must remain intact.
 	service.UpdateQualityRetry(QualityRetryRuntime{
-		Enabled: true, MaxAttempts: 2, MinOutputTokens: 32,
+		Enabled: true, AutoDisable: true, MaxAttempts: 2, MinOutputTokens: 32, SoftTPS: 1, HardTPS: 2,
 		OnExhausted: qualityRetryFailClosed, HoldTimeout: time.Second,
 	})
 	adapter.resetAttempts()
@@ -298,7 +317,8 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("TUI compaction body = %q", tuiBody)
 	}
 	tuiCompacted.MarkFirstToken()
-	tuiCompacted.Finalize(Usage{}, "resp-tui-compact", "")
+	time.Sleep(2 * time.Millisecond)
+	tuiCompacted.Finalize(Usage{Reported: true, OutputTokens: 120}, "resp-tui-compact", "")
 	_ = tuiCompacted.Body.Close()
 	if len(adapter.attempts) != 1 || adapter.lastOperation != string(audit.OperationResponses) {
 		t.Fatalf("TUI compaction attempts = %#v, Provider operation = %q", adapter.attempts, adapter.lastOperation)
@@ -307,6 +327,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	if err != nil || total != 3 || logs[0].Operation != audit.OperationCompaction {
 		t.Fatalf("TUI compaction audit = %#v, total=%d, err=%v", logs, total, err)
 	}
+	assertCompactionSpeedExempt(logs[0])
 	if ownership, err := responseRepo.Get(ctx, "resp-tui-compact", clientKey.ID, time.Now().UTC()); err != nil || ownership.AccountID != second.ID {
 		t.Fatalf("TUI compaction ownership = %#v, err=%v", ownership, err)
 	}
@@ -658,6 +679,9 @@ func TestGatewayNonStreamingEmptyIdleCoolsAccountAndSwitches(t *testing.T) {
 	if len(adapter.attempts) != 2 || adapter.attempts[0] != credentials[0].ID || adapter.attempts[1] != credentials[1].ID {
 		t.Fatalf("attempts = %#v", adapter.attempts)
 	}
+	if got := adapter.transientRetries; len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Fatalf("idle timeout transient retries = %#v, want [0 1]", got)
+	}
 	cooled, err := accountRepo.Get(ctx, credentials[0].ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1003,6 +1027,13 @@ func TestGatewaySSOBlockedForbiddenMarksInvalidAndSwitchesAccount(t *testing.T) 
 			testGatewaySSOFailureMarksInvalidAndSwitchesAccount(t, providerValue, http.StatusForbidden, `{"error":{"code":7,"message":"User is blocked [WKE=unauthorized:blocked-user]"}}`)
 		})
 	}
+}
+
+// Console accounts created before the Grok/Cursor unification answer every
+// call with 403 "no credits or licenses yet". That is permanent, so the
+// account must be retired instead of being retried as an egress 403.
+func TestGatewayConsoleNoCreditsForbiddenMarksInvalidAndSwitchesAccount(t *testing.T) {
+	testGatewaySSOFailureMarksInvalidAndSwitchesAccount(t, account.ProviderConsole, http.StatusForbidden, `{"code":"The caller does not have permission to execute the specified operation","error":"permission-denied: no credits or licenses yet"}`)
 }
 
 func testGatewaySSOFailureMarksInvalidAndSwitchesAccount(t *testing.T, providerValue account.Provider, failureStatus int, failureBody string) {
@@ -2107,7 +2138,7 @@ func TestParseFreeQuotaExhaustionCurrentBuildFreeLimit(t *testing.T) {
 	}
 }
 
-func TestGatewayUnknownBuildForbiddenTraversesAllAccountsWithoutCooldown(t *testing.T) {
+func TestGatewayUnknownBuildForbiddenTraversesAllAccountsWithCooldown(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "systemic-forbidden.db"))
 	if err != nil {
@@ -2177,8 +2208,8 @@ func TestGatewayUnknownBuildForbiddenTraversesAllAccountsWithoutCooldown(t *test
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		if observed.FailureCount != 0 || observed.CooldownUntil != nil || observed.AuthStatus != account.AuthStatusActive {
-			t.Fatalf("account %d was penalized after unknown 403: %#v", credential.ID, observed)
+		if observed.FailureCount == 0 || observed.CooldownUntil == nil || observed.AuthStatus != account.AuthStatusActive {
+			t.Fatalf("account %d was not cooled down after unknown Build 403: %#v", credential.ID, observed)
 		}
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
@@ -2245,6 +2276,9 @@ func TestGatewayRefreshesAndRetriesBuildUnauthorizedOnce(t *testing.T) {
 	_ = result.Body.Close()
 	if string(body) != "ok" || adapter.attempts.Load() != 2 || adapter.refreshes.Load() != 1 {
 		t.Fatalf("body=%q attempts=%d refreshes=%d", body, adapter.attempts.Load(), adapter.refreshes.Load())
+	}
+	if got := adapter.TransientRetries(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("auth resubmit transient retries = %#v, want [0 0]", got)
 	}
 	updated, err := accountRepo.Get(ctx, credential.ID)
 	if err != nil {
@@ -3073,6 +3107,7 @@ type failoverAdapter struct {
 	failureBody            string
 	failureHeader          http.Header
 	attempts               []uint64
+	transientRetries       []int
 	lastMethod             string
 	lastPath               string
 	lastPromptCacheKey     string
@@ -3736,6 +3771,9 @@ func TestGatewayGeneric429CoolsAccountAndRotates(t *testing.T) {
 	if attempts := adapter.Attempts(); len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
 		t.Fatalf("generic 429 must rotate, attempts=%#v", attempts)
 	}
+	if got := adapter.TransientRetries(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("rate-limit rotation must not count as a transient retry: %#v", got)
+	}
 	cooled, err := accountRepo.Get(ctx, credentials[0].ID)
 	if err != nil {
 		t.Fatal(err)
@@ -4188,8 +4226,8 @@ func TestGatewayUnknownBuildForbiddenRotatesWithoutPenalizingAccount(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.AuthStatus != account.AuthStatusActive || observed.FailureCount != 0 || observed.CooldownUntil != nil {
-		t.Fatalf("unknown 403 penalized first account: %#v", observed)
+	if observed.AuthStatus != account.AuthStatusActive || observed.FailureCount == 0 || observed.CooldownUntil == nil {
+		t.Fatalf("unknown Build 403 did not cool down first account: %#v", observed)
 	}
 	candidates, err := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, 0, model, "")
 	if err != nil {
@@ -4600,11 +4638,12 @@ func (a *barePermissionEgressAdapter) ForwardResponse(context.Context, provider.
 }
 
 type scriptedBuildAdapter struct {
-	mu            sync.Mutex
-	attempts      []uint64
-	responses     map[uint64][]scriptedBuildResponse
-	refreshes     atomic.Int64
-	lastRateLimit *provider.RateLimitMetadata
+	mu               sync.Mutex
+	attempts         []uint64
+	transientRetries []int
+	responses        map[uint64][]scriptedBuildResponse
+	refreshes        atomic.Int64
+	lastRateLimit    *provider.RateLimitMetadata
 }
 
 func (a *scriptedBuildAdapter) Provider() account.Provider { return account.ProviderBuild }
@@ -4618,6 +4657,7 @@ func (a *scriptedBuildAdapter) ForwardResponse(_ context.Context, request provid
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.attempts = append(a.attempts, request.Credential.ID)
+	a.transientRetries = append(a.transientRetries, request.TransientRetry)
 	queue := a.responses[request.Credential.ID]
 	if len(queue) == 0 {
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"resp-default"}`))}, nil
@@ -4647,6 +4687,11 @@ func (a *scriptedBuildAdapter) Attempts() []uint64 {
 	defer a.mu.Unlock()
 	return append([]uint64(nil), a.attempts...)
 }
+func (a *scriptedBuildAdapter) TransientRetries() []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]int(nil), a.transientRetries...)
+}
 
 type systemicForbiddenAdapter struct {
 	mu       sync.Mutex
@@ -4672,6 +4717,8 @@ func (spendingLimitAdapter) ForwardResponse(context.Context, provider.ResponseRe
 }
 
 type authRescueAdapter struct {
+	mu                   sync.Mutex
+	transientRetries     []int
 	attempts             atomic.Int64
 	refreshes            atomic.Int64
 	rejectAll            atomic.Bool
@@ -4686,6 +4733,9 @@ func (a *authRescueAdapter) Definition() provider.Definition {
 }
 func (a *authRescueAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 	a.attempts.Add(1)
+	a.mu.Lock()
+	a.transientRetries = append(a.transientRetries, request.TransientRetry)
+	a.mu.Unlock()
 	if a.denyChat.Load() {
 		if a.recoverDenied.Load() {
 			return &provider.Response{
@@ -4718,6 +4768,11 @@ func (a *authRescueAdapter) ForwardResponse(_ context.Context, request provider.
 		return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: &responseBodyErrorReadCloser{err: io.ErrUnexpectedEOF}}, nil
 	}
 	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
+}
+func (a *authRescueAdapter) TransientRetries() []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]int(nil), a.transientRetries...)
 }
 func (a *authRescueAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {
 	a.refreshes.Add(1)
@@ -5036,6 +5091,7 @@ func (a *failoverAdapter) ForwardResponse(_ context.Context, request provider.Re
 	}
 	a.mu.Lock()
 	a.attempts = append(a.attempts, request.Credential.ID)
+	a.transientRetries = append(a.transientRetries, request.TransientRetry)
 	a.forwardedModels = append(a.forwardedModels, request.Model)
 	a.lastMethod = request.Method
 	a.lastPath = request.Path
@@ -5084,6 +5140,7 @@ func (a *failoverAdapter) resetAttempts() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.attempts = nil
+	a.transientRetries = nil
 	a.forwardedModels = nil
 	a.lastMethod = ""
 	a.lastPath = ""
@@ -5193,6 +5250,44 @@ func TestIsUpstreamStreamFailureIncludesIdleTimeout(t *testing.T) {
 	}
 	if isUpstreamStreamFailure("") || isUpstreamStreamFailure("quality_degraded") || isUpstreamStreamFailure("client_stream_interrupted") || isUpstreamStreamFailure("request_canceled") {
 		t.Fatal("non-stream codes must not look like mid-stream failures")
+	}
+}
+
+func TestIsBuildTransientRetryStatusMatchesOfficialClient(t *testing.T) {
+	for _, status := range []int{500, 501, 503, 520, 524, 529, 530, 599} {
+		if !isBuildTransientRetryStatus(status) {
+			t.Fatalf("status %d must count as a transient retry", status)
+		}
+	}
+	for _, status := range []int{400, 401, 402, 403, 429, 525, 526, 600} {
+		if isBuildTransientRetryStatus(status) {
+			t.Fatalf("status %d must not count as a transient retry", status)
+		}
+	}
+}
+
+func TestBuildOriginTLSFailureIsNotRetryable(t *testing.T) {
+	for _, status := range []int{525, 526} {
+		response := &provider.Response{StatusCode: status, Header: http.Header{"X-Should-Retry": {"true"}}}
+		if isRetryableResponse(response, account.ProviderBuild) {
+			t.Fatalf("Build status %d must be terminal even with X-Should-Retry:true", status)
+		}
+		if !isRetryableResponse(response, account.ProviderWeb) {
+			t.Fatalf("non-Build status %d behavior changed unexpectedly", status)
+		}
+	}
+}
+
+func TestIsBuildTransientRetryErrorExcludesSemanticFailures(t *testing.T) {
+	for _, err := range []error{neterrorpkg.ErrUpstreamResponseEmpty, errQualityEmptyStream, neterrorpkg.ErrUpstreamOutputLoop} {
+		if isBuildTransientRetryError(err) {
+			t.Fatalf("semantic failure %v must not count as a transient retry", err)
+		}
+	}
+	for _, err := range []error{errors.New("connection reset"), &neterrorpkg.IdleTimeoutError{}} {
+		if !isBuildTransientRetryError(err) {
+			t.Fatalf("transport failure %v must count as a transient retry", err)
+		}
 	}
 }
 

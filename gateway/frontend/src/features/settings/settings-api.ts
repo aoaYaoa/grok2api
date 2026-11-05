@@ -27,9 +27,11 @@ export type SettingsConfigDTO = {
   audit: { bufferSize: number; batchSize: number; flushInterval: string; commitDelayMS: number; retentionDays?: number };
   clientKeyDefaults: { rpmLimit: number; maxConcurrent: number };
   accounts: {
+    autoDisableDegradedAccounts: boolean;
     markBuildForbiddenReauth: boolean;
     buildForbiddenReauthCodes: string[];
     excludeBuildBotFlaggedFromScheduling: boolean;
+    autoDeleteConsoleUnlinked: boolean;
     autoCleanReauthEnabled: boolean;
     autoCleanReauthInterval: string;
     autoCleanReauthMinAge: string;
@@ -139,9 +141,11 @@ const settingsConfigValidator = hasShape({
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),
   // Older backends may omit accounts; withSettingsDefaults supplies a safe local default.
   accounts: isOptional(hasShape({
+    autoDisableDegradedAccounts: isOptional(isBoolean),
     markBuildForbiddenReauth: isOptional(isBoolean),
     buildForbiddenReauthCodes: isOptional(isArrayOf(isString)),
     excludeBuildBotFlaggedFromScheduling: isOptional(isBoolean),
+    autoDeleteConsoleUnlinked: isOptional(isBoolean),
     autoCleanReauthEnabled: isBoolean,
     autoCleanReauthInterval: isString,
     autoCleanReauthMinAge: isString,
@@ -149,9 +153,11 @@ const settingsConfigValidator = hasShape({
   })),
 });
 const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
+  autoDisableDegradedAccounts: false,
   markBuildForbiddenReauth: false,
   buildForbiddenReauthCodes: ["permission-denied"],
   excludeBuildBotFlaggedFromScheduling: false,
+  autoDeleteConsoleUnlinked: false,
   autoCleanReauthEnabled: false,
   autoCleanReauthInterval: "10m",
   autoCleanReauthMinAge: "1h",
@@ -188,9 +194,11 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
         },
       },
       accounts: {
+        autoDisableDegradedAccounts: accounts.autoDisableDegradedAccounts ?? false,
         markBuildForbiddenReauth: accounts.markBuildForbiddenReauth ?? false,
         buildForbiddenReauthCodes: accounts.buildForbiddenReauthCodes ?? ["permission-denied"],
         excludeBuildBotFlaggedFromScheduling: accounts.excludeBuildBotFlaggedFromScheduling ?? false,
+        autoDeleteConsoleUnlinked: accounts.autoDeleteConsoleUnlinked ?? false,
         autoCleanReauthEnabled: accounts.autoCleanReauthEnabled ?? false,
         autoCleanReauthInterval: accounts.autoCleanReauthInterval || "10m",
         autoCleanReauthMinAge: accounts.autoCleanReauthMinAge || "1h",

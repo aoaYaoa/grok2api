@@ -21,7 +21,13 @@ var (
 	ErrAuthorizationDenied  = errors.New("authorization denied")
 	ErrCredentialLimit      = errors.New("credential count exceeds limit")
 	ErrUnauthorized         = errors.New("upstream credential unauthorized")
-	ErrBirthDateAlreadySet  = errors.New("upstream birth date is already set")
+	// ErrConsoleUnlinked accompanies ErrUnauthorized for Grok Console accounts
+	// never linked to Cursor; they have no Console credit pool at all.
+	ErrConsoleUnlinked = errors.New("grok console account not linked to cursor")
+	// ErrEgressBlocked marks a request skipped locally because its egress is
+	// in a Cloudflare block cool-down; no upstream call was made.
+	ErrEgressBlocked       = errors.New("egress blocked by cloudflare, waiting for cool-down")
+	ErrBirthDateAlreadySet = errors.New("upstream birth date is already set")
 )
 
 // HTTPStatusError 允许流式或异步 Provider 在无法返回 Response 时保留上游状态码。
@@ -382,10 +388,13 @@ type ResponseResourceRequest struct {
 	AllowClientToolCacheRoute bool
 	// GrokTurnIndex is the explicit Grok Shell client turn; it is validated before Build egress and never fabricated by the server.
 	GrokTurnIndex string
-	IdempotencyID string
-	Streaming     bool
-	NormalizeBody bool
-	Operation     string
+	// TransientRetry is the one-based turn resubmission attempt. Zero marks the
+	// initial submission and is omitted from the upstream request.
+	TransientRetry int
+	IdempotencyID  string
+	Streaming      bool
+	NormalizeBody  bool
+	Operation      string
 	// NormalizedMetadata receives non-sensitive metadata from the exact payload
 	// normalization used for the physical upstream request. The caller owns the
 	// value; adapters update it synchronously before network I/O.
@@ -482,18 +491,22 @@ type DeviceAuthorization struct {
 
 // CredentialSeed represents an OAuth credential not yet persisted after login or import.
 type CredentialSeed struct {
-	Provider                account.Provider
-	AuthType                account.AuthType
-	WebTier                 account.WebTier
-	Name                    string
-	Email                   string
-	UserID                  string
-	TeamID                  string
-	SourceKey               string
-	OIDCClientID            string
-	AccessToken             string
-	RefreshToken            string
-	CloudflareCookies       string
+	Provider          account.Provider
+	AuthType          account.AuthType
+	WebTier           account.WebTier
+	Name              string
+	Email             string
+	UserID            string
+	TeamID            string
+	SourceKey         string
+	OIDCClientID      string
+	AccessToken       string
+	RefreshToken      string
+	CloudflareCookies string
+	// ConsoleAPIKeyID and ConsoleWorkOSSession (plaintext JSON of the WorkOS
+	// cookie triple) are optional grok_console caches supplied by imports.
+	ConsoleAPIKeyID         string
+	ConsoleWorkOSSession    string
 	ExpiresAt               time.Time
 	WebNSFWEnabledAt        *time.Time
 	WebTermsAcceptedAt      *time.Time
